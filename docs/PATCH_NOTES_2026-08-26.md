@@ -658,3 +658,22 @@ Team Builder 자체의 검증 메커니즘은 기존 v0.6을 기준으로 유지
 - Team Box / Draft / Regulation / Species Clause / Item Clause / 기술 legality
 - localStorage 및 운영 Supabase / `ypl_data_v4` 구조
 
+
+---
+
+## 6.4.1 — 기술 입력 hover 범위 조정
+
+6.4에서 기술 입력 카드 전체에 hover/focus-within 반응을 적용했으나, 실제 선택 컨트롤보다 카드 전체가 강조되어 시각적으로 과한 문제가 확인되어 범위를 축소했다.
+
+### 변경사항
+
+- 기술 1~4의 바깥 카드(`tb-move-field`)는 hover/focus 시 배경과 테두리가 변하지 않도록 원래 상태 유지
+- 실제 기술명 입력·드롭다운 컨트롤(`tb-input`)에만 기존 hover/focus 테두리 반응 유지
+- 기술 메타데이터·설명 영역은 hover에 따라 함께 강조되지 않음
+- 라이트/다크 모드 모두 기존 디자인 토큰을 그대로 사용
+
+### 유지한 항목
+
+- 6.4의 Regulation / 파이컵 추가 룰 / 포켓몬 목록 / 팀 슬롯 / 특성 / 성격 / 도구 / Stat Point / Team Box 인터랙션
+- 상단 Team Validation 배치 및 검증 로직
+- 6.3의 YPL Tools 위치·크기·색상·다크모드 처리

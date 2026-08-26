@@ -1,9 +1,9 @@
 import React, { useEffect, useRef, useState } from "react";
 import "./navigation-tools.css";
 
-export const NAV_ITEMS_BEFORE_TOOLS = [["about","소개"],["news","공지"],["board","게시판"],["records","기록"],["bracket","대진표"]];
-export const TOOL_ITEMS = [["builder","팀빌더"]];
-export const NAV_ITEMS_AFTER_TOOLS = [["titles","칭호"],["champions","명예의 전당"]];
+export const NAV_ITEMS_BEFORE_TOOLS = [["about","소개"],["news","공지"],["board","게시판"],["records","기록"],["bracket","대진표"],["titles","칭호"],["champions","명예의 전당"]];
+export const TOOL_ITEMS = [["builder","팀 빌더"]];
+export const NAV_ITEMS_AFTER_TOOLS = [];
 export const NAV_ITEMS = [...NAV_ITEMS_BEFORE_TOOLS, ...TOOL_ITEMS, ...NAV_ITEMS_AFTER_TOOLS];
 
 function useOutsideClose(ref, close) {

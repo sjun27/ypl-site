@@ -120,7 +120,7 @@
 .tb-field-meta{font-size:10px;color:var(--muted2);margin-top:5px;line-height:1.45;}
 .tb-moves{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
 .tb-move-field{padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--s-soft);transition:border-color .16s,background .16s;}
-.tb-move-field:hover,.tb-move-field:focus-within{border-color:var(--cyan);background:var(--s-card);}
+.tb-move-field:hover,.tb-move-field:focus-within{border-color:var(--line);background:var(--s-soft);}
 
 .tb-validation-wrap{margin:-2px 0 18px;}
 .tb-validation{border:1px solid var(--line2);border-radius:16px;padding:13px 16px;background:var(--s-card);transition:border-color .18s,background .18s;}
