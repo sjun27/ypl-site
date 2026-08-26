@@ -1,4 +1,5 @@
 import React from "react";
+import { Reveal } from "../components/index.js";
 
 const ACC={cyan:"var(--cyan)",mint:"var(--mint)",gold:"var(--gold)"};
 const ACC_BG={cyan:"rgba(59,182,236,.13)",mint:"rgba(84,207,177,.13)",gold:"rgba(236,193,92,.13)"};
@@ -18,7 +19,7 @@ const LEAGUES2 = [
 ];
 
 /* ============================== ABOUT ============================== */
-export default function AboutPage({ Reveal }) {
+export default function AboutPage() {
   return (<section className="sec">
     <Reveal className="sec-head"><div className="kick">About</div><h2>우리들의 이야기</h2>
       <p className="sub">연세대학교 포켓몬스터 동아리인 포켓몬 센터 연세점, 일명 포센연에서 시작된 배틀 리그의 발자취입니다.</p>

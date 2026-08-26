@@ -1,33 +1,8 @@
 import React, { useEffect, useState } from "react";
+import { ListSearch, Modal, Pager, Reveal } from "../components/index.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const PAGE_SIZE = 10;
-
-function ListSearch({ q, setQ, placeholder, count }){
-  return (<div className="list-tools">
-    <div className="lsearch">
-      <span className="ls-ico" aria-hidden="true">🔍</span>
-      <input value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder} aria-label="검색"/>
-      {q&&<button className="ls-clear" onClick={()=>setQ("")} aria-label="검색어 지우기">✕</button>}
-    </div>
-    {q&&<span className="list-count">{count}건</span>}
-  </div>);
-}
-
-function Pager({ page, pages, onGo }){
-  if(pages<=1) return null;
-  const span=2; let lo=Math.max(1,page-span), hi=Math.min(pages,page+span);
-  if(page<=span) hi=Math.min(pages,1+span*2);
-  if(page>pages-span) lo=Math.max(1,pages-span*2);
-  const win=[]; for(let p=lo;p<=hi;p++) win.push(p);
-  return (<div className="pager">
-    <button className="pg-btn" onClick={()=>onGo(page-1)} disabled={page<=1} aria-label="이전">‹</button>
-    {lo>1&&<><button className="pg-btn" onClick={()=>onGo(1)}>1</button>{lo>2&&<span className="pg-dots">…</span>}</>}
-    {win.map(p=>(<button key={p} className={"pg-btn"+(p===page?" on":"")} onClick={()=>onGo(p)}>{p}</button>))}
-    {hi<pages&&<>{hi<pages-1&&<span className="pg-dots">…</span>}<button className="pg-btn" onClick={()=>onGo(pages)}>{pages}</button></>}
-    <button className="pg-btn" onClick={()=>onGo(page+1)} disabled={page>=pages} aria-label="다음">›</button>
-  </div>);
-}
 
 /* ============================== BOARD (자유게시판) ============================== */
 function fmtDT(iso){ try{ const d=new Date(iso); const p=(n)=>String(n).padStart(2,"0"); return `${d.getFullYear()}.${p(d.getMonth()+1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }catch{ return ""; } }
@@ -49,7 +24,7 @@ function MediaEmbed({ url }){
 }
 function mediaIcon(url){ const m=parseMedia(url); return m?(m.type==="youtube"?"🎬":m.type==="image"?"🖼":"🔗"):null; }
 
-function BoardCompose({ onClose, onSubmit, Modal }){
+function BoardCompose({ onClose, onSubmit }){
   const [nick,setNick]=useState(""); const [title,setTitle]=useState(""); const [body,setBody]=useState(""); const [pin,setPin]=useState(""); const [link,setLink]=useState(""); const [secret,setSecret]=useState(false);
   const submit=()=>{ if(!nick.trim()){alert("닉네임을 입력해주세요.");return;} if(!title.trim()){alert("제목을 입력해주세요.");return;}
     onSubmit({nick:nick.trim().slice(0,20),title:title.trim().slice(0,60),body:body.trim(),pin:pin.trim(),link:link.trim(),secret}); };
@@ -88,7 +63,7 @@ function CommentForm({ onSubmit }){
   </div>);
 }
 
-export default function BoardPage({ data, admin, save, flash, Reveal, Modal }){
+export default function BoardPage({ data, admin, save, flash }){
   const [q,setQ]=useState(""); const [page,setPage]=useState(1);
   const all=[...(data.board||[])].filter(p=>admin||!p.secret).sort((a,b)=>(a.createdAt<b.createdAt?1:-1));
   const kw=q.trim().toLowerCase();
@@ -141,6 +116,6 @@ export default function BoardPage({ data, admin, save, flash, Reveal, Modal }){
         </div>);})}
     </div>
     <Pager page={cur} pages={pages} onGo={setPage}/>
-    {compose&&<BoardCompose onClose={()=>setCompose(false)} onSubmit={addPost} Modal={Modal}/>}
+    {compose&&<BoardCompose onClose={()=>setCompose(false)} onSubmit={addPost}/>}
   </section>);
 }

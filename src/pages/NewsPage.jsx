@@ -1,33 +1,10 @@
 import React, { useEffect, useState } from "react";
+import { Dropdown, ListSearch, Modal, Pager, Reveal } from "../components/index.js";
 
 function fmtDT(iso){ try{ const d=new Date(iso); const p=(n)=>String(n).padStart(2,"0"); return `${d.getFullYear()}.${p(d.getMonth()+1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }catch{ return ""; } }
 
 const PAGE_SIZE=10;
-function ListSearch({ q, setQ, placeholder, count }){
-  return (<div className="list-tools">
-    <div className="lsearch">
-      <span className="ls-ico" aria-hidden="true">🔍</span>
-      <input value={q} onChange={e=>setQ(e.target.value)} placeholder={placeholder} aria-label="검색"/>
-      {q&&<button className="ls-clear" onClick={()=>setQ("")} aria-label="검색어 지우기">✕</button>}
-    </div>
-    {q&&<span className="list-count">{count}건</span>}
-  </div>);
-}
-function Pager({ page, pages, onGo }){
-  if(pages<=1) return null;
-  const span=2; let lo=Math.max(1,page-span), hi=Math.min(pages,page+span);
-  if(page<=span) hi=Math.min(pages,1+span*2);
-  if(page>pages-span) lo=Math.max(1,pages-span*2);
-  const win=[]; for(let p=lo;p<=hi;p++) win.push(p);
-  return (<div className="pager">
-    <button className="pg-btn" onClick={()=>onGo(page-1)} disabled={page<=1} aria-label="이전">‹</button>
-    {lo>1&&<><button className="pg-btn" onClick={()=>onGo(1)}>1</button>{lo>2&&<span className="pg-dots">…</span>}</>}
-    {win.map(p=>(<button key={p} className={"pg-btn"+(p===page?" on":"")} onClick={()=>onGo(p)}>{p}</button>))}
-    {hi<pages&&<>{hi<pages-1&&<span className="pg-dots">…</span>}<button className="pg-btn" onClick={()=>onGo(pages)}>{pages}</button></>}
-    <button className="pg-btn" onClick={()=>onGo(page+1)} disabled={page>=pages} aria-label="다음">›</button>
-  </div>);
-}
-export default function NewsPage({ data, admin, setModal, save, submitForm, refresh, Reveal, Modal, Dropdown }) {
+export default function NewsPage({ data, admin, setModal, save, submitForm, refresh }) {
   const [q,setQ]=useState(""); const [page,setPage]=useState(1);
   const [fill,setFill]=useState(null); const [respId,setRespId]=useState(null);
   const [open,setOpen]=useState(()=>new Set());
@@ -84,8 +61,8 @@ export default function NewsPage({ data, admin, setModal, save, submitForm, refr
         </div>);})}
     </Reveal>
     <Pager page={cur} pages={pages} onGo={setPage}/>
-    {fillAnn&&<FormFillModal ann={fillAnn} onClose={()=>setFill(null)} onSubmit={(answers)=>submitForm(fillAnn.id,answers)} Modal={Modal} Dropdown={Dropdown}/>}
-    {respAnn&&<FormResponsesModal ann={respAnn} onClose={()=>setRespId(null)} onDeleteResp={delResp} Modal={Modal}/>}
+    {fillAnn&&<FormFillModal ann={fillAnn} onClose={()=>setFill(null)} onSubmit={(answers)=>submitForm(fillAnn.id,answers)}/>}
+    {respAnn&&<FormResponsesModal ann={respAnn} onClose={()=>setRespId(null)} onDeleteResp={delResp}/>}
   </section>);
 }
 
@@ -127,7 +104,7 @@ function PublicResponses({ ann, compact, onRefresh, updatedAt }){
 }
 
 /* ===== 신청서 폼 — 참가자 작성 / 관리자 응답 보기 ===== */
-function FormFillModal({ ann, onClose, onSubmit, Modal, Dropdown }){
+function FormFillModal({ ann, onClose, onSubmit }){
   const form=ann.form||{}; const fields=form.fields||[];
   const [ans,setAns]=useState({}); const [done,setDone]=useState(false); const [busy,setBusy]=useState(false);
   const set=(id,v)=>setAns(a=>({...a,[id]:v}));
@@ -155,7 +132,7 @@ function FormFillModal({ ann, onClose, onSubmit, Modal, Dropdown }){
     </div>
   </Modal>);
 }
-function FormResponsesModal({ ann, onClose, onDeleteResp, Modal }){
+function FormResponsesModal({ ann, onClose, onDeleteResp }){
   const form=ann.form||{}; const fields=form.fields||[]; const resp=[...(form.responses||[])].sort((a,b)=>(a.createdAt<b.createdAt?-1:1));
   const cell=(v)=>Array.isArray(v)?v.join(", "):(v==null?"":String(v));
   const csv=()=>{

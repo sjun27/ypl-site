@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
+import { Reveal } from "../components/index.js";
 
 /* ============================== CHAMPIONS ============================== */
-export default function ChampionsPage({ data, admin, setModal, Reveal, normTeam }) {
+export default function ChampionsPage({ data, admin, setModal, normTeam }) {
   const champs=[...data.champions].sort((a,b)=>a.season-b.season);
   const [pop,setPop]=useState(null);
   useEffect(()=>{ if(!pop) return;

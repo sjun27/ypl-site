@@ -1,9 +1,10 @@
 import React, { useState } from "react";
+import { Reveal, StandTable } from "../components/index.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 /* ============================== RECORDS ============================== */
-export default function RecordsPage({ data, admin, setModal, save, Reveal, StandTable }) {
+export default function RecordsPage({ data, admin, setModal, save }) {
   const [tab,setTab]=useState("rank");
   return (<section className="sec">
     <Reveal className="sec-head"><div className="kick">Records &amp; Stats</div><h2>기록</h2>
@@ -14,13 +15,13 @@ export default function RecordsPage({ data, admin, setModal, save, Reveal, Stand
     </Reveal>
     <Reveal tag="p" className="pts-note" style={{margin:"0 0 16px"}}>우승 <b>60</b>점, 준우승 <b>40</b>점, 4강 <b>20</b>점이 기본 포인트 기준입니다. 팀전 여부, 팀원 수, 대회 사정에 따라 변동될 수 있습니다.</Reveal>
     <div className="swap" key={tab}>
-      {tab==="rank"&&<RankView data={data} admin={admin} setModal={setModal} save={save} StandTable={StandTable}/>}
-      {tab==="season"&&<SeasonView data={data} admin={admin} setModal={setModal} save={save} StandTable={StandTable}/>}
+      {tab==="rank"&&<RankView data={data} admin={admin} setModal={setModal} save={save}/>}
+      {tab==="season"&&<SeasonView data={data} admin={admin} setModal={setModal} save={save}/>}
       {tab==="tour"&&<TourView data={data} admin={admin} setModal={setModal}/>}
     </div>
   </section>);
 }
-function RankView({ data, admin, setModal, save, StandTable }) {
+function RankView({ data, admin, setModal, save }) {
   const eras=data.rankings||[]; const [sel,setSel]=useState(eras[0]?.key);
   const era=eras.find(e=>e.key===sel)||eras[0];
   const addEra=()=>{ const name=(prompt("새 누적 랭킹 탭 이름 (예: 클래식)")||"").trim(); if(!name)return; const key="r_"+uid(); save({...data,rankings:[...eras,{key,label:name,rows:[]}]}); setSel(key); };
@@ -33,7 +34,7 @@ function RankView({ data, admin, setModal, save, StandTable }) {
     </div>
   </>);
 }
-function SeasonView({ data, admin, setModal, save, StandTable }) {
+function SeasonView({ data, admin, setModal, save }) {
   const seasons=data.seasons||[]; const [sel,setSel]=useState(Math.max(0,seasons.length-1));
   const addSeason=()=>{ const name=(prompt("새 시즌 이름 (예: YPL 시즌 3)")||"").trim(); if(!name)return; save({...data,seasons:[...seasons,{name,rows:[]}]}); setSel(seasons.length); };
   const s=seasons[sel];

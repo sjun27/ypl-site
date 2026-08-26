@@ -1,7 +1,8 @@
 import React from "react";
+import { Reveal } from "../components/index.js";
 
 /* ============================== TITLES ============================== */
-export default function TitlesPage({ data, admin, setModal, Reveal }) {
+export default function TitlesPage({ data, admin, setModal }) {
   return (<section className="sec">
     <Reveal className="sec-head"><div className="kick">Titles</div><h2>칭호</h2>
       <p className="sub">특정 조건을 달성한 트레이너에게 주어지는 명예의 칭호 목록입니다.</p>

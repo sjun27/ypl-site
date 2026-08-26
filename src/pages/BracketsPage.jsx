@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { Dropdown, Modal, Reveal } from "../components/index.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -311,7 +312,7 @@ function downloadBracketPng(b,nameOf){
   bkDownload(cv,`${b.name}_대진표.png`);
 }
 
-function BracketWizard({ onClose, onCreate, Modal }){
+function BracketWizard({ onClose, onCreate }){
   const [step,setStep]=useState(1);
   const [name,setName]=useState("");
   const [mode,setMode]=useState("single");      // single=개인전, team=팀전
@@ -383,7 +384,7 @@ function BracketWizard({ onClose, onCreate, Modal }){
 
 /* ===== 팀 대결(선발 순서 + 에이스 결정전) ===== */
 function seriesScore(s){ let a=0,b=0; (s?.games||[]).forEach(w=>{if(w==="a")a++;else if(w==="b")b++;}); if(s?.ace&&s.ace.winner){ if(s.ace.winner==="a")a++; else b++; } return [a,b]; }
-function TeamMatchModal({ teamA, teamB, init, onClose, onSave, Modal, Dropdown }){
+function TeamMatchModal({ teamA, teamB, init, onClose, onSave }){
   const [la,setLa]=useState(init?.lineupA?.length?init.lineupA:[...(teamA.members||[])]);
   const [lb,setLb]=useState(init?.lineupB?.length?init.lineupB:[...(teamB.members||[])]);
   const N=Math.min(la.length,lb.length);
@@ -485,7 +486,7 @@ function ElimBoard({ g, nameOf, admin, onPick, teamMode, onOpenTeam }){
 }
 
 /* ===== 파티/엔트리 기록 ===== */
-function PartyEditor({ b, onClose, onSave, Modal }){
+function PartyEditor({ b, onClose, onSave }){
   const team=b.mode==="team";
   const [parts,setParts]=useState(()=>JSON.parse(JSON.stringify(b.participants||[])));
   const setIndiv=(i,v)=>setParts(parts.map((p,j)=>j===i?{...p,party:v}:p));
@@ -507,7 +508,7 @@ function PartyEditor({ b, onClose, onSave, Modal }){
   </Modal>);
 }
 
-function BracketBoard({ b, data, admin, save, flash, onApply, Modal, Dropdown }){
+function BracketBoard({ b, data, admin, save, flash, onApply }){
   const nameOf=(pid)=>{ const p=(b.participants||[]).find(x=>x.id===pid); return p?p.name:pid; };
   const teamMode=b.mode==="team";
   const [series,setSeries]=useState(null);
@@ -554,13 +555,13 @@ function BracketBoard({ b, data, admin, save, flash, onApply, Modal, Dropdown })
         if(!p.party)return null; return <div className="bk-entry" key={p.id}><div className="bk-entry-n">{p.name}</div><div className="bk-entry-p">{p.party}</div></div>;
       })}
     </div></div>}
-    {series&&<TeamMatchModal teamA={series.A} teamB={series.B} init={series.m.series} onClose={()=>setSeries(null)} onSave={saveSeries} Modal={Modal} Dropdown={Dropdown}/>}
-    {party&&<PartyEditor b={b} onClose={()=>setParty(false)} onSave={savePartyFn} Modal={Modal}/>}
+    {series&&<TeamMatchModal teamA={series.A} teamB={series.B} init={series.m.series} onClose={()=>setSeries(null)} onSave={saveSeries}/>}
+    {party&&<PartyEditor b={b} onClose={()=>setParty(false)} onSave={savePartyFn}/>}
   </div>);
 }
 
 /* ===== 기록 반영 모달 ===== */
-function BracketApply({ b, res, data, onClose, save, flash, Modal, Dropdown }){
+function BracketApply({ b, res, data, onClose, save, flash }){
   const partOf=(pid)=>(b.participants||[]).find(x=>x.id===pid);
   const nameOf=(pid)=>{ const p=partOf(pid); return p?p.name:pid; };
   const team=b.mode==="team";
@@ -731,7 +732,7 @@ function BracketDraw({ b, onDone }){
 }
 
 /* ===== 대진표 메인 ===== */
-export default function BracketsPage({ data, admin, save, flash, Reveal, Modal, Dropdown }){
+export default function BracketsPage({ data, admin, save, flash }){
   const list=data.brackets||[];
   const [openId,setOpenId]=useState(null);
   const [wizard,setWizard]=useState(false);
@@ -756,9 +757,9 @@ export default function BracketsPage({ data, admin, save, flash, Reveal, Modal, 
     </div>}
     {open&&<div className="bk-open swap">
       <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
-      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} onApply={(b,res)=>setApply({b,res})} Modal={Modal} Dropdown={Dropdown}/>}
+      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} onApply={(b,res)=>setApply({b,res})}/>}
     </div>}
-    {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create} Modal={Modal}/>}
-    {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} onClose={()=>setApply(null)} Modal={Modal} Dropdown={Dropdown}/>}
+    {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create}/>}
+    {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} onClose={()=>setApply(null)}/>}
   </section>);
 }

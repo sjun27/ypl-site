@@ -1,7 +1,8 @@
 import React, { useMemo } from "react";
+import { Reveal } from "../components/index.js";
 
 /* ============================== HOME ============================== */
-export default function HomePage({ data, go, admin, Reveal }) {
+export default function HomePage({ data, go, admin }) {
   const eras=data.rankings||[];
   const ypl=eras.find(e=>e.key==="era2")||eras[0];
   const top3=ypl?[...ypl.rows].sort((a,b)=>(b.points||0)-(a.points||0)).slice(0,3):[];
