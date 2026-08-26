@@ -492,3 +492,169 @@ YPL 제출 엔트리 및 대회 결과를 기반으로 등록률, 인기 기술�
 `git commit`만 수행한 상태에서는 GitHub 원격 저장소에는 변경사항이 올라가지 않는다.
 
 GitHub에 공유할 준비가 끝난 뒤 명시적으로 `git push`를 수행할 때만 원격 저장소에 반영한다.
+
+---
+
+## 6.1단계 — Team Builder v0.6 동작 충실도 복원
+
+6단계 통합 후 실제 사용 과정에서 독립형 `ypl-team-builder-v0.6`과 본사이트 통합본 사이에 세부 동작 차이가 확인되어, **기존 v0.6을 기능 기준본(source of truth)으로 다시 대조**했다.
+
+### 복원한 핵심 동작
+
+- Validation 결과 표시를 v0.6 방식으로 복원
+  - `Team Valid / Team Invalid / Team Incomplete` 판정 문구 복원
+  - Invalid 상태에서도 규정 위반뿐 아니라 미완성 항목과 경고를 함께 표시
+  - 모노타입 타입 미선택, 6마리 미완성, 기술 4개 미설정, 상세 데이터 로딩/실패 상태를 구체적으로 안내
+  - Validation 메시지에 Regulation 및 파이컵 룰 요약 표시
+- Validation 내부 오류 메시지에서 포켓몬 이름을 한국어 표시명 기준으로 통일
+- 성격 선택을 v0.6과 동일한 검색/선택형 입력 방식으로 복원
+  - 한국어/영문 성격명 검색
+  - Stat Alignment 효과 표시
+  - 유효하지 않은 값 입력 시 이전 값으로 복귀
+- 도구 입력 검증 복원
+  - Regulation 사용 가능 도구 여부 검증
+  - Item Clause 중복 입력 시 전용 오류 메시지 표시
+  - 한국어/영문 도구명 검색
+- 기술 입력 검증 복원
+  - 해당 포켓몬의 실제 Champions learnset 기준 검증
+  - 같은 기술 중복 입력 시 전용 오류 메시지 표시
+  - 유효하지 않은 기술 입력 시 구체적인 오류 메시지 표시
+  - 기술 메타정보(타입/분류/위력/명중/PP) 표시 유지
+- Team Box 동작을 v0.6에 맞게 복원
+  - 빈 팀 이름 저장 방지
+  - 기본 팀 이름을 Regulation/파이컵 룰 기준으로 자동 제안
+  - 이름 중복 시 번호 자동 증가
+  - 저장 팀 복제 시 `복사본`, `복사본 2` 방식으로 중복 이름 회피
+  - 저장 팀 수정 시각 표시
+  - 현재 불러온 팀 표시
+  - 삭제 시 되돌릴 수 없다는 확인 문구 표시
+  - 현재 팀에서 저장되지 않은 변경사항이 있으면 다른 팀 불러오기 전에 확인
+  - 현재 Regulation에서 찾을 수 없는 저장 포켓몬은 제외 후 개수 안내
+- Draft/자동 임시저장 동작 복원
+  - 저장소 사용 가능 여부 감지
+  - `pending / saved / error` 상태 표시
+  - `pagehide` 및 탭 비활성화 시 즉시 저장
+  - URL로 명시적인 다른 Regulation/파이컵 룰을 요청한 경우 오래된 draft를 자동 복원하지 않음
+- Regulation 전환 시 기존 v0.6과 동일하게 사용 불가능 포켓몬만 자동 제거
+- 포켓몬 제거 후 선택 슬롯을 인접 슬롯으로 이동
+- 포켓몬 풀을 한국어 표시명 기준으로 정렬
+- 모노타입 풀 개수 표시와 빈 상태 안내 문구를 v0.6 방식으로 복원
+- Regulation / 파이컵 룰 / 타입을 URL query에 동기화
+- `Ctrl+S` / `Cmd+S` Team Box 호출과 `Esc` 닫기 동작 유지
+- 한국어 번역 누락 audit(`window.YPL_LOCALIZATION_AUDIT`) 복원
+
+### 유지한 항목
+
+- YPL 본사이트 디자인 시스템
+- React 페이지 구조
+- 기존 v0.6 localStorage 저장 키 및 schema v2
+- Pokémon Showdown Champions 데이터 소스
+- 운영 `ypl_data_v4` 및 Supabase 데이터 구조
+
+### 변경 이유
+
+6단계의 첫 통합본은 기존 기능을 React로 재구현하는 과정에서 일부 상태 처리와 검증 UI가 단순화되었다. Team Builder는 실제 대회 엔트리 작성 도구이므로, 디자인 통일보다 **기존 검증 메커니즘과 세부 입력 규칙을 그대로 보존하는 것이 우선**이라고 판단하여 v0.6 동작을 기준으로 복원했다.
+
+### 검증
+
+- 전체 JS/JSX TypeScript parser 구문 검사 통과
+- 상대경로 import 검사 통과
+- Windows Vite production build 및 실제 브라우저 회귀 테스트 필요
+
+
+---
+
+## 6.2단계 — Team Builder UI 선택 조정 및 YPL Tools 구조 준비
+
+6.1의 기존 v0.6 동작 복원은 유지하되, 실제 사용성이 더 좋았던 일부 최신 UI와 향후 도구 확장 구조를 반영했다.
+
+### 변경사항
+
+- 성격 선택 UI는 검색형 입력 대신 6단계 통합본의 드롭다운(select) 방식으로 되돌림
+  - Validation 및 Stat Alignment 계산 로직은 그대로 유지
+- Team Builder 페이지의 `YPL TOOLS` kicker를 파란색으로 강조
+- 상단 Navigation의 기존 단일 `팀빌더` 메뉴를 `YPL Tools` 드롭다운으로 변경
+  - 현재 하위 도구는 `팀빌더` 1개만 제공
+  - 향후 `배틀데이터` 및 기타 도구를 `TOOL_ITEMS`에 추가할 수 있는 구조로 준비
+- 데스크톱에서는 파란색 `YPL Tools` 드롭다운, 모바일 drawer에서는 파란색 Tools accordion 형태로 표시
+
+### 유지한 항목
+
+- 6.1에서 복원한 Validation 메커니즘
+- Team Box / Draft / Regulation 전환 / Species Clause / Item Clause / 기술 legality 등 기존 v0.6 동작
+- 기존 YPL 디자인 시스템과 운영 데이터 구조
+- Team Builder localStorage 저장 방식
+
+### 변경 이유
+
+Team Builder 자체의 검증 메커니즘은 기존 v0.6을 기준으로 유지하되, 성격 선택은 단순 드롭다운 방식이 실제 사용성이 더 좋다고 판단했다. 또한 Team Builder, Battle Data 등 향후 여러 기능을 개별 상단 메뉴로 계속 추가하지 않고 `YPL Tools` 아래에 묶을 수 있도록 Navigation 구조를 미리 준비했다.
+
+
+---
+
+## 6.3단계 — YPL Tools 내비게이션 톤 통일
+
+6.2 적용 후 실제 화면에서 파란색 CTA 형태의 `YPL Tools`가 기존 YPL 내비게이션보다 지나치게 강조되어 이질적으로 보이는 문제가 확인되어 시각 체계를 다시 통일했다.
+
+### 변경사항
+
+- 데스크톱 `YPL Tools`를 기존 일반 메뉴와 동일한 색상 토큰과 hover/active 체계로 변경
+  - 파란색 배경 버튼 제거
+  - 기존 메뉴보다 약간 작은 13.5px로 조정
+  - 선택 상태는 기존 메뉴와 같은 텍스트 강조 + 하단 indicator 사용
+- `YPL Tools` 위치를 `명예의 전당` 오른쪽으로 이동하여 일반 리그 메뉴와 도구 그룹의 구조를 분리
+- 드롭다운은 기존 카드/라인/텍스트 색상 변수를 사용하도록 수정하여 라이트/다크 모드에서 동일한 디자인 원칙 적용
+- 모바일 drawer의 Tools trigger도 파란색 배경을 제거하고 기존 drawer 메뉴의 색상 체계와 동일하게 변경
+- Team Builder 본문의 `YPL TOOLS` kicker에서 별도 파란색을 제거하고 다른 보조 레이블과 같은 muted 색상으로 통일
+- kicker 크기를 10.5px로 소폭 축소
+- 한국어 UI 표기를 `팀빌더`에서 `팀 빌더`로 통일
+- `YPL Tools` 드롭다운 확장 구조는 그대로 유지
+
+### 유지한 항목
+
+- 6.1의 Validation / Team Box / Draft / Regulation / legality 메커니즘
+- 6.2의 성격 select UI
+- Team Builder localStorage 저장 구조
+- 운영 Supabase 및 `ypl_data_v4`
+
+### 변경 이유
+
+`YPL Tools`는 향후 여러 도구를 묶는 정보 구조상의 그룹이지 주요 CTA 버튼이 아니므로, 독립적인 파란색 버튼보다 기존 YPL 내비게이션과 같은 시각 위계를 사용하는 것이 사이트 전체 일관성에 더 적합하다. 다크모드에서도 별도 하드코딩 색을 사용하지 않고 기존 CSS 변수에 의존하도록 해 두 테마에서 동일한 위계를 유지했다.
+
+
+---
+
+## 6.4단계 — Team Builder 인터랙션 피드백 및 Validation 위치 개선
+
+6.3의 YPL Tools 톤 통일과 기존 Team Builder 검증 로직은 유지하면서, 클릭 가능한 인터페이스가 정적인 박스처럼 보이던 부분을 개선하고 Team Validation의 정보 위계를 상향했다.
+
+### 변경사항
+
+- Team Validation을 상세 세팅 영역 하단에서 Regulation 카드 바로 아래로 이동
+  - 팀을 편집하기 전에 현재 상태를 빠르게 확인할 수 있도록 페이지 상단에 배치
+  - 기존 YPL 카드 디자인을 해치지 않도록 패딩, 아이콘, 라운드 값을 줄인 얇은 상태 패널 형태로 조정
+  - Validation 로직 및 상세 오류/미완성/경고 메시지는 변경하지 않음
+  - 메시지가 많을 때 데스크톱에서는 2열, 모바일에서는 1열로 표시
+- Regulation / 파이컵 추가 룰 / 배정 타입 select에 hover 및 focus 피드백 추가
+- 포켓몬 선택 목록에서 hover 시 이름과 추가 표시가 기존 YPL accent 체계로 반응하도록 개선
+- 팀 구성 슬롯에서 hover/focus 시 테두리와 포켓몬 이름이 자연스럽게 반응하도록 개선
+- 특성 / 성격 / 도구 / 기술 입력 영역에 hover/focus 피드백 추가
+- 기술 카드 자체도 hover/focus-within 시 테두리와 배경이 반응하도록 개선
+- Stat Point 행, slider, 숫자 입력에 hover/focus 반응 추가
+- Team Box 저장 팀 항목에도 hover/focus 피드백 추가
+- 라이트/다크 모드 모두 하드코딩된 새 강조색을 추가하지 않고 기존 `--cyan`, `--cyan-d`, `--s-card`, `--s-soft`, `--line2` 토큰 사용
+
+### 디자인 원칙
+
+- 실제 클릭/입력이 가능한 곳 위주로 상호작용을 추가하고 단순 정보 카드에는 hover 효과를 남발하지 않음
+- hover가 없어도 모바일/터치 환경에서 모든 기능을 사용할 수 있도록 기존 click/tap 동작은 그대로 유지
+- 새 애니메이션이나 큰 이동 효과 대신 기존 YPL UI와 같은 테두리·배경·텍스트 변화 중심으로 적용
+
+### 유지한 항목
+
+- 6.1의 Validation 계산 및 상세 메시지 메커니즘
+- 6.2의 성격 select UI
+- 6.3의 YPL Tools 위치/톤/드롭다운 구조
+- Team Box / Draft / Regulation / Species Clause / Item Clause / 기술 legality
+- localStorage 및 운영 Supabase / `ypl_data_v4` 구조
+

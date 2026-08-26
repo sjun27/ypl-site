@@ -20,6 +20,7 @@ import {
   dataId,
   dexRecord,
   itemDisplay,
+  itemEnglishName,
   itemName,
   learnsetFor,
   localizedPokemonName,
@@ -28,11 +29,13 @@ import {
   matchesLocalizedSearch,
   memberFromSaved,
   moveDisplay,
+  moveEnglishName,
   moveMetadata,
   moveName,
   normalizeDraft,
   normalizeSavedTeam,
   pokemonMatchesCupRule,
+  formatSavedDate,
   serializeMembers,
   speciesIdentity,
   spriteUrl,
@@ -41,6 +44,29 @@ import {
 import "../team-builder.css";
 
 const SPECIES_NAMES_URL = "https://raw.githubusercontent.com/PokeAPI/pokeapi/master/data/v2/csv/pokemon_species_names.csv";
+
+
+function readInitialRuleState() {
+  const params = new URLSearchParams(window.location.search);
+  const requestedReg = params.get("reg") || "m-b";
+  const regulationId = REGULATIONS[requestedReg] ? requestedReg : "m-b";
+  const requestedCup = params.get("cup") || "none";
+  const cupRuleId = CUP_RULES[requestedCup] ? requestedCup : "none";
+  const requestedType = params.get("type") || "";
+  const assignedTypeId = CUP_RULES[cupRuleId]?.kind === "monotype" && TYPE_OPTIONS.some(type => type.id === requestedType) ? requestedType : "";
+  return { regulationId, cupRuleId, assignedTypeId };
+}
+
+function syncRuleUrl(regulationId, cupRuleId, assignedTypeId) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("reg", regulationId);
+  if (cupRuleId && cupRuleId !== "none") url.searchParams.set("cup", cupRuleId);
+  else url.searchParams.delete("cup");
+  const cupRule = CUP_RULES[cupRuleId] || CUP_RULES.none;
+  if (cupRule.kind === "monotype" && assignedTypeId) url.searchParams.set("type", assignedTypeId);
+  else url.searchParams.delete("type");
+  window.history.replaceState({}, "", url);
+}
 
 function readSavedTeams() {
   try {
@@ -51,7 +77,7 @@ function readSavedTeams() {
     return parsed.map(normalizeSavedTeam).filter(Boolean).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
   } catch (error) {
     console.warn("[YPL] 저장된 팀을 읽지 못했습니다.", error);
-    return [];
+    return null;
   }
 }
 
@@ -99,39 +125,69 @@ function parseSpeciesNames(csv) {
   return result;
 }
 
-function ComboInput({ value, options, display, resolve, onCommit, placeholder, disabled, ariaLabel, meta }) {
-  const [text, setText] = useState(value ? display(value) : "");
+function ComboInput({
+  value,
+  options,
+  display,
+  resolve,
+  validateMatch,
+  onCommit,
+  placeholder,
+  disabled,
+  ariaLabel,
+  meta,
+  emptyMeta,
+  invalidMessage = "목록에서 사용할 수 있는 항목을 선택해 주세요.",
+  revertOnInvalid = false,
+  showInlineError = true,
+}) {
+  const formattedValue = value ? display(value) : "";
+  const [text, setText] = useState(formattedValue);
+  const [feedback, setFeedback] = useState("");
   const [invalid, setInvalid] = useState(false);
   const listId = useMemo(() => `tb-list-${Math.random().toString(36).slice(2)}`, []);
 
   useEffect(() => {
-    setText(value ? display(value) : "");
+    setText(formattedValue);
+    setFeedback("");
     setInvalid(false);
-  }, [value, display]);
+  }, [value, formattedValue]);
 
   const commit = () => {
     const raw = text.trim();
     if (!raw) {
       onCommit("");
+      setFeedback("");
       setInvalid(false);
       return;
     }
     const match = resolve(raw);
     if (!match) {
       setInvalid(true);
+      setFeedback(invalidMessage);
+      if (revertOnInvalid) setText(formattedValue);
+      return;
+    }
+    const matchError = validateMatch?.(match) || "";
+    if (matchError) {
+      setInvalid(true);
+      setFeedback(matchError);
+      if (revertOnInvalid) setText(formattedValue);
       return;
     }
     onCommit(match);
     setText(display(match));
+    setFeedback("");
     setInvalid(false);
   };
 
+  const helperText = feedback || meta || emptyMeta || "";
   return (
     <div className="tb-combo-wrap">
       <input
         className={"tb-input tb-combo" + (invalid ? " invalid" : "")}
         value={text}
-        onChange={event => { setText(event.target.value); setInvalid(false); }}
+        onChange={event => { setText(event.target.value); setFeedback(""); setInvalid(false); }}
         onBlur={commit}
         onKeyDown={event => {
           if (event.key === "Enter") {
@@ -148,8 +204,7 @@ function ComboInput({ value, options, display, resolve, onCommit, placeholder, d
       <datalist id={listId}>
         {options.map(option => <option key={String(option)} value={display(option)} />)}
       </datalist>
-      {invalid && <div className="tb-inline-error">목록에서 사용할 수 있는 항목을 선택해 주세요.</div>}
-      {meta && <div className="tb-field-meta">{meta}</div>}
+      {helperText && <div className={feedback && showInlineError ? "tb-inline-error" : "tb-field-meta"}>{helperText}</div>}
     </div>
   );
 }
@@ -192,30 +247,50 @@ function TeamSlot({ index, member, active, displayName, itemLabel, onSelect, onR
   );
 }
 
-function ValidationPanel({ result }) {
-  const title = result.status === "valid" ? "Team Valid" : result.status === "invalid" ? "Team Invalid" : "Team Incomplete";
-  const message = result.status === "valid"
-    ? "현재 설정은 제출 가능한 상태입니다."
-    : result.status === "invalid"
-      ? `${result.errors.length}개의 규정 위반을 확인했습니다.`
-      : "아직 설정이 완료되지 않았습니다.";
-  const details = result.status === "invalid" ? result.errors : result.incomplete;
+function ValidationPanel({ result, regulationName, cupRuleSummary, teamLength, configuredSpecialRule }) {
+  let title;
+  let message;
+  let icon;
+  if (result.status === "invalid") {
+    title = "Team Invalid";
+    message = `${result.errors.length}개의 규정 위반을 확인했습니다.`;
+    icon = "×";
+  } else if (result.status === "valid") {
+    title = "Team Valid";
+    message = `${regulationName} · ${cupRuleSummary} 기준으로 로스터와 세팅의 최종 검증을 통과했습니다.`;
+    icon = "✓";
+  } else {
+    title = teamLength || configuredSpecialRule ? "Team Incomplete" : "팀을 구성해 주세요";
+    message = teamLength || configuredSpecialRule
+      ? "규정 위반은 확인되지 않았지만 최종 검증에 필요한 룰 설정 또는 팀 세팅이 아직 완료되지 않았습니다."
+      : "포켓몬을 선택하고 각 포켓몬의 세팅을 완료해 주세요.";
+    icon = "!";
+  }
+
+  const messages = [
+    ...result.errors.map(messageText => ({ type: "error", message: messageText })),
+    ...result.incomplete.map(messageText => ({ type: "incomplete", message: messageText })),
+    ...result.warnings.map(messageText => ({ type: "warning", message: messageText })),
+  ];
+
   return (
     <div className={`tb-validation ${result.status}`}>
       <div className="tb-validation-head">
-        <span className="tb-validation-icon">{result.status === "valid" ? "✓" : result.status === "invalid" ? "×" : "…"}</span>
+        <span className="tb-validation-icon">{icon}</span>
         <div><strong>{title}</strong><span>{message}</span></div>
       </div>
-      {details.length > 0 && <ul>{details.slice(0, 8).map((detail, index) => <li key={`${detail}-${index}`}>{detail}</li>)}</ul>}
-      {details.length > 8 && <div className="tb-more">외 {details.length - 8}개</div>}
+      {messages.length > 0 && <ul>{messages.slice(0, 8).map(({ type, message: detail }, index) => <li className={type} key={`${type}-${detail}-${index}`}>{detail}</li>)}</ul>}
+      {messages.length > 8 && <div className="tb-more">외 {messages.length - 8}개</div>}
     </div>
   );
 }
 
 export default function TeamBuilderPage() {
-  const [regulationId, setRegulationId] = useState("m-b");
-  const [cupRuleId, setCupRuleId] = useState("none");
-  const [assignedTypeId, setAssignedTypeId] = useState("");
+  const initialRuleStateRef = useRef(null);
+  if (!initialRuleStateRef.current) initialRuleStateRef.current = readInitialRuleState();
+  const [regulationId, setRegulationId] = useState(initialRuleStateRef.current.regulationId);
+  const [cupRuleId, setCupRuleId] = useState(initialRuleStateRef.current.cupRuleId);
+  const [assignedTypeId, setAssignedTypeId] = useState(initialRuleStateRef.current.assignedTypeId);
   const [team, setTeam] = useState([]);
   const [selectedUid, setSelectedUid] = useState(null);
   const [query, setQuery] = useState("");
@@ -232,7 +307,10 @@ export default function TeamBuilderPage() {
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [saveName, setSaveName] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
+  const [storageAvailable, setStorageAvailable] = useState(true);
   const draftTimerRef = useRef(null);
+  const restoringDraftRef = useRef(false);
+  const unrestoredDraftExistsRef = useRef(false);
 
   const regulation = REGULATIONS[regulationId] || Object.values(REGULATIONS)[0];
   const cupRule = CUP_RULES[cupRuleId] || CUP_RULES.none;
@@ -242,25 +320,59 @@ export default function TeamBuilderPage() {
   const legalItems = useMemo(() => detailData ? championsData.legalItems(detailData, regulationId) : [], [detailData, regulationId]);
 
   const displayPokemon = useCallback(pokemon => localizedPokemonName(pokemon, koreanNames), [koreanNames]);
-  const markDirty = useCallback(() => setDirty(true), []);
+  const markDirty = useCallback(() => {
+    unrestoredDraftExistsRef.current = false;
+    setDirty(true);
+  }, []);
 
   useEffect(() => {
-    const existing = readSavedTeams();
+    try {
+      const probe = "__ypl-team-builder-storage-probe__";
+      localStorage.setItem(probe, "1");
+      localStorage.removeItem(probe);
+      setStorageAvailable(true);
+    } catch (error) {
+      console.warn("[YPL] 브라우저 저장소를 사용할 수 없습니다.", error);
+      setStorageAvailable(false);
+    }
+
+    const loadedTeams = readSavedTeams();
+    const existing = loadedTeams || [];
+    if (loadedTeams === null) setStorageAvailable(false);
     setSavedTeams(existing);
     const draft = readDraft();
     if (draft) {
-      const reg = REGULATIONS[draft.regulationId];
-      const restored = draft.members.map(member => memberFromSaved(member, reg)).filter(Boolean);
-      setRegulationId(draft.regulationId);
-      setCupRuleId(draft.cupRuleId);
-      setAssignedTypeId(draft.cupRuleSettings.assignedType || "");
-      setTeam(restored);
-      const selected = restored[Math.min(draft.selectedIndex, Math.max(0, restored.length - 1))];
-      setSelectedUid(selected?.uid || restored[0]?.uid || null);
-      setActiveSavedTeamId(existing.some(teamItem => teamItem.id === draft.activeSavedTeamId) ? draft.activeSavedTeamId : null);
-      setDirty(draft.dirty || (!draft.activeSavedTeamId && restored.length > 0));
-      setDraftStatus("saved");
-      setDraftSavedAt(draft.savedAt || null);
+      const requestedParams = new URLSearchParams(window.location.search);
+      const requestedReg = requestedParams.get("reg");
+      const requestedCup = requestedParams.get("cup");
+      const requestedType = requestedParams.get("type");
+      const conflictsWithExplicitLink = (requestedReg && requestedReg !== draft.regulationId)
+        || (requestedCup && requestedCup !== draft.cupRuleId)
+        || (requestedType && requestedType !== draft.cupRuleSettings.assignedType);
+
+      if (conflictsWithExplicitLink) {
+        unrestoredDraftExistsRef.current = true;
+      } else {
+        const reg = REGULATIONS[draft.regulationId];
+        restoringDraftRef.current = true;
+        try {
+          const restored = draft.members.map(member => memberFromSaved(member, reg)).filter(Boolean);
+          setRegulationId(draft.regulationId);
+          setCupRuleId(draft.cupRuleId);
+          setAssignedTypeId(draft.cupRuleSettings.assignedType || "");
+          setTeam(restored);
+          const selected = restored[Math.min(draft.selectedIndex, Math.max(0, restored.length - 1))];
+          setSelectedUid(selected?.uid || restored[0]?.uid || null);
+          setActiveSavedTeamId(existing.some(teamItem => teamItem.id === draft.activeSavedTeamId) ? draft.activeSavedTeamId : null);
+          setDirty(draft.dirty || (!draft.activeSavedTeamId && restored.length > 0));
+          setDraftStatus("saved");
+          setDraftSavedAt(draft.savedAt || null);
+          unrestoredDraftExistsRef.current = false;
+          syncRuleUrl(draft.regulationId, draft.cupRuleId, draft.cupRuleSettings.assignedType || "");
+        } finally {
+          restoringDraftRef.current = false;
+        }
+      }
     }
     setHydrated(true);
   }, []);
@@ -313,26 +425,32 @@ export default function TeamBuilderPage() {
   }), [regulationId, cupRuleId, cupRule.kind, assignedTypeId, activeSavedTeamId, dirty, team, selectedUid]);
 
   const persistDraftNow = useCallback(() => {
-    if (!hydrated) return;
+    if (!hydrated || !storageAvailable || restoringDraftRef.current) return false;
+    if (unrestoredDraftExistsRef.current && !dirty && !team.length && !activeSavedTeamId) return false;
     try {
       if (!team.length && !activeSavedTeamId && !dirty) {
         localStorage.removeItem(DRAFT_STORAGE_KEY);
         setDraftStatus("idle");
         setDraftSavedAt(null);
-        return;
+        return true;
       }
       const snapshot = makeDraftSnapshot();
       localStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(snapshot));
       setDraftStatus("saved");
       setDraftSavedAt(snapshot.savedAt);
+      setStorageAvailable(true);
+      return true;
     } catch (error) {
       console.error("[YPL] 임시저장 실패", error);
       setDraftStatus("error");
+      setStorageAvailable(false);
+      return false;
     }
-  }, [hydrated, team.length, activeSavedTeamId, dirty, makeDraftSnapshot]);
+  }, [hydrated, storageAvailable, team.length, activeSavedTeamId, dirty, makeDraftSnapshot]);
 
   useEffect(() => {
-    if (!hydrated) return undefined;
+    if (!hydrated || !storageAvailable || restoringDraftRef.current) return undefined;
+    if (unrestoredDraftExistsRef.current && !dirty && !team.length && !activeSavedTeamId) return undefined;
     if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     setDraftStatus("pending");
     draftTimerRef.current = setTimeout(() => {
@@ -355,6 +473,11 @@ export default function TeamBuilderPage() {
     };
   }, [persistDraftNow]);
 
+  useEffect(() => {
+    if (!hydrated) return;
+    syncRuleUrl(regulationId, cupRuleId, cupRule.kind === "monotype" ? assignedTypeId : "");
+  }, [hydrated, regulationId, cupRuleId, cupRule.kind, assignedTypeId]);
+
   const currentSaved = savedTeams.find(saved => saved.id === activeSavedTeamId) || null;
 
   const validation = useMemo(() => validateTeam({
@@ -366,7 +489,8 @@ export default function TeamBuilderPage() {
     detailData,
     detailStatus,
     legalItems,
-  }), [team, regulation, regulationId, cupRuleId, assignedTypeId, detailData, detailStatus, legalItems]);
+    displayPokemon,
+  }), [team, regulation, regulationId, cupRuleId, assignedTypeId, detailData, detailStatus, legalItems, displayPokemon]);
 
   const eligiblePool = useMemo(() => {
     const base = regulation?.pokemon || [];
@@ -375,7 +499,9 @@ export default function TeamBuilderPage() {
     return base.filter(pokemon => pokemonMatchesCupRule({ pokemon, cupRuleId, assignedTypeId, detailData }));
   }, [regulation, cupRule.kind, assignedTypeId, detailData, cupRuleId]);
 
-  const filteredPool = useMemo(() => eligiblePool.filter(pokemon => matchesLocalizedSearch(displayPokemon(pokemon), pokemon.name, query)), [eligiblePool, displayPokemon, query]);
+  const filteredPool = useMemo(() => eligiblePool
+    .filter(pokemon => matchesLocalizedSearch(displayPokemon(pokemon), pokemon.name, query))
+    .sort((a, b) => displayPokemon(a).localeCompare(displayPokemon(b), "ko")), [eligiblePool, displayPokemon, query]);
 
   const updateMember = useCallback((uid, patch) => {
     setTeam(current => current.map(member => member.uid === uid ? { ...member, ...patch } : member));
@@ -391,34 +517,29 @@ export default function TeamBuilderPage() {
 
   const addPokemon = useCallback(pokemon => {
     if (team.length >= (regulation.maxTeamSize || 6)) return;
+    if (!pokemonMatchesCupRule({ pokemon, cupRuleId, assignedTypeId, detailData })) return;
     const identity = speciesIdentity(detailData, pokemon);
-    if (team.some(member => speciesIdentity(detailData, member.pokemon) === identity)) {
-      window.alert("같은 전국도감 번호의 포켓몬은 팀에 중복으로 넣을 수 없습니다.");
-      return;
-    }
+    if (team.some(member => speciesIdentity(detailData, member.pokemon) === identity)) return;
     const member = makeMember(pokemon);
     const details = dexRecord(detailData, pokemon);
     if (details?.abilities?.length) member.ability = details.abilities[0];
     setTeam(current => [...current, member]);
     setSelectedUid(member.uid);
     markDirty();
-  }, [team, regulation.maxTeamSize, detailData, markDirty]);
+  }, [team, regulation.maxTeamSize, detailData, cupRuleId, assignedTypeId, markDirty]);
 
   const removeMember = useCallback(uid => {
-    setTeam(current => {
-      const next = current.filter(member => member.uid !== uid);
-      if (uid === selectedUid) setSelectedUid(next[0]?.uid || null);
-      return next;
-    });
+    const index = team.findIndex(member => member.uid === uid);
+    const next = team.filter(member => member.uid !== uid);
+    setTeam(next);
+    if (uid === selectedUid) setSelectedUid(next[index]?.uid || next[index - 1]?.uid || null);
     markDirty();
-  }, [selectedUid, markDirty]);
+  }, [team, selectedUid, markDirty]);
 
   const switchRegulation = useCallback(nextId => {
     const next = REGULATIONS[nextId];
     if (!next || nextId === regulationId) return;
     const allowed = new Set(next.pokemon.map(pokemon => pokemon.name));
-    const removed = team.filter(member => !allowed.has(member.pokemon.name)).length;
-    if (removed && !window.confirm(`새 Regulation에서 사용할 수 없는 포켓몬 ${removed}마리가 팀에서 제거됩니다. 변경할까요?`)) return;
     const nextTeam = team.filter(member => allowed.has(member.pokemon.name));
     setRegulationId(nextId);
     setTeam(nextTeam);
@@ -433,6 +554,13 @@ export default function TeamBuilderPage() {
     markDirty();
   }, [cupRuleId, markDirty]);
 
+  const switchCupRuleType = useCallback(nextTypeId => {
+    const next = TYPE_OPTIONS.some(type => type.id === nextTypeId) ? nextTypeId : "";
+    if (next === assignedTypeId) return;
+    setAssignedTypeId(next);
+    markDirty();
+  }, [assignedTypeId, markDirty]);
+
   const resetTeam = useCallback(() => {
     if (team.length && !window.confirm("현재 팀 구성을 모두 초기화할까요?")) return;
     setTeam([]);
@@ -441,34 +569,55 @@ export default function TeamBuilderPage() {
     setDirty(false);
     setSaveName("");
     try { localStorage.removeItem(DRAFT_STORAGE_KEY); } catch (_) { /* noop */ }
+    unrestoredDraftExistsRef.current = false;
     setDraftStatus("idle");
     setDraftSavedAt(null);
   }, [team.length]);
 
   const defaultTeamName = useCallback(() => {
-    const names = team.slice(0, 2).map(member => displayPokemon(member.pokemon)).filter(Boolean);
-    return names.length ? names.join(" · ") : `${regulation.shortName} 팀`;
-  }, [team, displayPokemon, regulation.shortName]);
+    const base = cupRule.kind === "monotype" && selectedType
+      ? `${regulation.shortName} ${selectedType.korean} 모노타입`
+      : `${regulation.shortName} 팀`;
+    const existingNames = new Set(savedTeams.map(saved => saved.name));
+    if (!existingNames.has(base)) return base;
+    let index = 2;
+    while (existingNames.has(`${base} ${index}`)) index += 1;
+    return `${base} ${index}`;
+  }, [cupRule.kind, selectedType, regulation.shortName, savedTeams]);
 
   const openLibrary = useCallback((focusSave = false) => {
+    if (!storageAvailable) return;
     setSaveName(currentSaved?.name || defaultTeamName());
     setSaveMessage("");
     setLibraryOpen(true);
-    if (focusSave) setTimeout(() => document.querySelector(".tb-team-name")?.focus(), 20);
-  }, [currentSaved, defaultTeamName]);
+    if (focusSave) setTimeout(() => {
+      const input = document.querySelector(".tb-team-name");
+      input?.focus();
+      input?.select?.();
+    }, 20);
+  }, [storageAvailable, currentSaved, defaultTeamName]);
 
   const saveCurrentTeam = useCallback(() => {
+    if (!storageAvailable) {
+      setSaveMessage("이 브라우저에서는 로컬 저장소를 사용할 수 없습니다.");
+      return;
+    }
     if (!team.length) {
       setSaveMessage("포켓몬을 1마리 이상 추가한 뒤 저장해 주세요.");
       return;
     }
-    const name = saveName.trim().slice(0, 40) || defaultTeamName();
+    const name = saveName.trim();
+    if (!name) {
+      setSaveMessage("팀 이름을 입력해 주세요.");
+      setTimeout(() => document.querySelector(".tb-team-name")?.focus(), 0);
+      return;
+    }
     const now = new Date().toISOString();
     const existing = savedTeams.find(saved => saved.id === activeSavedTeamId) || null;
     const snapshot = {
       schemaVersion: TEAM_SCHEMA_VERSION,
       id: existing?.id || makeUid("saved"),
-      name,
+      name: name.slice(0, 40),
       regulationId,
       cupRuleId,
       cupRuleSettings: { assignedType: cupRule.kind === "monotype" ? assignedTypeId : "" },
@@ -481,21 +630,28 @@ export default function TeamBuilderPage() {
       : [snapshot, ...savedTeams];
     next.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
     if (!writeSavedTeams(next)) {
-      setSaveMessage("브라우저 저장소에 저장하지 못했습니다.");
+      setStorageAvailable(false);
+      setSaveMessage("팀을 저장하지 못했습니다. 브라우저 저장소 설정을 확인해 주세요.");
       return;
     }
+    setStorageAvailable(true);
     setSavedTeams(next);
     setActiveSavedTeamId(snapshot.id);
     setDirty(false);
-    setSaveName(name);
-    setSaveMessage(existing ? "팀을 업데이트했습니다." : "새 팀을 저장했습니다.");
-  }, [saveName, defaultTeamName, savedTeams, activeSavedTeamId, regulationId, cupRuleId, cupRule.kind, assignedTypeId, team]);
+    setSaveName(snapshot.name);
+    setSaveMessage("저장되었습니다.");
+  }, [storageAvailable, saveName, savedTeams, activeSavedTeamId, regulationId, cupRuleId, cupRule.kind, assignedTypeId, team]);
 
   const loadSavedTeam = useCallback(saved => {
-    if (dirty && team.length && !window.confirm("현재 저장하지 않은 변경사항을 버리고 이 팀을 불러올까요?")) return;
-    const reg = REGULATIONS[saved.regulationId] || REGULATIONS[regulationId];
+    if (dirty && !window.confirm("저장되지 않은 변경사항이 있습니다. 저장하지 않고 다른 팀을 불러올까요?")) return;
+    const reg = REGULATIONS[saved.regulationId];
+    if (!reg) {
+      window.alert(`저장된 Regulation(${saved.regulationId})을 현재 팀 빌더에서 찾을 수 없습니다.`);
+      return;
+    }
     const restored = saved.members.map(member => memberFromSaved(member, reg)).filter(Boolean);
-    setRegulationId(reg.id);
+    const omitted = saved.members.length - restored.length;
+    setRegulationId(saved.regulationId);
     setCupRuleId(CUP_RULES[saved.cupRuleId] ? saved.cupRuleId : "none");
     setAssignedTypeId(saved.cupRuleSettings?.assignedType || "");
     setTeam(restored);
@@ -503,19 +659,40 @@ export default function TeamBuilderPage() {
     setActiveSavedTeamId(saved.id);
     setDirty(false);
     setLibraryOpen(false);
-  }, [dirty, team.length, regulationId]);
+    if (omitted) window.alert(`${omitted}마리는 현재 ${reg.shortName} 데이터에서 찾을 수 없어 제외했습니다.`);
+  }, [dirty]);
 
   const duplicateSavedTeam = useCallback(saved => {
     const now = new Date().toISOString();
-    const copy = { ...saved, id: makeUid("saved"), name: `${saved.name} 복사본`.slice(0, 40), createdAt: now, updatedAt: now };
+    const base = `${saved.name} 복사본`;
+    let name = base;
+    let index = 2;
+    const existingNames = new Set(savedTeams.map(item => item.name));
+    while (existingNames.has(name)) name = `${base} ${index++}`;
+    const copy = {
+      ...JSON.parse(JSON.stringify(saved)),
+      id: makeUid("saved"),
+      name: name.slice(0, 40),
+      createdAt: now,
+      updatedAt: now,
+    };
     const next = [copy, ...savedTeams];
-    if (writeSavedTeams(next)) setSavedTeams(next);
+    if (!writeSavedTeams(next)) {
+      setStorageAvailable(false);
+      return;
+    }
+    setStorageAvailable(true);
+    setSavedTeams(next);
   }, [savedTeams]);
 
   const deleteSavedTeam = useCallback(saved => {
-    if (!window.confirm(`“${saved.name}” 팀을 삭제할까요?`)) return;
+    if (!window.confirm(`“${saved.name}” 팀을 삭제할까요? 이 작업은 되돌릴 수 없습니다.`)) return;
     const next = savedTeams.filter(item => item.id !== saved.id);
-    if (!writeSavedTeams(next)) return;
+    if (!writeSavedTeams(next)) {
+      setStorageAvailable(false);
+      return;
+    }
+    setStorageAvailable(true);
     setSavedTeams(next);
     if (activeSavedTeamId === saved.id) {
       setActiveSavedTeamId(null);
@@ -525,6 +702,7 @@ export default function TeamBuilderPage() {
 
   useEffect(() => {
     const onKeyDown = event => {
+      if (event.key === "Escape" && libraryOpen) setLibraryOpen(false);
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         openLibrary(true);
@@ -532,24 +710,100 @@ export default function TeamBuilderPage() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [openLibrary]);
+  }, [openLibrary, libraryOpen]);
 
   const usedItemsByOthers = useMemo(() => new Set(team.filter(member => member.uid !== selectedUid).map(member => member.item).filter(Boolean)), [team, selectedUid]);
   const itemOptions = useMemo(() => legalItems.filter(item => !usedItemsByOthers.has(item.id) || item.id === selectedMember?.item).map(item => item.id).sort((a, b) => itemName(detailData, a).localeCompare(itemName(detailData, b), "ko")), [legalItems, usedItemsByOthers, selectedMember?.item, detailData]);
   const learnset = useMemo(() => selectedMember ? learnsetFor(detailData, selectedMember.pokemon) : [], [detailData, selectedMember]);
 
-  const resolveFromOptions = useCallback((raw, options, formatter) => {
+  const resolveFromOptions = useCallback((raw, options, formatter, extraFormatters = []) => {
     const normalized = String(raw || "").trim().toLowerCase();
     const compact = championsData.toID(normalized);
+    if (!normalized) return "";
     return options.find(id => {
-      const values = [formatter(id), id];
-      return values.some(value => String(value).trim().toLowerCase() === normalized || (compact && championsData.toID(value) === compact));
+      const values = [formatter(id), id, ...extraFormatters.map(fn => fn(id))];
+      return values.some(value => String(value || "").trim().toLowerCase() === normalized || (compact && championsData.toID(value).includes(compact) && championsData.toID(value) === compact));
     }) || null;
   }, []);
 
-  const dataStatusText = detailStatus === "ready" ? "상세 데이터 연결됨" : detailStatus === "error" ? "상세 데이터 연결 실패" : "상세 데이터 불러오는 중";
-  const localizationText = localizationStatus === "ready" ? "포켓몬 이름 · 한국어" : localizationStatus === "error" ? "포켓몬 이름 · 영문" : "한국어 이름 불러오는 중";
-  const draftText = draftStatus === "saved" ? "임시저장 완료" : draftStatus === "pending" ? "임시저장 중" : draftStatus === "error" ? "임시저장 실패" : "새 팀";
+  const resolveItem = useCallback(raw => resolveFromOptions(
+    raw,
+    legalItems.map(item => item.id),
+    id => itemDisplay(detailData, id),
+    [id => itemName(detailData, id), id => itemEnglishName(detailData, id)],
+  ), [resolveFromOptions, legalItems, detailData]);
+
+  const resolveMove = useCallback(raw => resolveFromOptions(
+    raw,
+    learnset,
+    id => moveDisplay(detailData, id),
+    [id => moveName(detailData, id), id => moveEnglishName(detailData, id)],
+  ), [resolveFromOptions, learnset, detailData]);
+
+  const currentCupRuleSummary = useMemo(() => {
+    if (cupRule.kind === "none") return "추가 룰 없음";
+    if (cupRule.kind === "monotype") return selectedType ? `${cupRule.name} · ${selectedType.korean}` : `${cupRule.name} · 타입 미선택`;
+    return cupRule.name;
+  }, [cupRule, selectedType]);
+
+  useEffect(() => {
+    if (!detailData) return;
+    const hasTranslation = (bucket, id, englishName) => {
+      const dict = KO?.[bucket] || {};
+      return Boolean(dict[championsData.toID(englishName)] || dict[championsData.toID(id)]);
+    };
+
+    const itemIds = new Set();
+    for (const regId of Object.keys(REGULATIONS)) {
+      for (const item of championsData.legalItems(detailData, regId)) itemIds.add(item.id);
+    }
+
+    const moveIds = new Set();
+    for (const reg of Object.values(REGULATIONS)) {
+      for (const pokemon of reg.pokemon) {
+        for (const moveId of learnsetFor(detailData, pokemon)) moveIds.add(moveId);
+      }
+    }
+
+    const abilityNames = new Set();
+    for (const reg of Object.values(REGULATIONS)) {
+      for (const pokemon of reg.pokemon) {
+        const details = dexRecord(detailData, pokemon);
+        for (const ability of details?.abilities || []) if (ability) abilityNames.add(ability);
+      }
+    }
+
+    const missingItems = [...itemIds]
+      .filter(id => !hasTranslation("items", id, detailData.items?.[id]?.name || id))
+      .sort()
+      .map(id => ({ id, english: detailData.items?.[id]?.name || id }));
+    const missingMoves = [...moveIds]
+      .filter(id => !hasTranslation("moves", id, detailData.moves?.[id]?.name || id))
+      .sort()
+      .map(id => ({ id, english: detailData.moves?.[id]?.name || id }));
+    const missingAbilities = [...abilityNames]
+      .filter(name => !hasTranslation("abilities", name, name))
+      .sort();
+
+    const result = {
+      checkedAt: new Date().toISOString(),
+      regulations: Object.keys(REGULATIONS),
+      itemsChecked: itemIds.size,
+      movesChecked: moveIds.size,
+      abilitiesChecked: abilityNames.size,
+      missingItems,
+      missingMoves,
+      missingAbilities,
+    };
+    window.YPL_LOCALIZATION_AUDIT = result;
+    if (missingItems.length || missingMoves.length || missingAbilities.length) console.warn("[YPL] 한국어 번역 누락 감지", result);
+    else console.info(`[YPL] 한국어 번역 검사 통과 · 도구 ${itemIds.size} · 기술 ${moveIds.size} · 특성 ${abilityNames.size}`);
+  }, [detailData]);
+
+  const dataStatusText = detailStatus === "ready" ? "Champions 데이터 연결됨" : detailStatus === "error" ? "상세 데이터 연결 실패" : "배틀 데이터 불러오는 중";
+  const localizationText = localizationStatus === "ready" ? "포켓몬 이름 · 한국어" : localizationStatus === "error" ? "포켓몬 이름 · 영문" : "한국어 이름 준비 중…";
+  const draftText = draftStatus === "saved" ? "임시저장됨" : draftStatus === "pending" ? "임시저장 중…" : draftStatus === "error" ? "임시저장 실패" : "";
+  const hasWorkingState = team.length > 0 || Boolean(activeSavedTeamId) || cupRuleId !== "none" || Boolean(assignedTypeId);
 
   return (
     <section className="tb-page">
@@ -560,8 +814,8 @@ export default function TeamBuilderPage() {
           <p>Pokémon Champions 규정에 맞춰 엔트리를 구성하고 브라우저에 저장할 수 있습니다.</p>
         </div>
         <div className="tb-hero-actions">
-          <button className="btn btn-ghost" onClick={() => openLibrary(false)}>팀 박스 <span className="tb-count-badge">{savedTeams.length}</span></button>
-          <button className="btn tb-main-btn" onClick={() => openLibrary(true)}>팀 저장</button>
+          <button className="btn btn-ghost" disabled={!storageAvailable} onClick={() => openLibrary(false)}>내 팀 <span className="tb-count-badge">{savedTeams.length}</span></button>
+          <button className="btn tb-main-btn" disabled={!storageAvailable} onClick={() => openLibrary(true)}>{currentSaved ? (dirty ? "변경사항 저장" : "저장됨") : "팀 저장"}</button>
         </div>
       </Reveal>
 
@@ -581,7 +835,7 @@ export default function TeamBuilderPage() {
           </label>
           {cupRule.kind === "monotype" && <label className="tb-field">
             <span>배정 타입</span>
-            <select className="tb-select" value={assignedTypeId} onChange={event => { setAssignedTypeId(event.target.value); markDirty(); }}>
+            <select className="tb-select" value={assignedTypeId} onChange={event => switchCupRuleType(event.target.value)}>
               <option value="">타입을 선택하세요</option>
               {TYPE_OPTIONS.map(type => <option key={type.id} value={type.id}>{type.korean} ({type.english})</option>)}
             </select>
@@ -595,11 +849,21 @@ export default function TeamBuilderPage() {
         </div>
       </Reveal>
 
+      <Reveal className="tb-validation-wrap" delay={45}>
+        <ValidationPanel
+          result={validation}
+          regulationName={regulation.name}
+          cupRuleSummary={currentCupRuleSummary}
+          teamLength={team.length}
+          configuredSpecialRule={cupRule.kind !== "none"}
+        />
+      </Reveal>
+
       <div className="tb-layout">
         <Reveal className="tb-panel tb-pool-panel" delay={55}>
           <div className="tb-panel-head">
             <div><span className="tb-panel-kicker">POKÉMON</span><h2>포켓몬 선택</h2></div>
-            <strong className="tb-pool-count">{filteredPool.length}<small> / {eligiblePool.length}</small></strong>
+            <strong className="tb-pool-count">{cupRule.kind === "monotype" && selectedType ? `${selectedType.korean} ` : ""}{eligiblePool.length}<small> / {regulation.pokemon.length}</small></strong>
           </div>
           <div className="tb-data-line"><span className={`tb-dot ${detailStatus}`}/>{dataStatusText}<span>·</span>{localizationText}</div>
           <div className="tb-search-row">
@@ -607,26 +871,27 @@ export default function TeamBuilderPage() {
             {query && <button className="tb-clear" onClick={() => setQuery("")} aria-label="검색어 지우기">×</button>}
           </div>
           {cupRule.kind === "monotype" && !assignedTypeId ? (
-            <div className="tb-pool-empty">배정 타입을 선택하면 사용 가능한 포켓몬이 표시됩니다.</div>
-          ) : cupRule.kind === "monotype" && detailStatus === "loading" ? (
-            <div className="tb-pool-empty">타입 판정을 위해 상세 데이터를 불러오는 중입니다.</div>
+            <div className="tb-pool-empty">모노타입 챌린지의 배정 타입을 먼저 선택해 주세요.</div>
+          ) : cupRule.kind === "monotype" && !detailData && detailStatus === "loading" ? (
+            <div className="tb-pool-empty">포켓몬 타입 데이터를 불러오는 중입니다.</div>
+          ) : cupRule.kind === "monotype" && !detailData ? (
+            <div className="tb-pool-empty">타입 데이터를 불러오지 못해 모노타입 포켓몬을 판정할 수 없습니다.</div>
           ) : (
             <div className="tb-pokemon-list">
               {filteredPool.map(pokemon => {
                 const details = dexRecord(detailData, pokemon);
                 const identity = speciesIdentity(detailData, pokemon);
                 const already = team.some(member => speciesIdentity(detailData, member.pokemon) === identity);
-                const full = team.length >= (regulation.maxTeamSize || 6);
                 return (
-                  <button key={pokemon.name} className="tb-pokemon-row" onClick={() => addPokemon(pokemon)} disabled={already || full}>
+                  <button key={pokemon.name} className="tb-pokemon-row" onClick={() => addPokemon(pokemon)} disabled={already}>
                     <img src={spriteUrl(pokemon.name)} alt="" onError={event => { event.currentTarget.style.visibility = "hidden"; }} />
-                    <span className="tb-pokemon-copy"><strong>{displayPokemon(pokemon)}</strong>{displayPokemon(pokemon) !== pokemon.name && <small>{pokemon.name}</small>}</span>
+                    <span className="tb-pokemon-copy"><strong>{displayPokemon(pokemon)}</strong><small>{displayPokemon(pokemon) !== pokemon.name ? pokemon.name : ""}{details?.num ? `${displayPokemon(pokemon) !== pokemon.name ? " · " : ""}#${String(details.num).padStart(4, "0")}` : ""}</small></span>
                     <TypeBadges types={details?.types || []} />
-                    <span className="tb-add-mark">{already ? "선택됨" : "+"}</span>
+                    <span className="tb-add-mark">{already ? "✓" : "+"}</span>
                   </button>
                 );
               })}
-              {!filteredPool.length && <div className="tb-pool-empty">조건에 맞는 포켓몬이 없습니다.</div>}
+              {!filteredPool.length && <div className="tb-pool-empty">검색 결과가 없습니다.</div>}
             </div>
           )}
         </Reveal>
@@ -634,8 +899,11 @@ export default function TeamBuilderPage() {
         <div className="tb-main-column">
           <Reveal className="tb-panel" delay={75}>
             <div className="tb-panel-head tb-team-head">
-              <div><span className="tb-panel-kicker">TEAM</span><h2>{currentSaved?.name || "현재 팀"}</h2></div>
-              <div className="tb-team-meta"><span className={dirty ? "dirty" : ""}>{dirty ? "수정됨" : draftText}</span><strong>{team.length} / {regulation.maxTeamSize || 6}</strong></div>
+              <div>
+                <span className="tb-panel-kicker">YOUR TEAM</span>
+                <div className="tb-team-title-line"><h2>팀 구성</h2><span className="tb-current-team">{currentSaved?.name || "저장되지 않은 팀"}</span>{dirty && <span className="tb-dirty-badge">변경사항 있음</span>}{hasWorkingState && draftText && <span className={`tb-draft-badge ${draftStatus}`} title={draftStatus === "saved" && draftSavedAt ? `마지막 임시저장: ${formatSavedDate(draftSavedAt)}` : undefined}>{draftText}</span>}</div>
+              </div>
+              <div className="tb-team-meta"><strong>{team.length} / {regulation.maxTeamSize || 6}</strong></div>
             </div>
             <div className="tb-team-slots">
               {Array.from({ length: regulation.maxTeamSize || 6 }, (_, index) => {
@@ -705,11 +973,14 @@ export default function TeamBuilderPage() {
                     value={selectedMember.item}
                     options={itemOptions}
                     display={id => itemDisplay(detailData, id)}
-                    resolve={raw => resolveFromOptions(raw, itemOptions, id => itemDisplay(detailData, id))}
+                    resolve={resolveItem}
+                    validateMatch={itemId => itemId && team.some(member => member.uid !== selectedMember.uid && member.item === itemId) ? "같은 도구는 팀에서 한 번만 사용할 수 있습니다." : ""}
                     onCommit={id => updateMember(selectedMember.uid, { item: id })}
-                    placeholder={detailStatus === "error" ? "데이터 연결 실패" : "도구 없음 · 검색 또는 선택 (한글/영문)"}
+                    placeholder={!detailData ? (detailStatus === "error" ? "데이터 연결 실패" : "데이터 로딩 중…") : "도구 없음 · 검색 또는 선택 (한글/영문)"}
                     disabled={!detailData}
-                    ariaLabel="도구"
+                    ariaLabel="도구 · Held Item"
+                    invalidMessage="목록에 있는 사용 가능 도구를 선택해 주세요."
+                    revertOnInvalid
                   />
                 </div>
 
@@ -727,16 +998,19 @@ export default function TeamBuilderPage() {
                             value={selectedMove}
                             options={options}
                             display={id => moveDisplay(detailData, id)}
-                            resolve={raw => resolveFromOptions(raw, options, id => moveDisplay(detailData, id))}
+                            resolve={resolveMove}
+                            validateMatch={moveId => selectedMember.moves.some((move, moveIndex) => moveIndex !== index && move === moveId) ? "같은 기술은 한 포켓몬에게 중복 배치할 수 없습니다." : ""}
                             onCommit={moveId => {
                               const moves = [...selectedMember.moves];
                               moves[index] = moveId;
                               updateMember(selectedMember.uid, { moves });
                             }}
-                            placeholder={detailStatus === "error" ? "데이터 연결 실패" : learnset.length ? "기술 검색 또는 선택 (한글/영문)" : "학습 기술 데이터 확인 중"}
+                            placeholder={detailStatus === "error" ? "데이터 연결 실패" : learnset.length ? "기술 검색 또는 선택 (한글/영문)" : "학습 기술 데이터를 찾지 못했습니다"}
                             disabled={!detailData}
                             ariaLabel={`기술 ${index + 1}`}
+                            invalidMessage="목록에 있는 학습 가능 기술을 선택해 주세요."
                             meta={selectedMove ? moveMetadata(detailData, selectedMove) : ""}
+                            emptyMeta={selectedMove ? "" : (learnset.length ? "기술을 입력하거나 목록에서 선택하세요." : "현재 포켓몬의 기술 목록을 불러오지 못했습니다.")}
                           />
                         </label>
                       );
@@ -747,14 +1021,15 @@ export default function TeamBuilderPage() {
             )}
           </Reveal>
 
-          <Reveal delay={115}><ValidationPanel result={validation} /></Reveal>
         </div>
       </div>
 
-      {libraryOpen && <Modal title="Team Box" hint="팀은 이 브라우저의 localStorage에 저장됩니다. 기존 v0.6 저장 데이터와 호환됩니다." onClose={() => setLibraryOpen(false)}>
+      {libraryOpen && <Modal title="내 팀" hint="불러오기 후 수정하고 다시 저장하면 기존 팀을 덮어씁니다." onClose={() => setLibraryOpen(false)}>
+        <button className="tb-modal-close" type="button" onClick={() => setLibraryOpen(false)} aria-label="내 팀 닫기">×</button>
         <div className="tb-library-save">
-          <label className="tb-field"><span>팀 이름</span><input className="tb-input tb-team-name" maxLength={40} value={saveName} onChange={event => setSaveName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") saveCurrentTeam(); }} /></label>
-          <div className="tb-library-save-row"><span>{regulation.name} · {cupRule.kind === "monotype" ? `${cupRule.shortName} ${selectedType?.korean || "타입 미선택"}` : "추가 룰 없음"}</span><button className="btn tb-main-btn btn-sm" onClick={saveCurrentTeam}>{currentSaved ? "현재 팀 덮어쓰기" : "새 팀 저장"}</button></div>
+          <label className="tb-field"><span>현재 팀 저장</span><input className="tb-input tb-team-name" maxLength={40} value={saveName} onChange={event => setSaveName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); saveCurrentTeam(); } }} placeholder="팀 이름" /></label>
+          <div className="tb-library-save-meta"><span>{regulation.name} · {currentCupRuleSummary} · {team.length}/6마리</span><span>이 브라우저에 저장됩니다.</span><span>Incomplete / Invalid 팀도 초안 저장 가능</span></div>
+          <div className="tb-library-save-row"><span></span><button className="btn tb-main-btn btn-sm" disabled={!storageAvailable || team.length === 0} onClick={saveCurrentTeam}>{currentSaved ? "변경사항 저장" : "새 팀 저장"}</button></div>
           {saveMessage && <div className="tb-save-message">{saveMessage}</div>}
         </div>
         <div className="tb-saved-list">
@@ -763,20 +1038,19 @@ export default function TeamBuilderPage() {
             const type = TYPE_OPTIONS.find(option => option.id === saved.cupRuleSettings?.assignedType);
             return (
               <div className="tb-saved-team" key={saved.id}>
-                <div className="tb-saved-main">
-                  <strong>{saved.name}</strong>
-                  <span>{savedReg?.shortName || saved.regulationId}{saved.cupRuleId !== "none" ? ` · ${(CUP_RULES[saved.cupRuleId]?.shortName || "룰")}${type ? ` ${type.korean}` : ""}` : ""} · {saved.members.length}/6</span>
-                  <div className="tb-saved-icons">{saved.members.map((member, index) => <img key={`${member.pokemonName}-${index}`} src={spriteUrl(member.pokemonName)} alt="" title={member.pokemonName} />)}</div>
-                </div>
+                <button type="button" className="tb-saved-main tb-saved-load" onClick={() => loadSavedTeam(saved)}>
+                  <strong>{saved.name}{saved.id === activeSavedTeamId && <span className="tb-active-saved">현재</span>}</strong>
+                  <span>{savedReg?.shortName || saved.regulationId}{saved.cupRuleId !== "none" ? ` · ${(CUP_RULES[saved.cupRuleId]?.shortName || "룰")}${type ? ` · ${type.korean}` : ""}` : ""} · {saved.members.length}/6마리 · {formatSavedDate(saved.updatedAt)} 수정</span>
+                  <div className="tb-saved-icons">{saved.members.map((member, index) => <img key={`${member.pokemonName}-${index}`} src={spriteUrl(member.pokemonName)} alt="" title={member.pokemonName} onError={event => { event.currentTarget.style.visibility = "hidden"; }} />)}</div>
+                </button>
                 <div className="tb-saved-actions">
-                  <button className="btn btn-ghost btn-sm" onClick={() => loadSavedTeam(saved)}>불러오기</button>
                   <button className="btn btn-ghost btn-sm" onClick={() => duplicateSavedTeam(saved)}>복제</button>
                   <button className="btn btn-danger btn-sm" onClick={() => deleteSavedTeam(saved)}>삭제</button>
                 </div>
               </div>
             );
           })}
-          {!savedTeams.length && <div className="tb-library-empty">저장된 팀이 없습니다. 현재 팀을 저장하면 이곳에서 다시 불러올 수 있습니다.</div>}
+          {!savedTeams.length && <div className="tb-library-empty">아직 저장된 팀이 없습니다.</div>}
         </div>
       </Modal>}
     </section>

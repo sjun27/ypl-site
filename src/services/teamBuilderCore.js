@@ -343,60 +343,115 @@ export function pokemonMatchesCupRule({ pokemon, cupRuleId, assignedTypeId, deta
   return true;
 }
 
-export function validateTeam({ team, regulation, regulationId, cupRuleId, assignedTypeId, detailData, detailStatus, legalItems }) {
+export function resolveAlignment(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  const compact = toID(normalized);
+  return ALIGNMENTS.find(alignment => {
+    const candidates = [alignmentDisplay(alignment), alignment.name, natureName(alignment), alignment.id];
+    return candidates.some(candidate => String(candidate).trim().toLowerCase() === normalized || (compact && toID(candidate) === compact));
+  }) || null;
+}
+
+export function formatSavedDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }).format(date);
+}
+
+export function validateTeam({ team, regulation, regulationId, cupRuleId, assignedTypeId, detailData, detailStatus, legalItems, displayPokemon }) {
   const errors = [];
   const incomplete = [];
   const warnings = [];
   const allowedNames = new Set(regulation?.pokemon?.map(p => p.name) || []);
   const cupRule = CUP_RULES[cupRuleId] || CUP_RULES.none;
   const assignedType = TYPE_OPTIONS.find(type => type.id === assignedTypeId) || null;
+  const display = pokemon => displayPokemon?.(pokemon) || pokemon?.name || "";
 
-  if (cupRule.kind === "monotype" && !assignedType) incomplete.push("모노타입 챌린지의 배정 타입을 선택해 주세요.");
+  if (cupRule.kind === "monotype" && !assignedType) {
+    incomplete.push("모노타입 챌린지의 배정 타입을 선택해 주세요.");
+  }
+
   if (cupRule.kind === "monotype" && assignedType && detailData) {
     for (const member of team) {
       if (!pokemonMatchesCupRule({ pokemon: member.pokemon, cupRuleId, assignedTypeId, detailData })) {
-        errors.push(`모노타입 룰 위반: ${member.pokemon.name}은(는) ${assignedType.korean} 타입을 포함하지 않습니다.`);
+        errors.push(`모노타입 룰 위반: ${display(member.pokemon)}은(는) ${assignedType.korean} 타입을 포함하지 않습니다.`);
       }
     }
   }
 
-  for (const member of team) if (!allowedNames.has(member.pokemon.name)) errors.push(`${member.pokemon.name}은(는) ${regulation?.shortName || regulationId}에서 사용할 수 없습니다.`);
+  for (const member of team) {
+    if (!allowedNames.has(member.pokemon.name)) {
+      errors.push(`${display(member.pokemon)}은(는) ${regulation?.shortName || regulationId}에서 사용할 수 없습니다.`);
+    }
+  }
 
   const identities = new Map();
   for (const member of team) {
     const identity = speciesIdentity(detailData, member.pokemon);
     if (identities.has(identity)) {
+      const other = identities.get(identity);
       const dex = dexRecord(detailData, member.pokemon)?.num;
-      errors.push(`Species Clause 위반: ${identities.get(identity).pokemon.name} / ${member.pokemon.name}${dex ? ` (#${String(dex).padStart(4, "0")})` : ""}`);
-    } else identities.set(identity, member);
+      errors.push(`Species Clause 위반: ${display(other.pokemon)} / ${display(member.pokemon)}${dex ? ` (#${String(dex).padStart(4, "0")})` : ""}`);
+    } else {
+      identities.set(identity, member);
+    }
   }
 
   const legalItemIds = detailData ? new Set((legalItems || []).map(item => item.id)) : null;
   const itemOwners = new Map();
   for (const member of team) {
     if (!member.item) continue;
-    if (legalItemIds && !legalItemIds.has(member.item)) errors.push(`${member.pokemon.name}의 ${itemName(detailData, member.item)}은(는) 사용할 수 없습니다.`);
-    if (itemOwners.has(member.item)) errors.push(`Item Clause 위반: ${itemName(detailData, member.item)}을(를) 두 마리가 사용하고 있습니다.`);
-    else itemOwners.set(member.item, member.uid);
+    if (legalItemIds && !legalItemIds.has(member.item)) {
+      errors.push(`${display(member.pokemon)}의 ${itemName(detailData, member.item)}은(는) ${regulation?.shortName || regulationId}에서 사용할 수 없습니다.`);
+    }
+    if (itemOwners.has(member.item)) {
+      errors.push(`Item Clause 위반: ${itemName(detailData, member.item)}을(를) 두 마리가 사용하고 있습니다.`);
+    } else {
+      itemOwners.set(member.item, member.uid);
+    }
   }
 
   for (const member of team) {
     const total = STAT_KEYS.reduce((sum, key) => sum + Number(member.statPoints?.[key] || 0), 0);
-    if (total > 66 || STAT_KEYS.some(key => Number(member.statPoints?.[key] || 0) > 32)) errors.push(`${member.pokemon.name}의 Stat Point 배분이 한도를 초과했습니다.`);
+    if (total > 66 || STAT_KEYS.some(key => Number(member.statPoints?.[key] || 0) > 32)) {
+      errors.push(`${display(member.pokemon)}의 Stat Point 배분이 한도를 초과했습니다.`);
+    }
+
     const selectedMoves = (member.moves || []).filter(Boolean);
-    if (new Set(selectedMoves).size !== selectedMoves.length) errors.push(`${member.pokemon.name}에게 같은 기술을 중복 배치할 수 없습니다.`);
+    if (new Set(selectedMoves).size !== selectedMoves.length) {
+      errors.push(`${display(member.pokemon)}에게 같은 기술을 중복 배치할 수 없습니다.`);
+    }
+
     if (detailData) {
       const details = dexRecord(detailData, member.pokemon);
-      if (details?.abilities?.length && member.ability && !details.abilities.includes(member.ability)) errors.push(`${member.pokemon.name}이(가) 사용할 수 없는 특성입니다.`);
+      if (details?.abilities?.length && member.ability && !details.abilities.includes(member.ability)) {
+        errors.push(`${display(member.pokemon)}이(가) 사용할 수 없는 특성입니다.`);
+      }
       const learnset = new Set(learnsetFor(detailData, member.pokemon));
-      for (const move of selectedMoves) if (learnset.size && !learnset.has(move)) errors.push(`${member.pokemon.name}은(는) ${moveName(detailData, move)}을(를) 배울 수 없습니다.`);
+      for (const move of selectedMoves) {
+        if (learnset.size && !learnset.has(move)) {
+          errors.push(`${display(member.pokemon)}은(는) ${moveName(detailData, move)}을(를) 배울 수 없습니다.`);
+        }
+      }
     }
-    if (selectedMoves.length < 4) incomplete.push(`${member.pokemon.name}의 기술이 ${selectedMoves.length}/4개 설정되었습니다.`);
+
+    // Team Valid는 '규정 위반 없음'이 아니라 제출 가능한 세팅까지 완료된 상태에만 사용한다.
+    if (selectedMoves.length < 4) {
+      incomplete.push(`${display(member.pokemon)}의 기술이 ${selectedMoves.length}/4개 설정되었습니다.`);
+    }
   }
 
-  if (team.length < (regulation?.maxTeamSize || 6)) incomplete.unshift(`포켓몬이 ${team.length}/${regulation?.maxTeamSize || 6}마리 선택되었습니다.`);
-  if (detailStatus === "loading") incomplete.push("Champions 상세 데이터를 불러오는 중이라 최종 검증이 아직 완료되지 않았습니다.");
-  if (detailStatus === "error") incomplete.push("상세 데이터 연결에 실패해 기술·도구 legality를 최종 검증할 수 없습니다.");
+  if (team.length < (regulation?.maxTeamSize || 6)) {
+    incomplete.unshift(`포켓몬이 ${team.length}/${regulation?.maxTeamSize || 6}마리 선택되었습니다.`);
+  }
+
+  // 상세 데이터가 준비되지 않으면 기술/도구 legality를 끝까지 검증할 수 없으므로 Valid 판정을 내리지 않는다.
+  if (detailStatus === "loading") {
+    incomplete.push("Champions 상세 데이터를 불러오는 중이라 최종 검증이 아직 완료되지 않았습니다.");
+  }
+  if (detailStatus === "error") {
+    incomplete.push("상세 배틀 데이터 연결에 실패해 기술·도구 legality를 최종 검증할 수 없습니다.");
+  }
 
   const complete = team.length === (regulation?.maxTeamSize || 6) && incomplete.length === 0;
   const valid = errors.length === 0 && complete;
