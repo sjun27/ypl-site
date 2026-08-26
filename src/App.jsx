@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { getData, setData } from "./storage.js";
+import { loadSiteData, saveSiteData } from "./services/index.js";
 import { AboutPage, BoardPage, BracketsPage, ChampionsPage, HomePage, NewsPage, RecordsPage, TitlesPage } from "./pages/index.js";
 import { Dropdown, Modal, SiteHeader } from "./components/index.js";
 
@@ -7,7 +7,6 @@ import { Dropdown, Modal, SiteHeader } from "./components/index.js";
    YPL — Yonsei Pokemon League  v5 (미니멀 리디자인 / 남색 포인트)
    방문자 조회, 관리자 편집, window.storage(shared) 영구저장
    ========================================================================= */
-const STORAGE_KEY = "ypl_data_v4";
 const ADMINS = [{ id: "yplofficial", pw: "yplofficial123!" }];
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -81,10 +80,6 @@ const SEED = {
   board: [],
   ...IMPORTED,
 };
-
-/* ============================== 스토리지 ============================== */
-async function loadData(){ try{ return await getData(STORAGE_KEY); }catch{ return null; } }
-async function persist(d){ try{ return await setData(STORAGE_KEY, d); }catch(e){ console.error(e); return false; } }
 
 /* 저장된(Supabase) 데이터의 일부 텍스트를 최신 표기로 교정 — 로드 시 메모리에서 적용 */
 function normalizeData(d){
@@ -1527,7 +1522,7 @@ export default function App() {
   const [admin,setAdmin]=useState(false); const [toast,setToast]=useState(""); const [modal,setModal]=useState(null);
   const [scrolled,setScrolled]=useState(false);
   const [menuOpen,setMenuOpen]=useState(false);
-  useEffect(()=>{(async()=>setData(normalizeData((await loadData())||SEED)))();},[]);
+  useEffect(()=>{(async()=>setData(normalizeData((await loadSiteData())||SEED)))();},[]);
   const [noAnim,setNoAnim]=useState(false);
   const switchTheme=useCallback(()=>{
     // 테마 전환 렌더에 no-anim 클래스를 함께 적용해 모든 요소가 동시에 바뀌도록 함
@@ -1545,7 +1540,7 @@ export default function App() {
   useEffect(()=>{let last=null,raf=0;const f=()=>{if(raf)return;raf=requestAnimationFrame(()=>{raf=0;const v=window.scrollY>20;if(v!==last){last=v;setScrolled(v);}});};f();window.addEventListener("scroll",f,{passive:true});return()=>{window.removeEventListener("scroll",f);if(raf)cancelAnimationFrame(raf);};},[]);
   const go=useCallback((v)=>{setView(v);setMenuOpen(false);window.scrollTo({top:0,behavior:"smooth"});},[]);
   const flash=useCallback((m)=>{setToast(m);setTimeout(()=>setToast(""),1800);},[]);
-  const save=useCallback(async(next)=>{setData(next);const ok=await persist(next);flash(ok?"저장됨 ✓":"메모리에만 반영됨");},[flash]);
+  const save=useCallback(async(next)=>{setData(next);const ok=await saveSiteData(next);flash(ok?"저장됨 ✓":"메모리에만 반영됨");},[flash]);
   const submitForm=useCallback(async(annId,answers)=>{
     // 동시 제출로 인한 응답 유실 방지:
     // 최신 데이터를 다시 읽어 내 응답을 덧붙여 저장한 뒤, 저장 결과를 재확인.
@@ -1563,17 +1558,17 @@ export default function App() {
     let ok=false;
     const hasMine=(d)=>{ const a=(d.announcements||[]).find(x=>x.id===annId); return (((a||{}).form||{}).responses||[]).some(r=>r.id===resp.id); };
     for(let attempt=0;attempt<8;attempt++){
-      const fresh=normalizeData((await loadData())||data);
+      const fresh=normalizeData((await loadSiteData())||data);
       const next=attach(fresh);
       setData(next);
-      ok=await persist(next);
+      ok=await saveSiteData(next);
       if(!ok) break;
       // 저장 확인: 뒤늦게 남의 저장에 덮이는 경우까지 잡기 위해 두 번 연속 확인
       await new Promise(r=>setTimeout(r,120+Math.random()*180));
-      const c1=normalizeData((await loadData())||next);
+      const c1=normalizeData((await loadSiteData())||next);
       if(hasMine(c1)){
         await new Promise(r=>setTimeout(r,200+Math.random()*250));
-        const c2=normalizeData((await loadData())||c1);
+        const c2=normalizeData((await loadSiteData())||c1);
         if(hasMine(c2)){ setData(c2); flash("신청 완료 ✓"); return true; }
       }
       await new Promise(r=>setTimeout(r,150+Math.random()*400*(attempt+1))); // 랜덤 백오프로 동시 충돌 분산
@@ -1581,7 +1576,7 @@ export default function App() {
     flash(ok?"신청 저장을 확인하지 못했습니다. 다시 시도해주세요.":"메모리에만 반영됨");
     return false;
   },[data,flash]);
-  const refresh=useCallback(async()=>{ const fresh=await loadData(); if(fresh) setData(normalizeData(fresh)); },[]);
+  const refresh=useCallback(async()=>{ const fresh=await loadSiteData(); if(fresh) setData(normalizeData(fresh)); },[]);
   if(!data) return <div className={"ypl"+(dark?" dark":"")} style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",width:"100%",background:"var(--s-page)"}}><style>{STYLES}</style><span className="loading-txt">불러오는 중…</span></div>;
   return (
     <div className={"ypl"+(dark?" dark":"")+(noAnim?" no-anim":"")}><style>{STYLES}</style>

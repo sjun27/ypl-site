@@ -172,19 +172,82 @@ http://localhost:4173/ypl-site/
 
 ## 3단계 — Storage / Service 구조 정리
 
-> 예정
+### 무엇을 변경했나
 
-목표는 UI 코드와 데이터 읽기·쓰기 로직을 분리하는 것이다.
+기존에는 `App.jsx`가 `src/storage.js`의 `getData` / `setData`를 직접 불러오고, `ypl_data_v4` 저장 키까지 직접 알고 있었다.
 
-예정 방향:
+이번 단계에서 운영 데이터 전용 서비스 계층을 추가했다.
 
-- 기존 `src/storage.js`의 역할과 사용처 분석
-- Supabase / localStorage / fallback 처리의 책임 분리
-- 화면 컴포넌트가 저장소 구현 방식에 직접 의존하지 않도록 service 계층 정리
-- 기존 `ypl_data_v4` 및 운영 Supabase 데이터는 그대로 유지
-- 기존 production 데이터에 대한 쓰기 테스트는 하지 않음
+- `src/services/siteDataService.js` 생성
+- `src/services/index.js`에서 서비스 export
+- `App.jsx`는 이제 저수준 저장 함수 대신 다음 함수만 사용
+  - `loadSiteData()`
+  - `saveSiteData()`
+- 운영 데이터 키 `ypl_data_v4`는 `SITE_DATA_KEY`로 서비스 계층에서 관리
 
-3단계 완료 후 실제 변경사항과 검증 결과를 이 문서에 추가한다.
+현재 구조는 다음과 같다.
+
+```text
+App / Pages
+    ↓
+siteDataService
+    ↓
+storage.js
+    ↓
+window.storage / Supabase / localStorage
+```
+
+### 왜 변경했나
+
+앞으로 Team Builder, 대회 엔트리, Battle Data 등 데이터 종류가 늘어날 때 화면 코드가 Supabase나 localStorage 구현 방식에 직접 의존하면 다시 `App.jsx`가 복잡해진다.
+
+화면은 “YPL 운영 데이터를 읽고 저장한다”는 기능만 알고, 실제 저장 위치 선택은 기존 `storage.js`가 담당하도록 책임을 분리했다.
+
+이렇게 하면 향후 저장 방식이 바뀌더라도 화면 코드를 대규모로 수정할 필요가 줄어든다.
+
+### 사용자 체감 변화
+
+없음.
+
+기존 데이터 로딩, 저장, 참가 신청 동시 저장 확인 로직은 그대로 유지한다.
+
+### 변경하지 않은 항목
+
+- `src/storage.js`의 실제 저장 동작
+- `STORAGE_MODE` 우선순위
+  - `window.storage`
+  - Supabase
+  - localStorage
+- production Supabase 프로젝트 연결
+- `site_data` 테이블
+- 기존 저장 키 `ypl_data_v4`
+- SEED 구조
+- 데이터 정규화(`normalizeData`)
+- 테마 localStorage
+- 관리자 로그인 방식
+- RLS / Auth
+- 기존 production 데이터
+
+### 안전성 원칙
+
+- 운영 Supabase에 쓰기 테스트를 하지 않음
+- 기존 데이터 migration 없음
+- 기존 데이터를 seed로 초기화하는 로직 추가 없음
+- 서비스 계층은 기존 `getData` / `setData`를 그대로 호출함
+
+### 검증
+
+- 변경 범위 diff 확인
+- `git diff --check` 오류 없음
+- 기존 `src/storage.js` 변경 없음
+- `App.jsx`에서 `getData`, `setData`, `STORAGE_KEY`, 임시 `loadData` / `persist` 직접 의존 제거 확인
+- Windows 로컬에서 production build 및 preview 회귀 테스트 필요
+
+### 예정 Git 커밋
+
+```text
+refactor: separate site data service
+```
 
 ---
 
