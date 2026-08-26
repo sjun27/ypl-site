@@ -1,0 +1,764 @@
+import React, { useEffect, useState } from "react";
+
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+/* ============================== 대진표 (Bracket) ============================== */
+const BYE="\u2205BYE";
+const nextPow2=n=>{let p=1;while(p<n)p*=2;return p;};
+const shuffleArr=a=>{a=[...a];for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]];}return a;};
+
+function firstRoundSlots(pids){
+  const n=pids.length, size=nextPow2(Math.max(2,n)), matches=size/2, byes=size-n;
+  const sh=shuffleArr(pids);
+  const order=shuffleArr([...Array(matches).keys()]);
+  const byeMatches=new Set(order.slice(0,byes));
+  const slots=[]; let k=0;
+  for(let m=0;m<matches;m++){
+    if(byeMatches.has(m)) slots.push([{pid:sh[k++]},{bye:true}]);
+    else slots.push([{pid:sh[k++]},{pid:sh[k++]}]);
+  }
+  return {slots,size,byes};
+}
+function buildSingle(pids){
+  const {slots,size,byes}=firstRoundSlots(pids);
+  const rounds=[];
+  let r0=slots.map(([a,b])=>{const mt={id:uid(),a,b,winner:null}; if(b.bye)mt.winner="a"; if(a.bye)mt.winner="b"; return mt;});
+  rounds.push(r0); let cur=r0;
+  while(cur.length>1){
+    const next=[];
+    for(let i=0;i<cur.length;i+=2) next.push({id:uid(),a:{win:cur[i].id},b:{win:cur[i+1].id},winner:null});
+    rounds.push(next); cur=next;
+  }
+  return {kind:"single",rounds,size,byes};
+}
+function buildDouble(pids){
+  if(!pids || pids.length<3) return buildSingle(pids); // 2명 이하는 더블 엘리미가 성립하지 않아 단일 엘리미로 대체
+  const single=buildSingle(pids); const W=single.rounds; const k=W.length;
+  const L=[]; let lbPrev=[];
+  if(W[0].length>=2){
+    const r=[];
+    for(let i=0;i<W[0].length;i+=2) r.push({id:uid(),a:{lose:W[0][i].id},b:{lose:W[0][i+1].id},winner:null});
+    L.push(r); lbPrev=r;
+  } else { lbPrev=[W[0][0]]; }
+  /* 승자조에서 떨어진 사람이 방금/이미 붙었던 상대를 패자조에서 곧바로 다시 만나는
+     리매치를 최소화하기 위해, 드롭 라운드마다 승자조 패자의 배치 순서를 바꾼다.
+     (홀수 번째 드롭=역순, 짝수 번째 드롭=반쪽 회전 — 시뮬레이션상 리매치 최소) */
+  let drop=0;
+  for(let wr=1;wr<k-1;wr++){
+    drop++;
+    const len=lbPrev.length, half=Math.floor(len/2);
+    const dropIdx=(i)=> (drop%2===1) ? (len-1-i) : ((i+half)%len);
+    const major=[];
+    for(let i=0;i<len;i++) major.push({id:uid(),a:{win:lbPrev[i].id},b:{lose:W[wr][dropIdx(i)].id},winner:null});
+    L.push(major);
+    if(major.length>1){
+      const minor=[];
+      for(let i=0;i<major.length;i+=2) minor.push({id:uid(),a:{win:major[i].id},b:{win:major[i+1].id},winner:null});
+      L.push(minor); lbPrev=minor;
+    } else lbPrev=major;
+  }
+  const lbFinal={id:uid(),a:{win:lbPrev[0].id},b:{lose:W[k-1][0].id},winner:null};
+  L.push([lbFinal]);
+  const gf={id:uid(),a:{win:W[k-1][0].id},b:{win:lbFinal.id},winner:null};
+  const reset={id:uid(),a:{win:W[k-1][0].id},b:{win:lbFinal.id},winner:null};
+  return {kind:"double",rounds:W,lb:L,gf,reset,size:single.size,byes:single.byes};
+}
+function buildGroups(pids,numGroups,adv){
+  const sh=shuffleArr(pids);
+  const groups=Array.from({length:numGroups},()=>[]);
+  sh.forEach((p,i)=>groups[i%numGroups].push(p));
+  return {kind:"group",adv,groups:groups.map((members,gi)=>{
+    const matches=[];
+    for(let i=0;i<members.length;i++)for(let j=i+1;j<members.length;j++) matches.push({id:uid(),a:{pid:members[i]},b:{pid:members[j]},winner:null});
+    return {id:uid(),name:String.fromCharCode(65+gi),members,matches};
+  })};
+}
+function evalGraph(g){
+  const win={},lose={},all=[];
+  g.rounds.forEach(r=>r.forEach(m=>all.push(m)));
+  if(g.lb) g.lb.forEach(r=>r.forEach(m=>all.push(m)));
+  if(g.gf) all.push(g.gf);
+  if(g.reset) all.push(g.reset);
+  const sp=(s)=>{ if(!s)return null; if(s.bye)return BYE; if(s.pid)return s.pid; if(s.win)return win[s.win]??null; if(s.lose)return lose[s.lose]??null; return null; };
+  for(const m of all){
+    const pa=sp(m.a),pb=sp(m.b); let w=null,l=null;
+    if(m.winner==="a"){w=pa;l=pb;} else if(m.winner==="b"){w=pb;l=pa;}
+    else if(pa===BYE&&pb&&pb!==BYE){w=pb;l=BYE;} else if(pb===BYE&&pa&&pa!==BYE){w=pa;l=BYE;}
+    else if(pa===BYE&&pb===BYE){w=BYE;l=BYE;}
+    win[m.id]=w; lose[m.id]=l;
+  }
+  return {win,lose,sp};
+}
+function elimResult(g){
+  if(!g) return null;
+  const {win,lose}=evalGraph(g);
+  const clean=(x)=>x&&x!==BYE?x:null;
+  if(g.kind==="double"){
+    const gf=g.gf, reset=g.reset;
+    const lf=g.lb[g.lb.length-1][0]; const semis=[lf]; if(g.lb.length>=2) semis.push(g.lb[g.lb.length-2][0]);
+    const sf=semis.map(m=>lose[m.id]).filter(x=>x&&x!==BYE);
+    if(gf.winner==="a"){ // 승자조 챔프가 GF 승리 → 즉시 우승
+      return {champ:clean(win[gf.id]), ru:clean(lose[gf.id]), sf, done:!!clean(win[gf.id])};
+    }
+    if(gf.winner==="b"&&reset){ // 패자조 챔프가 GF 승리 → 리셋 매치로 결정
+      return {champ:clean(win[reset.id]), ru:clean(lose[reset.id]), sf, done:!!reset.winner};
+    }
+    return {champ:null, ru:null, sf, done:false};
+  }
+  const finalM=g.rounds[g.rounds.length-1][0]; const semis=g.rounds.length>=2?g.rounds[g.rounds.length-2]:[];
+  const champ=win[finalM.id]||null, ru=lose[finalM.id]||null;
+  const sf=semis.map(m=>lose[m.id]).filter(x=>x&&x!==BYE);
+  return {champ:clean(champ), ru:clean(ru), sf, done:!!clean(champ)};
+}
+function groupStandings(group){
+  const w={}; group.members.forEach(m=>w[m]=0);
+  group.matches.forEach(mt=>{ if(mt.winner==="a")w[mt.a.pid]++; else if(mt.winner==="b")w[mt.b.pid]++; });
+  return [...group.members].sort((x,y)=>w[y]-w[x]).map(name=>({name,wins:w[name]}));
+}
+function groupDone(g){ return g.groups.every(gr=>gr.matches.every(m=>m.winner)); }
+// 매치 승자 설정(불변 업데이트)
+function collectGraphMatches(g){ const a=[]; if(!g)return a; g.rounds.forEach(r=>r.forEach(m=>a.push(m))); if(g.lb)g.lb.forEach(r=>r.forEach(m=>a.push(m))); if(g.gf)a.push(g.gf); if(g.reset)a.push(g.reset); return a; }
+function cascadeClear(all,id){ const seen=new Set(),stack=[id]; while(stack.length){ const cur=stack.pop();
+  all.forEach(m=>{ if(seen.has(m.id))return; if([m.a,m.b].some(s=>s&&(s.win===cur||s.lose===cur))){ m.winner=null; m.series=null; seen.add(m.id); stack.push(m.id); } }); } }
+// 승자 선택(토글: 같은 쪽 다시 누르면 취소, 반대쪽 누르면 변경) — 하위 매치 연쇄 초기화
+function withPick(b,matchId,side){
+  const nb=JSON.parse(JSON.stringify(b));
+  for(const g of [nb.graph,nb.knockout]){ if(!g)continue;
+    const all=collectGraphMatches(g); const m=all.find(x=>x.id===matchId);
+    if(m){ m.winner=(m.winner===side?null:side); cascadeClear(all,m.id); return nb; }
+  }
+  if(nb.groups){ for(const gr of nb.groups){ const m=gr.matches.find(x=>x.id===matchId); if(m){ m.winner=(m.winner===side?null:side); return nb; } } }
+  return nb;
+}
+// 팀전 시리즈 결과 저장(매치에 series 기록 + 전체 승자 반영)
+function withSeries(b,matchId,series,winnerSide){
+  const nb=JSON.parse(JSON.stringify(b));
+  for(const g of [nb.graph,nb.knockout]){ if(!g)continue;
+    const all=collectGraphMatches(g); const m=all.find(x=>x.id===matchId);
+    if(m){ m.series=series; m.winner=winnerSide; cascadeClear(all,m.id); return nb; }
+  }
+  if(nb.groups){ for(const gr of nb.groups){ const m=gr.matches.find(x=>x.id===matchId); if(m){ m.series=series; m.winner=winnerSide; return nb; } } }
+  return nb;
+}
+
+/* ===== 마법사 ===== */
+/* ===== PNG 다운로드 (우승 이미지 + 대진표 이미지) ===== */
+function bkDownload(canvas,filename){ canvas.toBlob(blob=>{ if(!blob)return; const url=URL.createObjectURL(blob); const a=document.createElement("a"); a.href=url; a.download=filename; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500); },"image/png"); }
+function bkRR(ctx,x,y,w,h,r){ ctx.beginPath(); ctx.moveTo(x+r,y); ctx.arcTo(x+w,y,x+w,y+h,r); ctx.arcTo(x+w,y+h,x,y+h,r); ctx.arcTo(x,y+h,x,y,r); ctx.arcTo(x,y,x+w,y,r); ctx.closePath(); }
+function bkSpaced(ctx,text,cx,y,sp){ ctx.save(); ctx.textAlign="left"; const ws=[...text].map(ch=>ctx.measureText(ch).width+sp); const tot=ws.reduce((a,c)=>a+c,0)-sp; let x=cx-tot/2; for(let i=0;i<text.length;i++){ ctx.fillText(text[i],x,y); x+=ws[i]; } ctx.restore(); }
+function bkClip(ctx,t,max){ if(ctx.measureText(t).width<=max)return t; let s=t; while(s.length>1&&ctx.measureText(s+"…").width>max)s=s.slice(0,-1); return s+"…"; }
+const BKF='"Wanted Sans Variable", "Wanted Sans", Pretendard, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif';
+/* 이미지 저장용 브랜드 색 — 사이트 디자인 토큰과 동일 */
+const BKC={ navy:"#1B3F86", navyH:"#24509F", ink:"#0D0D0D", t2:"#2C3444",
+            t4:"#4E5666", t5:"#6B7383", line:"#E5E8EF", line2:"#D3D9E4",
+            soft:"#F5F7FB", soft2:"#EFF3FA", card:"#FFFFFF", white:"#FFFFFF" };
+
+function downloadChampionPng(b,res,nameOf){
+  const S=2,W=1200,H=820; const cv=document.createElement("canvas"); cv.width=W*S; cv.height=H*S;
+  const ctx=cv.getContext("2d"); ctx.scale(S,S);
+
+  // 배경: 순백 + 얇은 테두리 한 겹 (그라데이션·반짝이 없음)
+  ctx.fillStyle=BKC.card; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=BKC.line; ctx.lineWidth=1; bkRR(ctx,40,40,W-80,H-80,28); ctx.stroke();
+
+  ctx.textAlign="center";
+  // 브랜드 액센트 바 + 워드마크
+  bkRR(ctx,W/2-32,92,64,6,3); ctx.fillStyle=BKC.navy; ctx.fill();
+  ctx.fillStyle=BKC.navy; ctx.font=`800 32px ${BKF}`; bkSpaced(ctx,"YPL",W/2,150,10);
+  ctx.fillStyle=BKC.t5; ctx.font=`600 13px ${BKF}`; bkSpaced(ctx,"POKEMON CENTER YONSEI",W/2,178,3);
+
+  // CHAMPION 라벨
+  ctx.font=`700 21px ${BKF}`;
+  const lw=ctx.measureText("CHAMPION").width+72;
+  bkRR(ctx,W/2-lw/2,252,lw,50,12); ctx.fillStyle=BKC.navy; ctx.fill();
+  ctx.fillStyle=BKC.white; bkSpaced(ctx,"CHAMPION",W/2,284,8);
+
+  // 챔피언 이름
+  const champ=nameOf(res.champ); const part=(b.participants||[]).find(p=>p.id===res.champ);
+  let party=""; if(b.mode==="team"){ party=(part?.members||[]).join(", "); }
+  else if(part?.party){ party=part.party.split(/[,\n]/).map(x=>x.trim()).filter(Boolean).join(", "); }
+  ctx.fillStyle=BKC.ink; ctx.font=`800 120px ${BKF}`;
+  ctx.fillText(bkClip(ctx,champ,W-180),W/2,420);
+
+  ctx.strokeStyle=BKC.line2; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(W/2-90,470); ctx.lineTo(W/2+90,470); ctx.stroke();
+
+  let ty=572;
+  if(party){ ctx.fillStyle=BKC.t4; ctx.font=`500 23px ${BKF}`;
+    ctx.fillText(bkClip(ctx,party,W-200),W/2,522); ty=596; }
+
+  ctx.fillStyle=BKC.t2; ctx.font=`700 36px ${BKF}`;
+  ctx.fillText(bkClip(ctx,b.name,W-200),W/2,ty);
+  ctx.fillStyle=BKC.t5; ctx.font=`600 19px ${BKF}`; ctx.fillText(b.createdAt,W/2,ty+38);
+
+  // 하단 준우승·4강 (구분선 위)
+  const subs=[];
+  if(res.ru) subs.push("준우승 "+nameOf(res.ru));
+  if(res.sf&&res.sf.length) subs.push("4강 "+res.sf.map(nameOf).join(", "));
+  if(subs.length){
+    ctx.strokeStyle=BKC.line; ctx.lineWidth=1;
+    ctx.beginPath(); ctx.moveTo(150,H-132); ctx.lineTo(W-150,H-132); ctx.stroke();
+    ctx.fillStyle=BKC.t5; ctx.font=`500 18px ${BKF}`;
+    ctx.fillText(bkClip(ctx,subs.join("      "),W-220),W/2,H-96);
+  }
+  bkDownload(cv,`${b.name}_우승_${champ}.png`);
+}
+
+function bkDrawMatch(ctx,x,y,w,h,aTxt,bTxt,aWin,bWin,aBye,bBye){
+  bkRR(ctx,x,y,w,h,12); ctx.fillStyle=BKC.card; ctx.fill(); ctx.strokeStyle=BKC.line; ctx.lineWidth=1; ctx.stroke();
+  const rowH=h/2; const drawRow=(ry,txt,win,bye)=>{
+    if(win){ bkRR(ctx,x+4,ry+3,w-8,rowH-6,8); ctx.fillStyle=BKC.navy; ctx.fill(); }
+    ctx.textAlign="left"; ctx.fillStyle=win?BKC.white:(bye?BKC.t5:BKC.ink); ctx.font=`${win?800:600} 14.5px ${BKF}`;
+    ctx.fillText(bkClip(ctx,txt||"",w-22),x+12,ry+rowH/2+5);
+  };
+  drawRow(y,aTxt,aWin,aBye); ctx.strokeStyle=BKC.line; ctx.beginPath(); ctx.moveTo(x+8,y+rowH); ctx.lineTo(x+w-8,y+rowH); ctx.stroke(); drawRow(y+rowH,bTxt,bWin,bBye);
+}
+// 토너먼트 트리 그리기 → {centers: 라운드별 y중심배열, right:오른쪽끝x, bottom}
+function bkDrawTree(ctx,rounds,ev,nameOf,ox,oy,boxW,boxH,gapX,pitch0){
+  const centers=[];
+  for(let r=0;r<rounds.length;r++){
+    centers[r]=[]; const x=ox+r*(boxW+gapX);
+    for(let j=0;j<rounds[r].length;j++){
+      let cy; if(r===0) cy=oy+j*pitch0+boxH/2; else cy=(centers[r-1][2*j]+centers[r-1][2*j+1])/2;
+      centers[r][j]=cy; const m=rounds[r][j];
+      const aPid=ev.sp(m.a),bPid=ev.sp(m.b),wp=ev.win[m.id];
+      const aTxt=aPid===BYE?"부전승":(aPid?nameOf(aPid):""); const bTxt=bPid===BYE?"부전승":(bPid?nameOf(bPid):"");
+      bkDrawMatch(ctx,x,cy-boxH/2,boxW,boxH,aTxt,bTxt, wp&&wp!==BYE&&wp===aPid, wp&&wp!==BYE&&wp===bPid, aPid===BYE,bPid===BYE);
+      if(r>0){ // 연결선
+        const px=ox+(r-1)*(boxW+gapX)+boxW; const c1=centers[r-1][2*j],c2=centers[r-1][2*j+1]; const midx=px+gapX/2;
+        ctx.strokeStyle=BKC.line2; ctx.lineWidth=1.5; ctx.beginPath();
+        ctx.moveTo(px,c1); ctx.lineTo(midx,c1); ctx.moveTo(px,c2); ctx.lineTo(midx,c2); ctx.moveTo(midx,c1); ctx.lineTo(midx,c2); ctx.moveTo(midx,(c1+c2)/2); ctx.lineTo(x,(c1+c2)/2); ctx.stroke();
+      }
+    }
+  }
+  const right=ox+rounds.length*(boxW+gapX)-gapX;
+  const bottom=oy+rounds[0].length*pitch0;
+  return {centers,right,bottom};
+}
+
+function downloadBracketPng(b,nameOf){
+  const boxW=174,boxH=56,gapX=46,pitch0=boxH+22,padL=34,padT=92;
+  const S=2;
+  // 측정용 가상 계산
+  const blocks=[]; // {type, ...}
+  if(b.format==="group"){
+    blocks.push({type:"groups"});
+    if(b.knockout) blocks.push({type:"elim",g:b.knockout,label:"본선 토너먼트"});
+  } else { blocks.push({type:"elim",g:b.graph}); }
+  // 캔버스 크기 추정
+  let W=700,H=300;
+  const estElim=(g)=>{ const wbW=padL+g.rounds.length*(boxW+gapX)-gapX+padL; let h=padT+g.rounds[0].length*pitch0+40;
+    if(g.kind==="double"){ h+=70+ (g.lb.reduce((mx,r)=>Math.max(mx,r.length),0))*0+ g.lb.length? 0:0; h+= 60 + Math.max(...g.lb.map(r=>r.length))*(boxH+22)+60; }
+    return {w:Math.max(wbW, g.kind==="double"? padL+(g.lb.length+2)*(boxW+gapX):0), h}; };
+  let gW=700,gH=0;
+  if(b.format==="group"){
+    const cols=Math.min(b.groups.length,3); const rows=Math.ceil(b.groups.length/cols);
+    const gboxW=250,gboxH=40+Math.max(...b.groups.map(g=>g.members.length))*26+20;
+    gW=padL+cols*(gboxW+24)-24+padL; gH=padT+rows*(gboxH+24);
+    W=Math.max(W,gW);
+    if(b.knockout){ const e=estElim(b.knockout); W=Math.max(W,e.w); gH+=60+e.h; }
+    H=gH+40;
+  } else { const e=estElim(b.graph); W=Math.max(700,e.w); H=e.h+24; }
+  W=Math.ceil(W); H=Math.ceil(H);
+  const cv=document.createElement("canvas"); cv.width=W*S; cv.height=H*S; const ctx=cv.getContext("2d"); ctx.scale(S,S);
+  ctx.fillStyle=BKC.card; ctx.fillRect(0,0,W,H);
+  ctx.textAlign="left"; ctx.fillStyle=BKC.ink; ctx.font=`800 30px ${BKF}`; ctx.fillText(bkClip(ctx,b.name,W-320),34,50);
+  ctx.fillStyle=BKC.t5; ctx.font=`600 13px ${BKF}`; bkSpaced(ctx,"YPL",34+8,74,4);
+  ctx.strokeStyle=BKC.line; ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(34,88); ctx.lineTo(W-34,88); ctx.stroke();
+  const res=b.format==="group"?(b.knockout?elimResult(b.knockout):null):elimResult(b.graph);
+  if(res&&res.done){ ctx.font=`700 17px ${BKF}`; const t="우승 "+nameOf(res.champ);
+    const tw=ctx.measureText(t).width+34; bkRR(ctx,W-34-tw,26,tw,38,10); ctx.fillStyle=BKC.navy; ctx.fill();
+    ctx.fillStyle=BKC.white; ctx.textAlign="center"; ctx.fillText(t,W-34-tw/2,51); ctx.textAlign="left"; }
+  let curY=padT;
+  const drawElimBlock=(g,oy,label)=>{
+    if(label){ ctx.fillStyle=BKC.ink; ctx.font=`800 17px ${BKF}`; ctx.fillText(label,34,oy-14); }
+    const ev=evalGraph(g);
+    const t=bkDrawTree(ctx,g.rounds,ev,nameOf,padL,oy,boxW,boxH,gapX,pitch0);
+    let bottom=t.bottom;
+    if(g.kind==="double"){
+      const lbY=t.bottom+50; ctx.fillStyle=BKC.t2; ctx.font=`800 15px ${BKF}`; ctx.fillText("패자부활전 (Lower Bracket)",padL,lbY-12);
+      // LB는 단순 컬럼
+      for(let r=0;r<g.lb.length;r++){ const x=padL+r*(boxW+gapX);
+        for(let j=0;j<g.lb[r].length;j++){ const m=g.lb[r][j]; const cy=lbY+j*pitch0+boxH/2;
+          const aPid=ev.sp(m.a),bPid=ev.sp(m.b),wp=ev.win[m.id];
+          bkDrawMatch(ctx,x,cy-boxH/2,boxW,boxH, aPid===BYE?"부전승":(aPid?nameOf(aPid):""), bPid===BYE?"부전승":(bPid?nameOf(bPid):""), wp&&wp!==BYE&&wp===aPid, wp&&wp!==BYE&&wp===bPid, aPid===BYE,bPid===BYE);
+        } }
+      // 그랜드 파이널
+      const gx=padL+g.lb.length*(boxW+gapX); const gy=lbY+boxH/2; const m=g.gf; const aPid=ev.sp(m.a),bPid=ev.sp(m.b),wp=ev.win[m.id];
+      ctx.fillStyle=BKC.navy; ctx.font=`800 13.5px ${BKF}`; ctx.fillText("그랜드 파이널",gx,lbY-12);
+      bkDrawMatch(ctx,gx,gy-boxH/2,boxW,boxH, aPid?nameOf(aPid):"", bPid?nameOf(bPid):"", wp&&wp===aPid, wp&&wp===bPid,false,false);
+      if(g.reset&&g.gf.winner==="b"){ const rx=gx+boxW+gapX; const rm=g.reset; const raPid=ev.sp(rm.a),rbPid=ev.sp(rm.b),rwp=ev.win[rm.id];
+        ctx.fillStyle=BKC.navy; ctx.font=`800 13.5px ${BKF}`; ctx.fillText("최종 결승 (리셋)",rx,lbY-12);
+        bkDrawMatch(ctx,rx,gy-boxH/2,boxW,boxH, raPid?nameOf(raPid):"", rbPid?nameOf(rbPid):"", rwp&&rwp===raPid, rwp&&rwp===rbPid,false,false); }
+      bottom=lbY+Math.max(...g.lb.map(r=>r.length))*pitch0;
+    }
+    return bottom;
+  };
+  if(b.format==="group"){
+    const cols=Math.min(b.groups.length,3); const gboxW=250;
+    b.groups.forEach((gr,gi)=>{ const st=groupStandings(gr); const r=Math.floor(gi/cols),c=gi%cols;
+      const gboxH=40+gr.members.length*26+14; const x=padL+c*(gboxW+24); const y=curY+r*( 40+Math.max(...b.groups.map(g=>g.members.length))*26+14 +24);
+      bkRR(ctx,x,y,gboxW,gboxH,18); ctx.fillStyle=BKC.card; ctx.fill(); ctx.strokeStyle=BKC.line; ctx.lineWidth=1; ctx.stroke();
+      ctx.fillStyle=BKC.ink; ctx.font=`800 16px ${BKF}`; ctx.textAlign="left"; ctx.fillText("그룹 "+gr.name,x+14,y+26);
+      st.forEach((s,i)=>{ const ry=y+44+i*26; const adv=i<b.groupCfg.adv; if(adv){ bkRR(ctx,x+8,ry-15,gboxW-16,24,8); ctx.fillStyle=BKC.soft2; ctx.fill(); }
+        ctx.fillStyle=adv?BKC.navy:BKC.t4; ctx.font=`${adv?800:500} 13.5px ${BKF}`; ctx.fillText(`${i+1}. ${nameOf(s.name)}`,x+16,ry+2); ctx.textAlign="right"; ctx.fillText(s.wins+"승",x+gboxW-16,ry+2); ctx.textAlign="left"; });
+    });
+    const rows=Math.ceil(b.groups.length/cols); curY=curY+rows*(40+Math.max(...b.groups.map(g=>g.members.length))*26+14+24)+40;
+    if(b.knockout){ drawElimBlock(b.knockout,curY,"본선 토너먼트"); }
+  } else { drawElimBlock(b.graph,curY); }
+  ctx.textAlign="right"; ctx.fillStyle=BKC.t5; ctx.font=`600 12px ${BKF}`;
+  ctx.fillText("YONSEI POKEMON LEAGUE",W-34,H-16); ctx.textAlign="left";
+  bkDownload(cv,`${b.name}_대진표.png`);
+}
+
+function BracketWizard({ onClose, onCreate, Modal }){
+  const [step,setStep]=useState(1);
+  const [name,setName]=useState("");
+  const [mode,setMode]=useState("single");      // single=개인전, team=팀전
+  const [dbl,setDbl]=useState(false);
+  const [format,setFormat]=useState("elim");     // elim | group
+  const [countStr,setCountStr]=useState("8");
+  const count=Math.max(0,parseInt(countStr)||0);
+  const [groups,setGroups]=useState("4");
+  const [adv,setAdv]=useState("2");
+  const [names,setNames]=useState(Array(8).fill(""));
+  const [teams,setTeams]=useState(Array(8).fill(null).map(()=>({name:"",members:""})));
+  const setCnt=(v)=>{ const s=String(v).replace(/[^0-9]/g,"").slice(0,2); setCountStr(s); const n=parseInt(s)||0;
+    if(n>=1&&n<=64){ setNames(p=>{const a=Array(n).fill("");for(let i=0;i<n;i++)a[i]=p[i]||"";return a;});
+      setTeams(p=>{const a=[];for(let i=0;i<n;i++)a.push(p[i]||{name:"",members:""});return a;}); } };
+  const gN=Math.max(2,parseInt(groups)||2), aN=Math.max(1,parseInt(adv)||1);
+  const buildParticipants=()=>{
+    if(mode==="team") return teams.map(t=>({id:uid(),name:(t.name||"").trim(),members:(t.members||"").split(/[,\n]/).map(s=>s.trim()).filter(Boolean)})).filter(t=>t.name);
+    return names.map(n=>({id:uid(),name:(n||"").trim()})).filter(p=>p.name);
+  };
+  const go=()=>{
+    const parts=buildParticipants();
+    if(parts.length<2){ alert("참가자(팀)를 2개 이상 입력해주세요."); return; }
+    if(format==="group"&&parts.length<gN*2){ alert("그룹 수에 비해 참가자가 너무 적습니다."); return; }
+    const useDbl = dbl && parts.length>=3;
+    if(dbl && !useDbl) alert("참가자가 3명 미만이면 더블 엘리미네이션이 성립하지 않아, 단일 엘리미네이션으로 생성됩니다.");
+    let graph=null,grp=null;
+    if(format==="group"){ const G=buildGroups(parts.map(p=>p.id),gN,aN); grp=G.groups; }
+    else graph=useDbl?buildDouble(parts.map(p=>p.id)):buildSingle(parts.map(p=>p.id));
+    onCreate({ id:uid(), name:name.trim()||"새 대회", createdAt:new Date().toISOString().slice(0,10),
+      mode, double:useDbl, format, groupCfg:format==="group"?{groups:gN,adv:aN}:null,
+      participants:parts, graph, groups:grp, knockout:null, status:"active", applied:null });
+  };
+  return (<Modal title="새 대회 만들기" onClose={onClose}>
+    <div className="swap" key={step}>
+    {step===1&&<>
+      <div className="field"><label>대회명</label><input value={name} onChange={e=>setName(e.target.value)} placeholder="예: 37회 파이컵"/></div>
+      <div className="field"><label>경기 방식</label>
+        <div className="bk-seg"><button type="button" className={mode==="single"?"on":""} onClick={()=>setMode("single")}>개인전</button><button type="button" className={mode==="team"?"on":""} onClick={()=>setMode("team")}>팀전</button></div></div>
+      <div className="field"><label>대진 형식</label>
+        <div className="bk-seg"><button type="button" className={format==="elim"?"on":""} onClick={()=>setFormat("elim")}>토너먼트</button><button type="button" className={format==="group"?"on":""} onClick={()=>setFormat("group")}>조별예선 + 본선</button></div></div>
+      {format==="elim"&&<label className="bk-check"><input type="checkbox" checked={dbl} onChange={e=>setDbl(e.target.checked)}/><span>더블 엘리미네이션 <i>(패자부활전)</i></span></label>}
+      {format==="group"&&<div className="bk-grow2">
+        <div className="field"><label>그룹 수</label><input type="text" inputMode="numeric" value={groups} onChange={e=>setGroups(e.target.value.replace(/[^0-9]/g,"").slice(0,2))} placeholder="예: 4"/></div>
+        <div className="field"><label>그룹별 본선 진출</label><input type="text" inputMode="numeric" value={adv} onChange={e=>setAdv(e.target.value.replace(/[^0-9]/g,"").slice(0,2))} placeholder="예: 2"/></div></div>}
+      <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={()=>setStep(2)}>다음 →</button></div>
+    </>}
+    {step===2&&<>
+      <div className="field"><label>{mode==="team"?"팀 수":"참가자 수"}</label>
+        <div className="bk-count"><button type="button" onClick={()=>setCnt(Math.max(2,count-1))}>−</button><input type="text" inputMode="numeric" value={countStr} onChange={e=>setCnt(e.target.value)}/><button type="button" onClick={()=>setCnt(Math.min(64,count+1))}>＋</button></div>
+        <div className="bk-hint">{(()=>{ if(format==="group") return `${gN}개 그룹, 그룹당 약 ${Math.ceil(Math.max(count,1)/gN)}명, 상위 ${aN}명 본선`; const sz=nextPow2(Math.max(count,2)); return `${sz}강 대진, 부전승 ${sz-count}개 자동 추가`; })()}</div>
+      </div>
+      <div className="bk-fill">
+        {mode==="team"
+          ? teams.map((t,i)=>(<div className="bk-team-card" key={i} style={{animationDelay:(i*28)+"ms"}}>
+              <span className="bk-pin-no gold">{i+1}</span>
+              <input className="bk-tc-name" value={t.name} onChange={e=>setTeams(teams.map((x,j)=>j===i?{...x,name:e.target.value}:x))} placeholder={`팀 ${i+1} 이름`}/>
+              <input className="bk-tc-mem" value={t.members} onChange={e=>setTeams(teams.map((x,j)=>j===i?{...x,members:e.target.value}:x))} placeholder="팀원 (쉼표로 구분)"/>
+            </div>))
+          : names.map((n,i)=>(<div className="bk-pin" key={i} style={{animationDelay:(i*22)+"ms"}}>
+              <span className="bk-pin-no">{i+1}</span>
+              <input value={n} onChange={e=>setNames(names.map((x,j)=>j===i?e.target.value:x))} placeholder={`참가자 ${i+1}`}/>
+            </div>))}
+      </div>
+      <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setStep(1)}>← 이전</button><button className="btn btn-primary" onClick={go}>대진표 생성 🎲</button></div>
+    </>}
+    </div>
+  </Modal>);
+}
+
+/* ===== 팀 대결(선발 순서 + 에이스 결정전) ===== */
+function seriesScore(s){ let a=0,b=0; (s?.games||[]).forEach(w=>{if(w==="a")a++;else if(w==="b")b++;}); if(s?.ace&&s.ace.winner){ if(s.ace.winner==="a")a++; else b++; } return [a,b]; }
+function TeamMatchModal({ teamA, teamB, init, onClose, onSave, Modal, Dropdown }){
+  const [la,setLa]=useState(init?.lineupA?.length?init.lineupA:[...(teamA.members||[])]);
+  const [lb,setLb]=useState(init?.lineupB?.length?init.lineupB:[...(teamB.members||[])]);
+  const N=Math.min(la.length,lb.length);
+  const [games,setGames]=useState(()=>{ const g=Array(N).fill(null); (init?.games||[]).forEach((w,i)=>{if(i<N)g[i]=w;}); return g; });
+  const [aceA,setAceA]=useState(init?.ace?.a||""); const [aceB,setAceB]=useState(init?.ace?.b||""); const [aceW,setAceW]=useState(init?.ace?.winner||null);
+  const [revealed,setRevealed]=useState(!!init);
+  const move=(set,arr,i,d)=>{ const j=i+d; if(j<0||j>=arr.length)return; const a=[...arr]; [a[i],a[j]]=[a[j],a[i]]; set(a); };
+  const setGame=(i,w)=>setGames(games.map((x,j)=>j===i?(x===w?null:w):x));
+  let a=0,b=0; games.forEach(w=>{if(w==="a")a++;else if(w==="b")b++;});
+  const allPlayed=N>0&&games.every(w=>w); const tie=allPlayed&&a===b;
+  let finalA=a,finalB=b; if(tie&&aceW){ if(aceW==="a")finalA++; else finalB++; }
+  const decided=allPlayed&&(!tie||!!aceW); const winnerSide=finalA>finalB?"a":(finalB>finalA?"b":null);
+  const confirm=()=>{ if(!decided||!winnerSide){alert("모든 대결(동점 시 에이스 결정전까지) 결과를 입력하세요.");return;}
+    onSave({lineupA:la.slice(0,N),lineupB:lb.slice(0,N),games,ace:tie?{a:aceA,b:aceB,winner:aceW}:null},winnerSide); };
+  return (<Modal title="팀 대결 진행" hint={`${teamA.name} vs ${teamB.name}. 선발 순서를 정해 공개하면 같은 번호끼리 대결합니다.`} onClose={onClose}>
+    <div className="swap" key={revealed?"battle":"lineup"}>
+    {!revealed?<>
+      <div className="bk-lineups">{[["A",teamA,la,setLa],["B",teamB,lb,setLb]].map(([k,t,arr,set])=>(<div className="bk-lineup" key={k}>
+        <div className="bk-lineup-h">{t.name}</div>
+        {arr.length===0&&<div className="bk-lu-empty">팀원이 없습니다</div>}
+        {arr.map((mem,i)=>(<div className="bk-lu-row" key={i}><span className="bk-lu-no">{i+1}</span><span className="bk-lu-nm">{mem}</span><span className="bk-lu-mv"><button type="button" onClick={()=>move(set,arr,i,-1)} disabled={i===0}>▲</button><button type="button" onClick={()=>move(set,arr,i,1)} disabled={i===arr.length-1}>▼</button></span></div>))}
+      </div>))}</div>
+      <div className="bk-hint" style={{marginTop:10}}>▲▼로 각 팀의 선발 순서를 비공개로 정한 뒤, 공개하세요.</div>
+      <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={()=>setRevealed(true)} disabled={N===0}>선발 공개 → 대결</button></div>
+    </>:<>
+      <div className="bk-series">{Array.from({length:N}).map((_,i)=>(<div className="bk-series-row" key={i}>
+        <span className="bk-series-no">{i+1}</span>
+        <button type="button" className={"bk-series-p"+(games[i]==="a"?" win":"")} onClick={()=>setGame(i,"a")}>{la[i]}</button>
+        <span className="bk-series-vs">vs</span>
+        <button type="button" className={"bk-series-p"+(games[i]==="b"?" win":"")} onClick={()=>setGame(i,"b")}>{lb[i]}</button>
+      </div>))}</div>
+      <div className="bk-series-score"><b className={finalA>finalB?"lead":""}>{teamA.name} {finalA}</b><span>:</span><b className={finalB>finalA?"lead":""}>{finalB} {teamB.name}</b></div>
+      {tie&&<div className="bk-ace">
+        <div className="bk-ace-h">⚔ 동점 — 에이스 결정전</div>
+        <div className="bk-ace-pick">
+          <Dropdown value={aceA} onChange={v=>{setAceA(v);setAceW(null);}} placeholder={teamA.name+" 에이스 선택"} options={(teamA.members||[]).map(mm=>({value:mm,label:mm}))}/>
+          <Dropdown value={aceB} onChange={v=>{setAceB(v);setAceW(null);}} placeholder={teamB.name+" 에이스 선택"} options={(teamB.members||[]).map(mm=>({value:mm,label:mm}))}/>
+        </div>
+        {aceA&&aceB&&<div className="bk-series-row" style={{marginTop:10}}><span className="bk-series-no">A</span><button type="button" className={"bk-series-p"+(aceW==="a"?" win":"")} onClick={()=>setAceW(aceW==="a"?null:"a")}>{aceA}</button><span className="bk-series-vs">vs</span><button type="button" className={"bk-series-p"+(aceW==="b"?" win":"")} onClick={()=>setAceW(aceW==="b"?null:"b")}>{aceB}</button></div>}
+      </div>}
+      <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setRevealed(false)}>← 선발 수정</button><button className="btn btn-primary" onClick={confirm} disabled={!decided}>대결 확정 ✓</button></div>
+    </>}
+    </div>
+  </Modal>);
+}
+
+/* ===== 매치 카드 ===== */
+function MatchCard({ m, ev, nameOf, admin, onPick, compact, teamMode, onOpenTeam }){
+  if(!m) return null;
+  const pa=ev.sp(m.a), pb=ev.sp(m.b);
+  const decided=!!m.winner;
+  const bothReal=pa&&pb&&pa!==BYE&&pb!==BYE;
+  if(teamMode){
+    const clickable=admin&&(bothReal||decided);
+    const sc=m.series?seriesScore(m.series):null;
+    const rowT=(side,pid)=>{ const isWin=decided&&m.winner===side; const isBye=pid===BYE;
+      return <div className={"bk-slot"+(isWin?" win":"")+(isBye?" bye":"")}><span className="bk-tn">{pid===BYE?"부전승":(pid?nameOf(pid):"…")}</span>{sc&&!isBye&&<span className="bk-sc">{side==="a"?sc[0]:sc[1]}</span>}</div>; };
+    return <div className={"bk-match"+(compact?" cmp":"")+(clickable?" team-click":"")} onClick={()=>clickable&&onOpenTeam(m,pa,pb)} title={clickable?"클릭하여 팀 대결 진행/수정":""}>{rowT("a",pa)}{rowT("b",pb)}</div>;
+  }
+  const canPick=admin&&bothReal;
+  const row=(side,pid)=>{
+    const isWin=decided&&m.winner===side; const isBye=pid===BYE;
+    const txt=pid===BYE?"부전승":(pid?nameOf(pid):"…");
+    return <button type="button" className={"bk-slot"+(isWin?" win":"")+(isBye?" bye":"")+(canPick?" pick":"")} disabled={!canPick} onClick={()=>canPick&&onPick(m.id,side)} title={canPick?(decided?"승자 변경 / 같은 쪽 다시 클릭 시 취소":"클릭하여 승자 선택"):""}>{txt}</button>;
+  };
+  return <div className={"bk-match"+(compact?" cmp":"")}>{row("a",pa)}{row("b",pb)}</div>;
+}
+
+/* ===== 대진표 보드 ===== */
+const BK_SLOT_H=42, BK_MATCH_H=BK_SLOT_H*2+4+10, BK_PITCH0=BK_MATCH_H+26; // 매치높이 98, 1라운드 세로간격
+function treeCenters(rounds){
+  const centers=[];
+  for(let r=0;r<rounds.length;r++){ centers[r]=[];
+    for(let j=0;j<rounds[r].length;j++){ centers[r][j]= r===0 ? (j*BK_PITCH0+BK_MATCH_H/2) : (centers[r-1][2*j]+centers[r-1][2*j+1])/2; } }
+  return { centers, totalH: (rounds[0]?.length||1)*BK_PITCH0 };
+}
+function ElimBoard({ g, nameOf, admin, onPick, teamMode, onOpenTeam }){
+  const ev=evalGraph(g);
+  const rlabel=(len)=>{ const names={1:"결승",2:"4강",4:"8강",8:"16강",16:"32강"}; return names[len]||`${len*2}강`; };
+  const { centers, totalH }=treeCenters(g.rounds);
+  return (<div className="bk-scroll"><div className="bk-tree">
+    {g.rounds.map((r,ri)=>(<div className="bk-col2" key={ri}>
+      <div className="bk-col-h">{g.kind==="double"?("WB R"+(ri+1)):rlabel(r.length)}</div>
+      <div className="bk-col-body" style={{height:totalH}}>
+        {r.map((m,j)=>(<div className="bk-mpos" key={m.id} style={{top:(centers[ri][j]-BK_MATCH_H/2)+"px"}}>
+          <MatchCard m={m} ev={ev} nameOf={nameOf} admin={admin} onPick={onPick} teamMode={teamMode} onOpenTeam={onOpenTeam}/>
+        </div>))}
+      </div>
+    </div>))}
+  </div>
+  {g.kind==="double"&&<div className="bk-lb"><div className="bk-lb-h">패자부활전 (Lower Bracket)</div><div className="bk-cols">
+    {g.lb.map((r,ri)=>(<div className="bk-col" key={ri}><div className="bk-col-h">LB R{ri+1}</div>
+      {r.map(m=><MatchCard key={m.id} m={m} ev={ev} nameOf={nameOf} admin={admin} onPick={onPick} teamMode={teamMode} onOpenTeam={onOpenTeam}/>)}
+    </div>))}
+    <div className="bk-col"><div className="bk-col-h gf">그랜드 파이널</div><MatchCard m={g.gf} ev={ev} nameOf={nameOf} admin={admin} onPick={onPick} teamMode={teamMode} onOpenTeam={onOpenTeam}/></div>
+    {g.reset&&g.gf.winner==="b"&&<div className="bk-col"><div className="bk-col-h gf">최종 결승 (리셋)</div><MatchCard m={g.reset} ev={ev} nameOf={nameOf} admin={admin} onPick={onPick} teamMode={teamMode} onOpenTeam={onOpenTeam}/></div>}
+  </div></div>}
+  </div>);
+}
+
+/* ===== 파티/엔트리 기록 ===== */
+function PartyEditor({ b, onClose, onSave, Modal }){
+  const team=b.mode==="team";
+  const [parts,setParts]=useState(()=>JSON.parse(JSON.stringify(b.participants||[])));
+  const setIndiv=(i,v)=>setParts(parts.map((p,j)=>j===i?{...p,party:v}:p));
+  const setMem=(i,mem,v)=>setParts(parts.map((p,j)=>j===i?{...p,memberParties:{...(p.memberParties||{}),[mem]:v}}:p));
+  return (<Modal title="파티 엔트리 기록" hint="각 참가자(팀)의 포켓몬 엔트리를 기록해 보관합니다. 포켓몬은 쉼표로 구분해 입력하세요." onClose={onClose}>
+    <div className="bk-party-list">
+      {parts.length===0&&<div className="bk-hint">참가자가 없습니다.</div>}
+      {parts.map((p,i)=>team?(
+        <div className="bk-party-team" key={p.id}>
+          <div className="bk-party-tn">{p.name}</div>
+          {(p.members||[]).length===0&&<div className="bk-hint">팀원이 없습니다.</div>}
+          {(p.members||[]).map(mem=>(<div className="bk-party-row" key={mem}><span className="bk-party-mem">{mem}</span><input value={(p.memberParties||{})[mem]||""} onChange={e=>setMem(i,mem,e.target.value)} placeholder="포켓몬 (쉼표 구분)"/></div>))}
+        </div>
+      ):(
+        <div className="bk-party-row" key={p.id}><span className="bk-party-mem">{p.name}</span><input value={p.party||""} onChange={e=>setIndiv(i,e.target.value)} placeholder="포켓몬 (쉼표 구분)"/></div>
+      ))}
+    </div>
+    <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={()=>onSave(parts)}>저장</button></div>
+  </Modal>);
+}
+
+function BracketBoard({ b, data, admin, save, flash, onApply, Modal, Dropdown }){
+  const nameOf=(pid)=>{ const p=(b.participants||[]).find(x=>x.id===pid); return p?p.name:pid; };
+  const teamMode=b.mode==="team";
+  const [series,setSeries]=useState(null);
+  const [party,setParty]=useState(false);
+  const savePartyFn=(parts)=>{ save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,participants:parts}:x)}); setParty(false); flash("엔트리 저장 ✓"); };
+  const hasParty=(b.participants||[]).some(p=>p.party||(p.memberParties&&Object.values(p.memberParties).some(Boolean)));
+  const pick=(matchId,side)=>save({...data,brackets:data.brackets.map(x=>x.id===b.id?withPick(x,matchId,side):x)});
+  const openTeam=(m,pa,pb)=>{ const A=(b.participants||[]).find(p=>p.id===pa),B=(b.participants||[]).find(p=>p.id===pb); if(!A||!B)return; setSeries({m,A,B}); };
+  const saveSeries=(sObj,winnerSide)=>{ save({...data,brackets:data.brackets.map(x=>x.id===b.id?withSeries(x,series.m.id,sObj,winnerSide):x)}); setSeries(null); };
+  const makeKnockout=()=>{
+    const adv=[];
+    b.groups.forEach(gr=>{ const st=groupStandings(gr).slice(0,b.groupCfg.adv); st.forEach(s=>adv.push(s.name)); });
+    const ko=b.double?buildDouble(adv):buildSingle(adv);
+    save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,knockout:ko}:x)});
+    flash("본선 대진 생성 ✓");
+  };
+  const res = b.format==="group" ? (b.knockout?elimResult(b.knockout):null) : elimResult(b.graph);
+  return (<div className="bk-board swap">
+    {admin&&<div className="bk-tools"><button className="btn btn-ghost btn-sm" onClick={()=>setParty(true)}>📋 파티 엔트리 기록</button></div>}
+    {b.format==="group"&&<>
+      <div className="bk-groups">{b.groups.map(gr=>{ const ev=evalGraph({rounds:[gr.matches]}); const st=groupStandings(gr);
+        return (<div className="bk-group" key={gr.id}>
+          <div className="bk-group-h">그룹 {gr.name}</div>
+          <div className="bk-gmatches">{gr.matches.map(m=><MatchCard key={m.id} m={m} ev={ev} nameOf={nameOf} admin={admin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam} compact/>)}</div>
+          <div className="bk-stand">{st.map((s,i)=><div className={"bk-strow"+(i<b.groupCfg.adv?" adv":"")} key={s.name}><span>{i+1}</span><b>{nameOf(s.name)}</b><span className="tnum">{s.wins}승</span></div>)}</div>
+        </div>);})}</div>
+      {!b.knockout&&admin&&<div className="bk-cta"><button className="btn btn-primary" disabled={!groupDone(b)} onClick={makeKnockout}>{groupDone(b)?"본선 대진 생성 →":"모든 조별 경기를 입력하세요"}</button></div>}
+      {b.knockout&&<div className="bk-ko"><div className="bk-ko-h">본선 토너먼트</div><ElimBoard g={b.knockout} nameOf={nameOf} admin={admin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam}/></div>}
+    </>}
+    {b.format==="elim"&&<ElimBoard g={b.graph} nameOf={nameOf} admin={admin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam}/>}
+    {res&&res.done&&<div className="bk-champ-banner">
+      <span className="bk-cb-k">🏆 우승</span><span className="bk-cb-n">{nameOf(res.champ)}</span>{res.ru&&<span className="bk-cb-ru">준우승 {nameOf(res.ru)}</span>}
+      <div className="bk-cb-actions">
+        <button className="btn btn-ghost btn-sm" onClick={()=>downloadChampionPng(b,res,nameOf)}>🎉 우승 이미지</button>
+        <button className="btn btn-ghost btn-sm" onClick={()=>downloadBracketPng(b,nameOf)}>🖼 대진표 이미지</button>
+        {admin&&!b.applied&&<button className="btn btn-gold btn-sm" onClick={()=>onApply(b,res)}>기록에 반영 →</button>}
+        {b.applied&&<span className="bk-applied">✓ 기록 반영됨</span>}
+      </div>
+    </div>}
+    {hasParty&&<div className="bk-entries"><div className="bk-entries-h">📋 참가 엔트리</div><div className="bk-entries-grid">
+      {(b.participants||[]).map(p=>{
+        if(teamMode){ const mem=(p.members||[]).map(m=>({m,party:(p.memberParties||{})[m]})).filter(x=>x.party); if(mem.length===0)return null;
+          return <div className="bk-entry" key={p.id}><div className="bk-entry-n">{p.name}</div>{mem.map(x=><div className="bk-entry-row" key={x.m}><b>{x.m}</b><span>{x.party}</span></div>)}</div>; }
+        if(!p.party)return null; return <div className="bk-entry" key={p.id}><div className="bk-entry-n">{p.name}</div><div className="bk-entry-p">{p.party}</div></div>;
+      })}
+    </div></div>}
+    {series&&<TeamMatchModal teamA={series.A} teamB={series.B} init={series.m.series} onClose={()=>setSeries(null)} onSave={saveSeries} Modal={Modal} Dropdown={Dropdown}/>}
+    {party&&<PartyEditor b={b} onClose={()=>setParty(false)} onSave={savePartyFn} Modal={Modal}/>}
+  </div>);
+}
+
+/* ===== 기록 반영 모달 ===== */
+function BracketApply({ b, res, data, onClose, save, flash, Modal, Dropdown }){
+  const partOf=(pid)=>(b.participants||[]).find(x=>x.id===pid);
+  const nameOf=(pid)=>{ const p=partOf(pid); return p?p.name:pid; };
+  const team=b.mode==="team";
+  const tours=data.tournaments||[]; const seasons=data.seasons||[];
+  const [tkey,setTkey]=useState(tours[0]?.key||"");
+  const [date,setDate]=useState(new Date().toISOString().slice(0,7).replace("-","."));
+  const [roundStr,setRoundStr]=useState("");
+  const [season,setSeason]=useState(seasons[seasons.length-1]?.name||"");
+  const [champ,setChamp]=useState(false);
+  const [rule,setRule]=useState("");
+  const [bumpRank,setBumpRank]=useState(true);
+  const [bumpSeason,setBumpSeason]=useState(true);
+  const [rankKey,setRankKey]=useState((data.rankings||[])[0]?.key||"");
+  const [ptWin,setPtWin]=useState("60"); const [ptRu,setPtRu]=useState("40"); const [ptSf,setPtSf]=useState("20");
+  const [override,setOverride]=useState({});
+  const pN=(s)=>{ const v=parseFloat(s); return isNaN(v)?0:v; };
+  const ptWinN=pN(ptWin), ptRuN=pN(ptRu), ptSfN=pN(ptSf);
+  const r1=(n)=>Math.round(n*10)/10;
+  const setPt=(fn)=>(e)=>fn(e.target.value.replace(/[^0-9.]/g,""));
+  const memListOf=(pid)=>partOf(pid)?.members||[];
+  const curT=tours.find(x=>x.key===tkey);
+  const [preview,setPreview]=useState(null);
+  const excluded=!!curT&&(["rookie","pylite"].includes(curT.key)||/루키|라이트/.test(curT.label||""));
+  const autoNext=String((curT?.rounds?.reduce((mx,r)=>Math.max(mx,parseInt(r.round)||0),0)||0)+1);
+  const placements=[]; if(res.champ)placements.push({pid:res.champ,pts:ptWinN,label:"우승"});
+  if(res.ru)placements.push({pid:res.ru,pts:ptRuN,label:"준우승"});
+  res.sf.forEach(pid=>placements.push({pid,pts:ptSfN,label:"4강"}));
+  const alloc=[]; if(team){ placements.forEach(pl=>{ const p=partOf(pl.pid); const mem=p?.members||[]; const per=mem.length?r1(pl.pts/mem.length):0; mem.forEach(m=>alloc.push({key:pl.pid+"|"+m,team:p?.name,member:m,label:pl.label,base:per})); }); }
+  const allocVal=(a)=>{ const o=override[a.key]; return (o===undefined||o==="")?a.base:pN(o); };
+  const rankEra=(data.rankings||[]).find(r=>r.key===rankKey);
+  const rankRows=rankEra?.rows||[];
+  const isNew=(name)=>!rankRows.some(r=>r.name===name);
+  const showBadge=bumpRank&&!excluded&&!!rankKey;
+  const badgeFor=(name)=>showBadge?<span className={"bk-exist "+(isNew(name)?"new":"old")}>{isNew(name)?"신규":"기존"}</span>:null;
+  const computeDeltas=()=>{ const deltas={};
+    const add=(name,d)=>{ if(!name)return; const c=deltas[name]||{win:0,ru:0,top4:0,points:0}; deltas[name]={win:c.win+(d.win||0),ru:c.ru+(d.ru||0),top4:c.top4+(d.top4||0),points:c.points+(d.points||0)}; };
+    if(team){ alloc.forEach(a=>add(a.member,{points:allocVal(a)})); }
+    else { add(nameOf(res.champ),{win:1,points:ptWinN}); if(res.ru)add(nameOf(res.ru),{ru:1,points:ptRuN}); res.sf.map(nameOf).forEach(n=>add(n,{top4:1,points:ptSfN})); }
+    return deltas; };
+  const buildResult=()=>{
+    const champName=nameOf(res.champ), ruName=res.ru?nameOf(res.ru):"", sfNames=res.sf.map(nameOf);
+    const roundNum=roundStr.trim()||autoNext;
+    const round={ id:uid(), date:date.trim(), round:roundNum, win:champName, ru:ruName, sf:sfNames, rule:rule.trim(), team, ...(champ?{champ:true}:{}), ...(season?{season}:{}) };
+    if(team){ round.winMembers=memListOf(res.champ); round.ruMembers=res.ru?memListOf(res.ru):[]; round.sfMembers=res.sf.map(memListOf); }
+    let nd={...data, tournaments:tours.map(x=>x.key===tkey?{...x,rounds:[...(x.rounds||[]),round]}:x)};
+    const deltas=computeDeltas();
+    const bumpRows=(rows)=>{ let rs=[...(rows||[])]; Object.entries(deltas).forEach(([name,d])=>{ if(!name)return; const i=rs.findIndex(r=>r.name===name);
+      if(i<0)rs=[...rs,{name,win:d.win,ru:d.ru,top4:d.top4,points:d.points}];
+      else rs=rs.map((r,j)=>j===i?{...r,win:(r.win||0)+d.win,ru:(r.ru||0)+d.ru,top4:(r.top4||0)+d.top4,points:(r.points||0)+d.points}:r); }); return rs; };
+    const willRank=bumpRank&&rankKey&&!excluded, willSeason=bumpSeason&&season&&!champ&&!excluded;
+    if(willRank){ nd={...nd, rankings:nd.rankings.map(era=>era.key!==rankKey?era:{...era,rows:bumpRows(era.rows)})}; }
+    if(willSeason){ nd={...nd, seasons:(nd.seasons||[]).map(s=>s.name!==season?s:{...s,rows:bumpRows(s.rows)})}; }
+    nd={...nd, brackets:nd.brackets.map(x=>x.id===b.id?{...x,status:"done",applied:{tournamentKey:tkey,date,season}}:x)};
+    return { nd, deltas, roundNum, willRank, willSeason };
+  };
+  const prepare=()=>{ if(!curT){alert("회차를 추가할 대회를 선택하세요.");return;} setPreview(buildResult()); };
+  const commit=()=>{ if(!preview)return; save(preview.nd); flash("기록에 반영됨 ✓"); onClose(); };
+
+  if(preview){
+    const changes=Object.entries(preview.deltas).map(([name,d])=>{ const cur=rankRows.find(r=>r.name===name); return {name,isNew:!cur,curPts:cur?.points||0,d}; });
+    return (<Modal title="반영 전 확인" hint="아래 내용으로 기록에 반영합니다. 포인트 변동을 확인한 뒤 진행하세요." onClose={()=>setPreview(null)}>
+      <div className="swap" key="pre">
+      <div className="bk-applybox">
+        <div className="bk-ab-meta">{team?"팀전":"개인전"}{champ?" 챔피언스 시리즈":""}</div>
+        <div>{curT.label} <b>{preview.roundNum}회</b>{season?`, ${season}`:""}{rule.trim()?`, ${rule.trim()}`:""}</div>
+        <div>🏆 <b>{nameOf(res.champ)}</b>{res.ru?<>, 🥈 {nameOf(res.ru)}</>:null}{res.sf.length?<>, 🎖️ {res.sf.map(nameOf).join(", ")}</>:null}</div>
+      </div>
+      {preview.willRank ? <div className="field"><label>누적 랭킹 「{rankEra?.label}」 포인트 변동</label>
+        <div className="bk-chg">{changes.map(c=><div className="bk-chg-row" key={c.name}>
+          <span className={"bk-exist "+(c.isNew?"new":"old")}>{c.isNew?"신규":"기존"}</span><b>{c.name}</b>
+          <span className="bk-chg-pts">{c.curPts}<i>→</i>{r1(c.curPts+c.d.points)}</span>
+          {c.d.points?<span className="bk-chg-d">+{r1(c.d.points)}</span>:null}
+          {(c.d.win||c.d.ru||c.d.top4)?<span className="bk-chg-cnt">{c.d.win?`승+${c.d.win} `:""}{c.d.ru?`준+${c.d.ru} `:""}{c.d.top4?`4강+${c.d.top4}`:""}</span>:null}
+        </div>)}</div>
+      </div> : <div className="bk-hint">{excluded?`${curT.label}은(는) 누적 랭킹과 시즌별 성적에 반영되지 않고 회차 기록에만 추가됩니다.`:"누적 랭킹 반영이 꺼져 있어 회차 기록에만 추가됩니다."}</div>}
+      {preview.willSeason&&<div className="bk-hint">시즌별 성적 「{season}」에도 동일한 점수와 성적이 반영됩니다.</div>}
+      <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setPreview(null)}>← 뒤로</button><button className="btn btn-primary" onClick={commit}>이대로 반영</button></div>
+      </div>
+    </Modal>);
+  }
+  return (<Modal title="기록에 반영" hint="대진표 결과를 회차 형식 그대로 추가하고, 선택 시 랭킹과 시즌 점수까지 반영합니다." onClose={onClose}>
+    <div className="swap" key="form">
+    <div className="bk-applybox">
+      <div className="bk-ab-meta">{team?"팀전":"개인전"}</div>
+      <div>🏆 우승 <b>{nameOf(res.champ)}</b> {!team&&badgeFor(nameOf(res.champ))}</div>{res.ru&&<div>🥈 준우승 <b>{nameOf(res.ru)}</b> {!team&&badgeFor(nameOf(res.ru))}</div>}{res.sf.length>0&&<div>🎖️ 4강 <b>{res.sf.map(nameOf).join(", ")}</b></div>}
+    </div>
+    <div className="field"><label>형식</label>
+      <div className="ed-seg"><button type="button" className={!champ?"on":""} onClick={()=>setChamp(false)}>일반 (파이컵)</button><button type="button" className={champ?"on":""} onClick={()=>setChamp(true)}>챔피언스 시리즈</button></div>
+    </div>
+    <div className="bk-grow2">
+      <div className="field"><label>추가할 대회(회차 묶음)</label><Dropdown value={tkey} onChange={setTkey} placeholder="대회 선택" options={tours.map(t=>({value:t.key,label:t.label}))}/></div>
+      <div className="field"><label>시즌</label><Dropdown value={season} onChange={setSeason} options={[{value:"",label:"(시즌 미지정)"},...seasons.map(s=>({value:s.name,label:s.name}))]}/></div>
+    </div>
+    <div className="bk-grow2">
+      <div className="field"><label>회차 번호</label><input value={roundStr} onChange={e=>setRoundStr(e.target.value)}/></div>
+      <div className="field"><label>날짜 표기</label><input value={date} onChange={e=>setDate(e.target.value)} placeholder="2026.07"/></div>
+    </div>
+    <div className="field"><label>대회 룰 (선택)</label><input value={rule} onChange={e=>setRule(e.target.value)} placeholder="예: 모노타입 / 랜덤 배틀 / 6세대 63"/></div>
+    <div className="field"><label>등수별 점수{team?" (총점 — 팀원 수로 균등 분배)":""}</label>
+      <div className="bk-pts">
+        <div className="bk-pt"><span>우승</span><input value={ptWin} onChange={setPt(setPtWin)}/></div>
+        <div className="bk-pt"><span>준우승</span><input value={ptRu} onChange={setPt(setPtRu)}/></div>
+        <div className="bk-pt"><span>4강</span><input value={ptSf} onChange={setPt(setPtSf)}/></div>
+      </div>
+    </div>
+    {team&&alloc.length>0&&<div className="field"><label>팀원별 점수 배분 (개별 수정 가능)</label>
+      <div className="bk-alloc">{alloc.map(a=><div className="bk-alloc-row" key={a.key}><span className={"bk-alloc-tag "+(a.label==="우승"?"w":a.label==="준우승"?"r":"s")}>{a.label}</span><b>{a.member}</b>{badgeFor(a.member)}<span className="bk-alloc-team">{a.team}</span><input value={override[a.key]??""} placeholder={String(a.base)} onChange={e=>setOverride({...override,[a.key]:e.target.value.replace(/[^0-9.]/g,"")})}/></div>)}</div>
+    </div>}
+    <label className="bk-check"><input type="checkbox" checked={bumpRank&&!excluded} onChange={e=>setBumpRank(e.target.checked)} disabled={excluded}/><span>누적 랭킹 반영 {excluded?"— 이 대회는 제외":(team?"(점수 배분)":"(승/준/4강 + 점수)")}</span></label>
+    {bumpRank&&!excluded&&<div className="field"><label>반영할 누적 랭킹</label><Dropdown value={rankKey} onChange={setRankKey} placeholder="랭킹 선택" options={(data.rankings||[]).map(r=>({value:r.key,label:r.label}))}/></div>}
+    <label className="bk-check"><input type="checkbox" checked={bumpSeason&&!champ&&!excluded} onChange={e=>setBumpSeason(e.target.checked)} disabled={!season||champ||excluded}/><span>시즌별 성적 반영 {excluded?"— 이 대회는 제외":champ?"— 챔피언스 시리즈는 제외":(season?`(${season})`:"— 시즌을 먼저 선택")}</span></label>
+    {excluded&&<div className="bk-hint">{curT.label}은(는) 정규 집계에서 제외되어 누적 랭킹과 시즌별 성적 어디에도 반영되지 않습니다. (회차 기록에만 추가)</div>}
+    {champ&&!excluded&&<div className="bk-hint">챔피언스 시리즈는 시즌을 마무리하는 대회로, 누적 랭킹에는 반영되지만 시즌별 성적에는 반영되지 않습니다.</div>}
+    <div className="bk-hint">{team?"팀전은 각 등수 점수를 팀원 수로 나눠 배분합니다(승/준/4강 횟수는 개인 랭킹에 더하지 않음).":"승/준/4강 횟수와 점수가 함께 누적됩니다."}</div>
+    <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={prepare}>반영하기 →</button></div>
+    </div>
+  </Modal>);
+}
+
+/* ===== 추첨 애니메이션 ===== */
+function BracketDraw({ b, onDone }){
+  const nameOf=(pid)=>{ const p=(b.participants||[]).find(x=>x.id===pid); return p?p.name:pid; };
+  const allNames=(b.participants||[]).map(p=>p.name);
+  const rlabel=(len)=>{ const names={1:"결승",2:"4강",4:"8강",8:"16강",16:"32강"}; return names[len]||`${len*2}강`; };
+  const group=b.format==="group";
+  // 채울 슬롯 순서(참가자만) 및 각 슬롯의 순번 계산
+  const order={}; let k=0;
+  if(group){ b.groups.forEach((g,gi)=>g.members.forEach((mem,mi)=>{ order["g"+gi+"_"+mi]=k++; })); }
+  else { b.graph.rounds[0].forEach((m,mi)=>["a","b"].forEach((side,si)=>{ const s=m[side]; if(s.pid) order["m"+mi+"_"+si]=k++; })); }
+  const total=k;
+  const [n,setN]=useState(0); const [roll,setRoll]=useState("");
+  useEffect(()=>{
+    if(n>=total){ const t=setTimeout(onDone,950); return ()=>clearTimeout(t); }
+    let ticks=0; const iv=setInterval(()=>{ setRoll(allNames[Math.floor(Math.random()*allNames.length)]||""); if(++ticks>=9){ clearInterval(iv); const t=setTimeout(()=>setN(x=>x+1),140); return ()=>clearTimeout(t); } },70);
+    return ()=>clearInterval(iv);
+  },[n]); // eslint-disable-line
+  const slotFor=(key,pid,bye)=>{
+    if(bye) return <div className="bk-slot bye">부전승</div>;
+    const ord=order[key];
+    if(ord<n) return <div className={"bk-slot dset"+(ord===n-1?" pop":"")}>{nameOf(pid)}</div>;
+    if(ord===n) return <div className="bk-slot drolling">{roll||"…"}</div>;
+    return <div className="bk-slot dwait"><i/></div>;
+  };
+  const done=n>=total;
+  return (<div className="bk-drawwrap swap">
+    <div className="bk-draw-h">{done?"✨ 대진 확정!":"🎰 대진 추첨 중…"} <span className="bk-draw-cnt">{Math.min(n,total)} / {total}</span></div>
+    {group ? (
+      <div className="bk-groups">{b.groups.map((g,gi)=>(
+        <div className="bk-group" key={g.id}><div className="bk-group-h">그룹 {g.name}</div>
+          <div className="bk-draw-mem">{g.members.map((mem,mi)=>slotFor("g"+gi+"_"+mi,mem,false))}</div>
+        </div>))}</div>
+    ) : (()=>{ const {centers,totalH}=treeCenters(b.graph.rounds);
+      return (<div className="bk-scroll"><div className="bk-tree">
+        {b.graph.rounds.map((r,ri)=>(<div className="bk-col2" key={ri}>
+          <div className="bk-col-h">{b.graph.kind==="double"?("WB R"+(ri+1)):rlabel(r.length)}</div>
+          <div className="bk-col-body" style={{height:totalH}}>
+            {r.map((m,j)=>(<div className="bk-mpos" key={m.id} style={{top:(centers[ri][j]-BK_MATCH_H/2)+"px"}}>
+              {ri===0
+                ? <div className="bk-match">{slotFor("m"+j+"_0",m.a.pid,m.a.bye)}{slotFor("m"+j+"_1",m.b.pid,m.b.bye)}</div>
+                : <div className="bk-match tbd"><div className="bk-slot dwait"><i/></div><div className="bk-slot dwait"><i/></div></div>}
+            </div>))}
+          </div>
+        </div>))}
+      </div></div>);
+    })()}
+    <div className="bk-draw-actions"><button className="btn btn-ghost btn-sm" onClick={onDone}>{done?"완료 →":"건너뛰기 →"}</button></div>
+  </div>);
+}
+
+/* ===== 대진표 메인 ===== */
+export default function BracketsPage({ data, admin, save, flash, Reveal, Modal, Dropdown }){
+  const list=data.brackets||[];
+  const [openId,setOpenId]=useState(null);
+  const [wizard,setWizard]=useState(false);
+  const [apply,setApply]=useState(null);
+  const [drawId,setDrawId]=useState(null);
+  const open=list.find(b=>b.id===openId);
+  const create=(b)=>{ save({...data,brackets:[b,...list]}); setWizard(false); setOpenId(b.id); setDrawId(b.id); flash("대회 생성 ✓"); };
+  const del=(b)=>{ if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return; save({...data,brackets:list.filter(x=>x.id!==b.id)}); setOpenId(null); };
+  const statusTag=(b)=>{ const r=b.format==="group"?(b.knockout?elimResult(b.knockout):null):elimResult(b.graph); if(b.applied)return"기록 반영됨"; if(r&&r.done)return"종료"; return"진행 중"; };
+  return (<section className="sec">
+    <Reveal className="sec-head"><div className="kick">Bracket</div><h2>대진표</h2>
+      <p className="sub">대회 대진을 직접 생성하고 결과를 입력하면, 확정된 성적이 기록에 연동됩니다.</p>
+      {admin&&<div className="row-actions"><button className="btn btn-gold btn-sm" onClick={()=>setWizard(true)}>+ 새 대회 만들기</button></div>}
+    </Reveal>
+    {!open&&<div className="bk-list swap">
+      {list.length===0&&<div className="bk-empty">아직 생성된 대회가 없습니다.{admin&&" 우측 상단에서 새 대회를 만들어보세요."}</div>}
+      {list.map(b=>(<button className="bk-card" key={b.id} onClick={()=>setOpenId(b.id)}>
+        <div className="bk-card-top"><span className={"bk-badge "+(b.applied?"done":"live")}>{statusTag(b)}</span><span className="bk-card-date tnum">{b.createdAt}</span></div>
+        <div className="bk-card-name">{b.name}</div>
+        <div className="bk-card-meta">{b.mode==="team"?"팀전":"개인전"}, {b.format==="group"?"조별예선+본선":(b.double?"더블 엘리미네이션":"싱글 엘리미네이션")}, {b.participants.length}{b.mode==="team"?"팀":"명"}</div>
+      </button>))}
+    </div>}
+    {open&&<div className="bk-open swap">
+      <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
+      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} onApply={(b,res)=>setApply({b,res})} Modal={Modal} Dropdown={Dropdown}/>}
+    </div>}
+    {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create} Modal={Modal}/>}
+    {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} onClose={()=>setApply(null)} Modal={Modal} Dropdown={Dropdown}/>}
+  </section>);
+}

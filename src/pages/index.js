@@ -1,0 +1,8 @@
+export { default as HomePage } from "./HomePage.jsx";
+export { default as AboutPage } from "./AboutPage.jsx";
+export { default as NewsPage } from "./NewsPage.jsx";
+export { default as BoardPage } from "./BoardPage.jsx";
+export { default as RecordsPage } from "./RecordsPage.jsx";
+export { default as BracketsPage } from "./BracketsPage.jsx";
+export { default as TitlesPage } from "./TitlesPage.jsx";
+export { default as ChampionsPage } from "./ChampionsPage.jsx";
