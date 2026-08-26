@@ -341,13 +341,138 @@ refactor: separate admin features
 
 ---
 
+## 5단계 — 관리자 인증 및 Supabase 보안 개선 (보류)
+
+### 상태
+
+이번 단계는 실제 운영 Supabase 프로젝트의 관리자 권한이 필요하므로 **코드에 반영하지 않고 보류**했다.
+
+현재 운영 Supabase 프로젝트는 다른 동아리 운영진 계정에서 관리되고 있어, 추후 프로젝트 접근 권한을 확보한 뒤 다시 진행한다.
+
+현재 관리자 로그인 및 운영 데이터 권한 구조는 4단계 완료 시점과 동일하다.
+
+---
+
+## 6단계 — 기존 Team Builder 통합
+
+### 무엇을 변경했나
+
+기존 별도 프로젝트 `YPL Team Builder v0.6`의 핵심 기능과 저장 스키마를 React 기반 YPL 본사이트 안으로 이식했다.
+
+추가된 주요 파일:
+
+- `src/pages/TeamBuilderPage.jsx`
+- `src/team-builder.css`
+- `src/data/teamBuilderRegulations.js`
+- `src/data/teamBuilderCupRules.js`
+- `src/data/teamBuilderLocalization.js`
+- `src/services/championsData.js`
+- `src/services/teamBuilderCore.js`
+
+본사이트 Navigation에 `팀빌더` 메뉴를 추가하고 `view === "builder"`에서 독립 페이지로 렌더링한다.
+
+### 기존 v0.6에서 유지한 기능
+
+- 6마리 Team Slot
+- Regulation M-A / M-B 데이터 구조
+- Regulation별 사용 가능 포켓몬 풀
+- 파이컵 추가 룰 레이어
+- 모노타입 챌린지 및 배정 타입 필터
+- 포켓몬 한글/영문 검색
+- 동일 전국도감번호 기준 Species Clause
+- 동일 도구 중복 방지 Item Clause
+- 특성 선택
+- 성격(Stat Alignment) 선택
+- Stat Point 개별 최대 32 / 총합 최대 66 검증
+- Lv.50 최종 능력치 표시
+- Pokémon Champions learnset 기반 기술 4개 선택
+- Regulation별 사용 가능 도구 필터
+- Team Valid / Invalid / Incomplete 검증
+- Team Box 저장 / 불러오기 / 복제 / 삭제
+- 자동 임시저장
+- `Ctrl+S` / `Cmd+S` 저장창 호출
+
+### 기존 저장 데이터 호환
+
+기존 v0.6에서 사용하던 localStorage 키와 저장 스키마를 유지했다.
+
+```text
+ypl-team-builder:saved-teams:v1
+ypl-team-builder:working-draft:v1
+```
+
+따라서 같은 브라우저에 기존 팀빌더 v0.6 저장 데이터가 남아 있다면 새 본사이트 Team Builder에서도 그대로 읽을 수 있도록 설계했다.
+
+### 데이터 구조 원칙
+
+Team Builder 데이터는 기존 운영 `ypl_data_v4`에 추가하지 않았다.
+
+현재 단계에서는:
+
+```text
+YPL 운영 데이터 → Supabase / ypl_data_v4
+Team Builder 개인 팀 → 브라우저 localStorage
+```
+
+로 분리한다.
+
+대회 엔트리 제출 및 Supabase 팀 저장은 별도 단계에서 구현한다.
+
+### 디자인 통합
+
+기존 v0.6의 독립 사이트 Header를 제거하고 YPL 본사이트의:
+
+- Navigation
+- 색상 변수
+- 카드
+- 버튼
+- Modal
+- Reveal animation
+- 다크모드
+
+을 그대로 사용하도록 재구성했다.
+
+Team Builder 전용 CSS는 `.tb-*` 클래스로 scope하여 기존 페이지 스타일과 충돌하지 않도록 했다.
+
+### 상세 데이터
+
+기존 v0.6과 동일하게 Pokémon Showdown Champions 데이터 소스를 사용하여 다음을 불러온다.
+
+- Pokédex / Base Stats / Type / Ability
+- Champions learnset
+- Move data
+- Item data
+
+상세 데이터는 브라우저 localStorage에 12시간 캐시하며, 네트워크 연결 실패 시에도 Regulation 로스터 자체는 유지된다.
+
+### 이번 단계에서 하지 않은 것
+
+- Battle Data 페이지 구현
+- Battle Data → Team Builder 연결
+- 대회 엔트리 제출
+- Supabase에 개인 팀 저장
+- `ypl_data_v4` 변경
+- 관리자 기능 변경
+- Supabase Auth / RLS 변경
+- Regulation 최신 데이터 갱신
+
+Regulation 내용 자체는 통합 대상인 기존 v0.6 데이터를 그대로 사용하며, 최신 Regulation 갱신은 별도 데이터 업데이트 작업으로 분리한다.
+
+### 검증
+
+- 신규 Team Builder 관련 JS/JSX 구문 검사 통과
+- 신규 상대경로 import 누락 없음
+- Windows 로컬 production build 및 preview 회귀 테스트 필요
+
+### 예정 Git 커밋
+
+```text
+feat: integrate team builder
+```
+
+---
+
 ## 이후 예정 단계
-
-### 5단계 — 관리자 인증 및 Supabase 보안 개선
-사용자 경험은 현재처럼 단순한 관리자 로그인 형태를 유지하면서, 브라우저 코드가 아니라 서버 측에서 실제 권한을 검증하도록 개선한다.
-
-### 6단계 — 기존 Team Builder 통합
-기존 YPL Team Builder 기능을 최대한 재사용하고 현재 YPL 본사이트 디자인에 맞춰 통합한다.
 
 ### 7단계 — 대회 엔트리 제출
 Team Builder에서 만든 팀을 실제 YPL 대회 엔트리로 제출할 수 있도록 연결한다.

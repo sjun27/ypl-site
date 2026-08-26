@@ -1,0 +1,178 @@
+/* Team Builder: scoped to .tb-page, aligned to the existing YPL design tokens. */
+.tb-page{padding:56px 0 96px;}
+.tb-page button,.tb-page input,.tb-page select{font:inherit;}
+.tb-hero{display:flex;align-items:flex-end;justify-content:space-between;gap:28px;margin-bottom:24px;padding:8px 2px 2px;}
+.tb-kicker,.tb-panel-kicker{display:block;font-size:11px;font-weight:800;letter-spacing:.14em;color:var(--muted2);margin-bottom:7px;}
+.tb-hero h1{font-size:clamp(34px,5vw,54px);line-height:1;margin:0 0 13px;font-weight:650;letter-spacing:-.04em;color:var(--text);}
+.tb-hero p{margin:0;max-width:650px;font-size:15px;line-height:1.7;color:var(--muted);}
+.tb-hero-actions{display:flex;gap:9px;flex:none;}
+.tb-main-btn{background:var(--s-deep);color:#fff;border-color:var(--s-deep);}
+.tb-main-btn:hover{filter:brightness(1.08);}
+.tb-count-badge{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;padding:0 6px;border-radius:999px;background:rgba(107,107,115,.1);font-size:11px;}
+
+.tb-rule-card,.tb-panel{background:var(--s-card);border:1px solid var(--line2);border-radius:22px;box-shadow:none;}
+.tb-rule-card{padding:20px;margin-bottom:18px;}
+.tb-rule-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;align-items:end;}
+.tb-field{display:flex;flex-direction:column;gap:7px;min-width:0;}
+.tb-field>span{font-size:12px;font-weight:750;color:var(--muted);}
+.tb-input,.tb-select{width:100%;min-height:44px;border:1px solid var(--line2);background:var(--s-card);color:var(--text);border-radius:13px;padding:10px 12px;outline:none;transition:border-color .18s,box-shadow .18s,background .18s;}
+.tb-input:focus,.tb-select:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(107,107,115,.08);}
+.tb-input:disabled,.tb-select:disabled{opacity:.56;cursor:not-allowed;background:var(--s-soft);}
+.tb-input.invalid{border-color:var(--danger);box-shadow:0 0 0 3px rgba(178,62,62,.08);}
+.tb-rule-meta{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;margin-top:14px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted);}
+.tb-status-chip{display:inline-flex;padding:5px 8px;border-radius:999px;font-size:10px;font-weight:850;letter-spacing:.08em;background:rgba(107,107,115,.1);color:var(--text);}
+.tb-status-chip.current{background:rgba(34,142,90,.1);color:#18734a;}
+
+.tb-layout{display:grid;grid-template-columns:minmax(290px,340px) minmax(0,1fr);gap:18px;align-items:start;}
+.tb-main-column{display:flex;flex-direction:column;gap:18px;min-width:0;}
+.tb-panel{padding:20px;min-width:0;}
+.tb-pool-panel{position:sticky;top:86px;max-height:calc(100vh - 105px);display:flex;flex-direction:column;}
+.tb-panel-head{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:14px;}
+.tb-panel-head h2{margin:0;font-size:21px;letter-spacing:-.025em;}
+.tb-panel-kicker{margin-bottom:4px;}
+.tb-pool-count{font-size:18px;font-variant-numeric:tabular-nums;color:var(--text);}
+.tb-pool-count small{font-size:12px;color:var(--muted2);font-weight:650;}
+.tb-data-line{display:flex;align-items:center;gap:7px;min-height:20px;margin:-2px 0 12px;font-size:11px;color:var(--muted2);}
+.tb-dot{width:7px;height:7px;border-radius:50%;background:#b7b7bc;flex:none;}
+.tb-dot.ready{background:#24a36c;}
+.tb-dot.error{background:var(--danger);}
+.tb-search-row{position:relative;margin-bottom:11px;}
+.tb-search-row .tb-input{padding-right:38px;}
+.tb-clear{position:absolute;right:7px;top:50%;transform:translateY(-50%);width:30px;height:30px;border:0;background:transparent;border-radius:9px;color:var(--muted);font-size:19px;cursor:pointer;}
+.tb-clear:hover{background:var(--s-soft);color:var(--text);}
+.tb-pokemon-list{overflow:auto;min-height:160px;padding-right:3px;scrollbar-width:thin;}
+.tb-pokemon-row{width:100%;border:0;border-top:1px solid var(--line);background:transparent;display:grid;grid-template-columns:48px minmax(0,1fr) auto auto;align-items:center;gap:8px;padding:9px 5px;text-align:left;cursor:pointer;color:var(--text);transition:background .14s,opacity .14s;}
+.tb-pokemon-row:first-child{border-top:0;}
+.tb-pokemon-row:hover:not(:disabled){background:var(--s-soft);}
+.tb-pokemon-row:disabled{cursor:default;opacity:.43;}
+.tb-pokemon-row img{width:46px;height:46px;object-fit:contain;image-rendering:auto;}
+.tb-pokemon-copy{display:flex;flex-direction:column;min-width:0;}
+.tb-pokemon-copy strong{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tb-pokemon-copy small{font-size:10.5px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px;}
+.tb-add-mark{min-width:34px;text-align:right;font-size:11px;font-weight:750;color:var(--muted2);}
+.tb-pool-empty{padding:42px 12px;text-align:center;color:var(--muted2);font-size:13px;line-height:1.65;}
+.tb-types{display:flex;align-items:center;gap:4px;flex-wrap:wrap;}
+.tb-type{display:inline-flex;align-items:center;justify-content:center;min-width:37px;height:20px;padding:0 7px;border-radius:999px;color:#fff;font-size:9px;font-weight:800;line-height:1;white-space:nowrap;background:#8b8b93;}
+.tb-type.type-normal{background:#9fa19f}.tb-type.type-fire{background:#e62829}.tb-type.type-water{background:#2980ef}.tb-type.type-electric{background:#fac000;color:#403600}.tb-type.type-grass{background:#3fa129}.tb-type.type-ice{background:#3fd8ff;color:#17424d}.tb-type.type-fighting{background:#ff8000}.tb-type.type-poison{background:#9141cb}.tb-type.type-ground{background:#915121}.tb-type.type-flying{background:#81b9ef;color:#23445f}.tb-type.type-psychic{background:#ef4179}.tb-type.type-bug{background:#91a119}.tb-type.type-rock{background:#afa981}.tb-type.type-ghost{background:#704170}.tb-type.type-dragon{background:#5060e1}.tb-type.type-dark{background:#624d4e}.tb-type.type-steel{background:#60a1b8}.tb-type.type-fairy{background:#ef70ef;color:#572757}
+
+.tb-team-head{align-items:center;}
+.tb-team-meta{display:flex;align-items:center;gap:10px;color:var(--muted2);font-size:11px;}
+.tb-team-meta span.dirty{color:#b56717;font-weight:750;}
+.tb-team-meta strong{font-size:15px;color:var(--text);font-variant-numeric:tabular-nums;}
+.tb-team-slots{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;}
+.tb-slot{position:relative;min-height:82px;border:1px solid var(--line2);background:var(--s-soft);border-radius:16px;padding:10px 28px 10px 9px;display:flex;align-items:center;gap:8px;text-align:left;color:var(--text);cursor:pointer;transition:border-color .15s,background .15s;min-width:0;}
+.tb-slot:hover:not(.empty){border-color:var(--cyan);background:var(--s-card);}
+.tb-slot.active{border-color:var(--cyan);background:var(--s-card);box-shadow:inset 0 0 0 1px var(--cyan);}
+.tb-slot.empty{cursor:default;color:var(--muted2);background:transparent;border-style:dashed;}
+.tb-slot-no{position:absolute;left:8px;top:7px;font-size:9px;font-weight:800;color:var(--muted2);}
+.tb-slot-sprite{width:56px;height:56px;object-fit:contain;flex:none;}
+.tb-slot-copy{display:flex;flex-direction:column;gap:4px;min-width:0;}
+.tb-slot-copy strong{font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tb-slot-copy small{font-size:10.5px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.tb-slot-empty{width:100%;text-align:center;font-size:11px;}
+.tb-slot-remove{position:absolute;right:7px;top:7px;width:22px;height:22px;display:flex;align-items:center;justify-content:center;border-radius:7px;color:var(--muted2);font-size:16px;line-height:1;}
+.tb-slot-remove:hover{background:rgba(178,62,62,.08);color:var(--danger);}
+.tb-team-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line);font-size:11px;color:var(--muted2);}
+
+.tb-editor{padding:22px;}
+.tb-editor-empty{min-height:240px;display:flex;align-items:center;justify-content:center;flex-direction:column;text-align:center;gap:8px;color:var(--muted2);padding:30px;}
+.tb-editor-empty strong{font-size:16px;color:var(--text);}
+.tb-editor-empty span{max-width:420px;font-size:12px;line-height:1.7;}
+.tb-editor-head{display:flex;align-items:center;gap:16px;padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:18px;}
+.tb-editor-head>img{width:92px;height:92px;object-fit:contain;background:var(--s-soft);border-radius:18px;padding:5px;}
+.tb-editor-title{display:flex;flex-direction:column;align-items:flex-start;min-width:0;}
+.tb-editor-title h2{font-size:26px;margin:0 0 2px;letter-spacing:-.035em;}
+.tb-editor-title>span{font-size:12px;color:var(--muted);margin-bottom:3px;}
+.tb-editor-title>small{font-size:10.5px;color:var(--muted2);margin-bottom:8px;}
+.tb-editor-grid.two{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.tb-editor-section{margin-top:22px;padding-top:19px;border-top:1px solid var(--line);}
+.tb-subhead{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin-bottom:12px;}
+.tb-subhead>div{display:flex;flex-direction:column;gap:3px;}
+.tb-subhead strong{font-size:14px;}
+.tb-subhead span{font-size:10.5px;color:var(--muted2);}
+.tb-subhead>b{font-size:12px;font-variant-numeric:tabular-nums;color:var(--muted);}
+.tb-subhead>b.over{color:var(--danger);}
+.tb-stats{display:flex;flex-direction:column;gap:7px;}
+.tb-stat-row{display:grid;grid-template-columns:80px minmax(90px,1fr) 66px 58px;gap:9px;align-items:center;padding:7px 8px;border-radius:12px;background:var(--s-soft);}
+.tb-stat-label{display:flex;flex-direction:column;gap:1px;}
+.tb-stat-label strong{font-size:11.5px;}
+.tb-stat-label span{font-size:9.5px;color:var(--muted2);}
+.tb-stat-row input[type="range"]{width:100%;accent-color:var(--navy);}
+.tb-stat-number{width:100%;height:34px;border:1px solid var(--line2);background:var(--s-card);border-radius:10px;text-align:center;color:var(--text);outline:none;}
+.tb-final-stat{display:flex;flex-direction:column;align-items:flex-end;}
+.tb-final-stat span{font-size:8.5px;color:var(--muted2);}
+.tb-final-stat strong{font-size:15px;font-variant-numeric:tabular-nums;}
+.tb-combo-wrap{min-width:0;}
+.tb-combo{font-size:13px;}
+.tb-inline-error{font-size:10.5px;color:var(--danger);margin-top:5px;}
+.tb-field-meta{font-size:10px;color:var(--muted2);margin-top:5px;line-height:1.45;}
+.tb-moves{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.tb-move-field{padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--s-soft);}
+
+.tb-validation{border:1px solid var(--line2);border-radius:19px;padding:16px 18px;background:var(--s-card);}
+.tb-validation.valid{border-color:rgba(36,163,108,.38);background:rgba(36,163,108,.045);}
+.tb-validation.invalid{border-color:rgba(178,62,62,.34);background:rgba(178,62,62,.035);}
+.tb-validation-head{display:flex;align-items:center;gap:12px;}
+.tb-validation-icon{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--s-soft);font-size:17px;font-weight:800;color:var(--muted);flex:none;}
+.tb-validation.valid .tb-validation-icon{background:rgba(36,163,108,.12);color:#18734a;}
+.tb-validation.invalid .tb-validation-icon{background:rgba(178,62,62,.1);color:var(--danger);}
+.tb-validation-head>div{display:flex;flex-direction:column;gap:2px;}
+.tb-validation-head strong{font-size:14px;}
+.tb-validation-head span{font-size:11px;color:var(--muted);}
+.tb-validation ul{margin:12px 0 0 46px;padding-left:14px;color:var(--muted);font-size:10.5px;line-height:1.65;}
+.tb-more{margin:5px 0 0 46px;font-size:10px;color:var(--muted2);}
+
+.tb-library-save{padding-bottom:18px;border-bottom:1px solid var(--line);}
+.tb-library-save-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;font-size:11px;color:var(--muted);}
+.tb-save-message{margin-top:8px;font-size:11px;color:#18734a;font-weight:650;}
+.tb-saved-list{display:flex;flex-direction:column;gap:9px;margin-top:14px;max-height:48vh;overflow:auto;padding-right:2px;}
+.tb-saved-team{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px;border:1px solid var(--line);border-radius:15px;background:var(--s-soft);}
+.tb-saved-main{min-width:0;display:flex;flex-direction:column;gap:4px;}
+.tb-saved-main>strong{font-size:13px;}
+.tb-saved-main>span{font-size:10.5px;color:var(--muted2);}
+.tb-saved-icons{display:flex;align-items:center;height:28px;overflow:hidden;}
+.tb-saved-icons img{width:30px;height:30px;object-fit:contain;margin-right:-3px;}
+.tb-saved-actions{display:flex;gap:5px;flex:none;}
+.tb-library-empty{padding:36px 15px;text-align:center;color:var(--muted2);font-size:12px;line-height:1.6;}
+
+@media(max-width:900px){
+  .tb-page{padding-top:38px;}
+  .tb-hero{align-items:flex-start;flex-direction:column;}
+  .tb-hero-actions{width:100%;}
+  .tb-hero-actions .btn{flex:1;justify-content:center;}
+  .tb-rule-grid{grid-template-columns:1fr 1fr;}
+  .tb-layout{grid-template-columns:1fr;}
+  .tb-pool-panel{position:static;max-height:none;}
+  .tb-pokemon-list{max-height:440px;}
+}
+@media(max-width:640px){
+  .tb-page{padding:28px 0 70px;}
+  .tb-hero h1{font-size:36px;}
+  .tb-hero p{font-size:13px;}
+  .tb-rule-card,.tb-panel{border-radius:18px;padding:15px;}
+  .tb-rule-grid{grid-template-columns:1fr;}
+  .tb-rule-meta{align-items:flex-start;flex-direction:column;gap:5px;}
+  .tb-team-slots{grid-template-columns:1fr 1fr;}
+  .tb-slot{min-height:76px;}
+  .tb-slot-sprite{width:47px;height:47px;}
+  .tb-editor{padding:16px;}
+  .tb-editor-head>img{width:76px;height:76px;}
+  .tb-editor-title h2{font-size:22px;}
+  .tb-editor-grid.two,.tb-moves{grid-template-columns:1fr;}
+  .tb-stat-row{grid-template-columns:66px minmax(70px,1fr) 54px 45px;gap:6px;padding:7px 6px;}
+  .tb-stat-label strong{font-size:10.5px;}
+  .tb-stat-number{height:32px;font-size:12px;}
+  .tb-final-stat strong{font-size:13px;}
+  .tb-pokemon-row{grid-template-columns:43px minmax(0,1fr) auto;}
+  .tb-pokemon-row img{width:41px;height:41px;}
+  .tb-pokemon-row .tb-types{display:none;}
+  .tb-team-actions{align-items:flex-start;flex-direction:column;}
+  .tb-saved-team{align-items:flex-start;flex-direction:column;}
+  .tb-saved-actions{width:100%;}
+  .tb-saved-actions .btn{flex:1;justify-content:center;}
+  .tb-library-save-row{align-items:flex-start;flex-direction:column;}
+  .tb-library-save-row .btn{width:100%;justify-content:center;}
+}
+@media(max-width:390px){
+  .tb-team-slots{grid-template-columns:1fr;}
+}

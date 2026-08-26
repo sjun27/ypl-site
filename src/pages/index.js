@@ -6,3 +6,4 @@ export { default as RecordsPage } from "./RecordsPage.jsx";
 export { default as BracketsPage } from "./BracketsPage.jsx";
 export { default as TitlesPage } from "./TitlesPage.jsx";
 export { default as ChampionsPage } from "./ChampionsPage.jsx";
+export { default as TeamBuilderPage } from "./TeamBuilderPage.jsx";

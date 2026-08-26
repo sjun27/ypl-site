@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { loadSiteData, saveSiteData } from "./services/index.js";
-import { AboutPage, BoardPage, BracketsPage, ChampionsPage, HomePage, NewsPage, RecordsPage, TitlesPage } from "./pages/index.js";
+import { AboutPage, BoardPage, BracketsPage, ChampionsPage, HomePage, NewsPage, RecordsPage, TeamBuilderPage, TitlesPage } from "./pages/index.js";
 import { SiteHeader } from "./components/index.js";
 import { AdminModeBar, AdminModalHost } from "./admin/index.js";
 
@@ -1602,6 +1602,7 @@ export default function App() {
         {view==="board"&&<BoardPage data={data} admin={admin} save={save} flash={flash}/>}
         {view==="records"&&<RecordsPage data={data} admin={admin} setModal={setModal} save={save}/>}
         {view==="bracket"&&<BracketsPage data={data} admin={admin} save={save} flash={flash}/>}
+        {view==="builder"&&<TeamBuilderPage/>}
         {view==="titles"&&<TitlesPage data={data} admin={admin} setModal={setModal}/>}
         {view==="champions"&&<ChampionsPage data={data} admin={admin} setModal={setModal} normTeam={normTeam}/>}
       </div>
