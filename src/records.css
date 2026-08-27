@@ -1,0 +1,152 @@
+.records-main-tabs{margin-bottom:14px}
+.records-coverage{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 18px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:var(--s-soft)}
+.records-coverage>div:first-child{display:flex;flex-direction:column;gap:4px;min-width:0}
+.records-coverage b{color:var(--navy)}
+.records-coverage span{font-size:12.5px;color:var(--muted);line-height:1.55}
+.records-coverage-stats{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.records-coverage-stats span{white-space:nowrap;padding:6px 9px;border:1px solid var(--line);border-radius:999px;background:var(--s-card)}
+.records-coverage-stats b{margin-left:4px}
+
+.records-trainer-layout,.records-pokemon-layout{display:grid;grid-template-columns:minmax(220px,270px) minmax(0,1fr);gap:16px;align-items:start}
+.records-trainer-list,.records-pokemon-list{padding:12px;position:sticky;top:92px}
+.records-search{display:flex;align-items:center;gap:8px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+.records-search input,.records-toolbar input{width:100%;min-width:0;border:1px solid var(--line);border-radius:12px;background:var(--s-card);color:var(--ink);padding:10px 12px;outline:none}
+.records-search input:hover,.records-toolbar input:hover{border-color:var(--line2)}
+.records-search input:focus,.records-toolbar input:focus{border-color:var(--navy)}
+.records-search span,.records-toolbar span{font-size:12px;color:var(--muted);white-space:nowrap}
+.records-trainer-scroll,.records-pokemon-scroll{display:flex;flex-direction:column;gap:4px;max-height:620px;overflow:auto;padding-top:8px}
+.records-trainer-row,.records-pokemon-row{border:1px solid transparent;background:transparent;color:var(--ink);border-radius:12px;padding:10px 11px;text-align:left;cursor:pointer;transition:border-color .16s,background .16s}
+.records-trainer-row:hover,.records-pokemon-row:hover{border-color:var(--line);background:var(--s-soft)}
+.records-trainer-row.on,.records-pokemon-row.on{border-color:var(--line2);background:var(--s-soft2)}
+.records-trainer-row{display:flex;flex-direction:column;gap:3px}
+.records-trainer-row b{font-size:14px}
+.records-trainer-row span{font-size:11.5px;color:var(--muted)}
+.records-pokemon-row{display:grid;grid-template-columns:28px minmax(0,1fr) auto;gap:8px;align-items:center}
+.records-pokemon-row .tnum{font-size:11px;color:var(--muted)}
+.records-pokemon-row b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13.5px}
+.records-pokemon-row em{font-style:normal;font-size:11.5px;color:var(--muted)}
+.records-list-none{padding:20px 6px}
+
+.records-profile{display:flex;flex-direction:column;gap:16px;min-width:0}
+.records-profile-hero{padding:24px}
+.records-profile-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.records-profile-head h3,.records-profile-hero>h3{margin:4px 0 18px;font-size:30px;color:var(--navy);letter-spacing:-.02em}
+.records-eyebrow{font-size:10.5px;letter-spacing:.14em;font-weight:800;color:var(--muted)}
+.records-profile-head select{border:1px solid var(--line);background:var(--s-card);color:var(--ink);border-radius:11px;padding:8px 10px;outline:none}
+.records-profile-head select:focus{border-color:var(--navy)}
+.records-stat-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}
+.records-stat{padding:14px;border:1px solid var(--line);border-radius:14px;background:var(--s-soft)}
+.records-stat span{display:block;font-size:11.5px;color:var(--muted);margin-bottom:5px}
+.records-stat b{font-size:24px;color:var(--ink)}
+.records-stat small{font-size:11px;font-weight:700;color:var(--muted);margin-left:3px}
+.records-match-summary{display:flex;align-items:flex-end;justify-content:space-between;gap:20px;margin-top:15px;padding-top:15px;border-top:1px solid var(--line)}
+.records-match-summary>div{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.records-match-summary span{font-size:12px;color:var(--muted)}
+.records-match-summary b{font-size:20px;color:var(--navy)}
+.records-match-summary em{font-style:normal;font-size:12px;font-weight:800;color:var(--muted)}
+.records-match-summary p{max-width:420px;margin:0;font-size:11.5px;line-height:1.55;color:var(--muted);text-align:right}
+
+.records-profile-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.records-block{padding:18px}
+.records-block-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}
+.records-block-head h4{margin:0;font-size:15px;color:var(--navy)}
+.records-block-head span{font-size:11.5px;color:var(--muted)}
+.records-history{display:flex;flex-direction:column}
+.records-history-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-top:1px solid var(--line)}
+.records-history-row:first-child{border-top:0;padding-top:2px}
+.records-history-row>div{display:flex;flex-direction:column;gap:3px;min-width:0}
+.records-history-row b{font-size:13px;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.records-history-row span{font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.records-placement{flex:0 0 auto;border-radius:999px;padding:5px 8px;font-size:10.5px;background:var(--s-soft);color:var(--muted)}
+.records-placement.p-win{background:rgba(193,145,30,.12);color:var(--gold)}
+.records-placement.p-ru{color:var(--navy)}
+.records-placement.p-sf{color:var(--t4)}
+.records-favorites{display:flex;flex-direction:column}
+.records-favorites>div{display:grid;grid-template-columns:30px minmax(0,1fr) auto;align-items:center;gap:8px;padding:9px 0;border-top:1px solid var(--line)}
+.records-favorites>div:first-child{border-top:0}
+.records-favorites .tnum{font-size:10.5px;color:var(--muted)}
+.records-favorites b{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.records-favorites em{font-style:normal;font-size:11.5px;color:var(--muted)}
+.records-rival{display:grid;grid-template-columns:1fr auto;gap:3px 10px;margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:12px;background:var(--s-soft)}
+.records-rival span{grid-column:1/-1;font-size:10.5px;color:var(--muted)}
+.records-rival b{font-size:13px}
+.records-rival em{font-style:normal;font-size:11px;color:var(--muted);align-self:center}
+.records-achievements{display:flex;gap:8px;flex-wrap:wrap}
+.records-achievements>div{display:flex;flex-direction:column;gap:2px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--s-soft)}
+.records-achievements strong{font-size:12.5px;color:var(--navy)}
+.records-achievements span{font-size:10.5px;color:var(--muted)}
+.records-title-chips{display:flex;gap:7px;flex-wrap:wrap}
+.records-title-chips span{padding:7px 9px;border:1px solid var(--line);border-radius:999px;background:var(--s-soft);font-size:11.5px;color:var(--ink)}
+
+.records-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.records-toolbar input{max-width:440px}
+.records-archive-list{display:flex;flex-direction:column;gap:10px}
+.records-archive-card{padding:0;overflow:hidden}
+.records-archive-main{width:100%;border:0;background:transparent;color:var(--ink);display:grid;grid-template-columns:108px minmax(0,1fr);gap:14px;align-items:start;padding:16px 18px;text-align:left;cursor:pointer}
+.records-archive-main:hover{background:var(--s-soft)}
+.records-archive-date{padding-top:2px;font-size:12.5px;color:var(--ink);white-space:nowrap}
+.records-archive-date strong{font-weight:800}
+.records-archive-copy{min-width:0}
+.records-archive-tags{display:flex;align-items:center;gap:7px;flex-wrap:wrap;min-height:23px}
+.records-archive-tags strong.round{font-size:12.5px;color:var(--navy);white-space:nowrap}
+.records-archive-tags span{font-size:10px;font-weight:800;color:var(--muted);padding:4px 8px;border:1px solid var(--line);border-radius:999px;white-space:nowrap}
+.records-archive-tags span.tournament{color:var(--navy)}
+.records-archive-tags span.season{background:var(--s-soft);color:var(--navy)}
+.records-archive-tags span.champ{background:var(--navy);border-color:var(--navy);color:#fff;padding-inline:11px}
+.records-archive-tags span.linked{color:var(--navy)}
+.records-archive-tags em.rule{font-style:normal;font-size:11px;font-weight:700;color:var(--ink)}
+.records-archive-result{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-top:8px;font-size:11.5px;color:var(--muted)}
+.records-archive-result b{font-weight:700;color:var(--navy)}
+.records-archive-result strong{font-weight:800;color:var(--ink)}
+.records-archive-detail{padding:0 18px 17px;border-top:1px solid var(--line)}
+.records-detail-meta{display:flex;gap:7px;flex-wrap:wrap;padding:12px 0}
+.records-detail-meta span{font-size:10.5px;color:var(--muted)}
+.records-rosters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.records-rosters>div{display:flex;flex-direction:column;gap:3px;padding:10px;border:1px solid var(--line);border-radius:11px;background:var(--s-soft)}
+.records-rosters b{font-size:11.5px;color:var(--ink)}
+.records-rosters span{font-size:10.5px;color:var(--muted);line-height:1.45}
+.records-legacy-note{margin:12px 0 0;font-size:11.5px;line-height:1.6;color:var(--muted)}
+.records-archive-admin{display:flex;justify-content:flex-end;margin-top:12px;padding-top:10px;border-top:1px solid var(--line)}
+
+.records-pokemon-note{margin:13px 0 0;padding-top:13px;border-top:1px solid var(--line);font-size:11.5px;line-height:1.6;color:var(--muted)}
+.records-rank-tabs{margin-bottom:10px}
+.records-points-note{margin:0 0 14px}
+.records-empty{padding:28px}
+
+@media(max-width:900px){
+  .records-trainer-layout,.records-pokemon-layout{grid-template-columns:1fr}
+  .records-trainer-list,.records-pokemon-list{position:static}
+  .records-trainer-scroll,.records-pokemon-scroll{max-height:260px}
+  .records-profile-grid{grid-template-columns:1fr}
+  .records-archive-main{grid-template-columns:92px minmax(0,1fr)}
+}
+@media(max-width:640px){
+  .records-coverage{align-items:flex-start;flex-direction:column}
+  .records-coverage-stats{justify-content:flex-start}
+  .records-profile-hero{padding:18px}
+  .records-profile-head{flex-direction:column}
+  .records-stat-grid,.records-stat-grid.pokemon{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .records-match-summary{align-items:flex-start;flex-direction:column}
+  .records-match-summary p{text-align:left}
+  .records-archive-main{grid-template-columns:1fr;gap:7px;padding:14px}
+  .records-rosters{grid-template-columns:1fr}
+}
+
+.records-tour-tabs{margin-bottom:12px}
+.records-tour-tabs .subtab{display:inline-flex;align-items:center;gap:6px}
+.records-tour-count{font-size:10px;line-height:1;min-width:18px;padding:3px 5px;border-radius:999px;background:var(--s-soft);color:var(--muted);font-weight:800}
+.records-tour-tabs .subtab.on .records-tour-count{background:var(--s-card);color:var(--navy)}
+
+
+
+.records-tour-panel{padding:0;overflow:hidden}
+.records-tour-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:18px 20px 14px;border-bottom:1px solid var(--line)}
+.records-tour-title{display:flex;align-items:center;gap:9px;min-width:0}
+.records-tour-dot{width:11px;height:11px;border-radius:4px;flex:0 0 auto}
+.records-tour-title h3{margin:0;font-size:18px;font-weight:800;color:var(--navy)}
+.records-tour-total{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
+.records-tour-body{padding:12px 14px 14px}
+.records-tour-panel .records-archive-card{box-shadow:none}
+@media(max-width:640px){
+  .records-tour-head{align-items:flex-start;flex-direction:column}
+}

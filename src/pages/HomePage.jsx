@@ -9,7 +9,7 @@ export default function HomePage({ data, go, admin }) {
   const champs=[...data.champions].sort((a,b)=>b.season-a.season);
   const cur=champs[0];
   const titleCount=data.titleGroups.reduce((n,g)=>n+g.items.length,0);
-  const roundCount=useMemo(()=>(data.tournaments||[]).reduce((n,t)=>n+((t.rounds||[]).length),0),[data]);
+  const roundCount=useMemo(()=>(data.tournaments||[]).reduce((n,t)=>n+(t.rounds||[]).filter(r=>r&&(String(r.win||"").trim()||(r.winMembers||[]).length>0)).length,0),[data.tournaments]);
   const news=[...data.announcements].sort((a,b)=>(b.pinned?1:0)-(a.pinned?1:0)||(a.date<b.date?1:-1))[0];
   const posts=[...(data.board||[])].filter(p=>admin||!p.secret).sort((a,b)=>(a.createdAt<b.createdAt?1:-1)).slice(0,3);
   const quick=[["about","소개"],["board","게시판"],["bracket","대진표"],["titles","칭호"]];

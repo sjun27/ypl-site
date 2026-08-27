@@ -185,6 +185,7 @@ export function RoundsEditor({ title, rounds, onClose, onSave, seasons }) {
   const rkey=(rd)=>{const n=parseInt(String(rd||""),10);return isNaN(n)?999999:n;};
   const sortRows=(arr)=>arr.map((r,i)=>({r,i})).sort((a,b)=>(dkey(a.r.date)-dkey(b.r.date))||(rkey(a.r.round)-rkey(b.r.round))||(a.i-b.i)).map(x=>x.r);
   const init=(r)=>({
+    id:r.id||uid(), recordMeta:r.recordMeta||null,
     team:!!r.team, champ:!!r.champ, date:r.date||"", round:r.round||"", rule:r.rule||"", season:r.season||"",
     win:r.win||"", ru:r.ru||"",
     winM:(r.winMembers||[]).join(", "), ruM:(r.ruMembers||[]).join(", "),
@@ -204,7 +205,7 @@ export function RoundsEditor({ title, rounds, onClose, onSave, seasons }) {
   const sfDel=(i,k)=>setList(list.map((r,j)=>j===i?{...r,sfTeams:r.sfTeams.filter((_,m)=>m!==k)}:r));
   const submit=()=>{
     let out=list.filter(r=>r.team?(String(r.win).trim()||splitL(r.winM).length>0):String(r.win).trim()).map(r=>{
-      const base={date:String(r.date).trim(),round:String(r.round).trim(),rule:String(r.rule).trim(),win:String(r.win).trim(),ru:String(r.ru).trim(),...(String(r.season).trim()?{season:String(r.season).trim()}:{})};
+      const base={id:r.id||uid(),date:String(r.date).trim(),round:String(r.round).trim(),rule:String(r.rule).trim(),win:String(r.win).trim(),ru:String(r.ru).trim(),...(String(r.season).trim()?{season:String(r.season).trim()}:{}),...(r.recordMeta?{recordMeta:r.recordMeta}:{})};
       const champ=r.champ?{champ:true}:{};
       if(r.team){
         const sfT=r.sfTeams.filter(t=>String(t.name).trim()||splitL(t.mem).length>0);

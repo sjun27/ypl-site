@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
+import { revertBracketRecord } from "../services/recordSync.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -511,14 +512,17 @@ function PartyEditor({ b, onClose, onSave }){
 function BracketBoard({ b, data, admin, save, flash, onApply }){
   const nameOf=(pid)=>{ const p=(b.participants||[]).find(x=>x.id===pid); return p?p.name:pid; };
   const teamMode=b.mode==="team";
+  const locked=!!b.applied;
+  const editAdmin=admin&&!locked;
   const [series,setSeries]=useState(null);
   const [party,setParty]=useState(false);
-  const savePartyFn=(parts)=>{ save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,participants:parts}:x)}); setParty(false); flash("엔트리 저장 ✓"); };
+  const savePartyFn=(parts)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,participants:parts}:x)}); setParty(false); flash("엔트리 저장 ✓"); };
   const hasParty=(b.participants||[]).some(p=>p.party||(p.memberParties&&Object.values(p.memberParties).some(Boolean)));
-  const pick=(matchId,side)=>save({...data,brackets:data.brackets.map(x=>x.id===b.id?withPick(x,matchId,side):x)});
-  const openTeam=(m,pa,pb)=>{ const A=(b.participants||[]).find(p=>p.id===pa),B=(b.participants||[]).find(p=>p.id===pb); if(!A||!B)return; setSeries({m,A,B}); };
-  const saveSeries=(sObj,winnerSide)=>{ save({...data,brackets:data.brackets.map(x=>x.id===b.id?withSeries(x,series.m.id,sObj,winnerSide):x)}); setSeries(null); };
+  const pick=(matchId,side)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?withPick(x,matchId,side):x)}); };
+  const openTeam=(m,pa,pb)=>{ if(locked)return; const A=(b.participants||[]).find(p=>p.id===pa),B=(b.participants||[]).find(p=>p.id===pb); if(!A||!B)return; setSeries({m,A,B}); };
+  const saveSeries=(sObj,winnerSide)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?withSeries(x,series.m.id,sObj,winnerSide):x)}); setSeries(null); };
   const makeKnockout=()=>{
+    if(locked)return;
     const adv=[];
     b.groups.forEach(gr=>{ const st=groupStandings(gr).slice(0,b.groupCfg.adv); st.forEach(s=>adv.push(s.name)); });
     const ko=b.double?buildDouble(adv):buildSingle(adv);
@@ -526,26 +530,33 @@ function BracketBoard({ b, data, admin, save, flash, onApply }){
     flash("본선 대진 생성 ✓");
   };
   const res = b.format==="group" ? (b.knockout?elimResult(b.knockout):null) : elimResult(b.graph);
+  const undoApplied=()=>{
+    if(!b.applied)return;
+    if(!confirm("이 대진표의 기록 반영을 취소할까요? 회차·랭킹·시즌 성적이 함께 원복됩니다."))return;
+    const result=revertBracketRecord(data,b.id);
+    if(!result.changed){alert(result.reason||"자동 원복할 수 없는 기록입니다.");return;}
+    save(result.data); flash("기록 반영 취소 ✓");
+  };
   return (<div className="bk-board swap">
-    {admin&&<div className="bk-tools"><button className="btn btn-ghost btn-sm" onClick={()=>setParty(true)}>📋 파티 엔트리 기록</button></div>}
+    {editAdmin&&<div className="bk-tools"><button className="btn btn-ghost btn-sm" onClick={()=>setParty(true)}>📋 파티 엔트리 기록</button></div>}
     {b.format==="group"&&<>
       <div className="bk-groups">{b.groups.map(gr=>{ const ev=evalGraph({rounds:[gr.matches]}); const st=groupStandings(gr);
         return (<div className="bk-group" key={gr.id}>
           <div className="bk-group-h">그룹 {gr.name}</div>
-          <div className="bk-gmatches">{gr.matches.map(m=><MatchCard key={m.id} m={m} ev={ev} nameOf={nameOf} admin={admin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam} compact/>)}</div>
+          <div className="bk-gmatches">{gr.matches.map(m=><MatchCard key={m.id} m={m} ev={ev} nameOf={nameOf} admin={editAdmin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam} compact/>)}</div>
           <div className="bk-stand">{st.map((s,i)=><div className={"bk-strow"+(i<b.groupCfg.adv?" adv":"")} key={s.name}><span>{i+1}</span><b>{nameOf(s.name)}</b><span className="tnum">{s.wins}승</span></div>)}</div>
         </div>);})}</div>
-      {!b.knockout&&admin&&<div className="bk-cta"><button className="btn btn-primary" disabled={!groupDone(b)} onClick={makeKnockout}>{groupDone(b)?"본선 대진 생성 →":"모든 조별 경기를 입력하세요"}</button></div>}
-      {b.knockout&&<div className="bk-ko"><div className="bk-ko-h">본선 토너먼트</div><ElimBoard g={b.knockout} nameOf={nameOf} admin={admin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam}/></div>}
+      {!b.knockout&&editAdmin&&<div className="bk-cta"><button className="btn btn-primary" disabled={!groupDone(b)} onClick={makeKnockout}>{groupDone(b)?"본선 대진 생성 →":"모든 조별 경기를 입력하세요"}</button></div>}
+      {b.knockout&&<div className="bk-ko"><div className="bk-ko-h">본선 토너먼트</div><ElimBoard g={b.knockout} nameOf={nameOf} admin={editAdmin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam}/></div>}
     </>}
-    {b.format==="elim"&&<ElimBoard g={b.graph} nameOf={nameOf} admin={admin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam}/>}
+    {b.format==="elim"&&<ElimBoard g={b.graph} nameOf={nameOf} admin={editAdmin} onPick={pick} teamMode={teamMode} onOpenTeam={openTeam}/>}
     {res&&res.done&&<div className="bk-champ-banner">
       <span className="bk-cb-k">🏆 우승</span><span className="bk-cb-n">{nameOf(res.champ)}</span>{res.ru&&<span className="bk-cb-ru">준우승 {nameOf(res.ru)}</span>}
       <div className="bk-cb-actions">
         <button className="btn btn-ghost btn-sm" onClick={()=>downloadChampionPng(b,res,nameOf)}>🎉 우승 이미지</button>
         <button className="btn btn-ghost btn-sm" onClick={()=>downloadBracketPng(b,nameOf)}>🖼 대진표 이미지</button>
         {admin&&!b.applied&&<button className="btn btn-gold btn-sm" onClick={()=>onApply(b,res)}>기록에 반영 →</button>}
-        {b.applied&&<span className="bk-applied">✓ 기록 반영됨</span>}
+        {b.applied&&<><span className="bk-applied">✓ 기록 반영됨</span>{admin&&<button className="btn btn-ghost btn-sm" onClick={undoApplied}>반영 취소</button>}</>}
       </div>
     </div>}
     {hasParty&&<div className="bk-entries"><div className="bk-entries-h">📋 참가 엔트리</div><div className="bk-entries-grid">
@@ -604,7 +615,8 @@ function BracketApply({ b, res, data, onClose, save, flash }){
   const buildResult=()=>{
     const champName=nameOf(res.champ), ruName=res.ru?nameOf(res.ru):"", sfNames=res.sf.map(nameOf);
     const roundNum=roundStr.trim()||autoNext;
-    const round={ id:uid(), date:date.trim(), round:roundNum, win:champName, ru:ruName, sf:sfNames, rule:rule.trim(), team, ...(champ?{champ:true}:{}), ...(season?{season}:{}) };
+    const roundId=uid();
+    const round={ id:roundId, date:date.trim(), round:roundNum, win:champName, ru:ruName, sf:sfNames, rule:rule.trim(), team, ...(champ?{champ:true}:{}), ...(season?{season}:{}) };
     if(team){ round.winMembers=memListOf(res.champ); round.ruMembers=res.ru?memListOf(res.ru):[]; round.sfMembers=res.sf.map(memListOf); }
     let nd={...data, tournaments:tours.map(x=>x.key===tkey?{...x,rounds:[...(x.rounds||[]),round]}:x)};
     const deltas=computeDeltas();
@@ -612,9 +624,14 @@ function BracketApply({ b, res, data, onClose, save, flash }){
       if(i<0)rs=[...rs,{name,win:d.win,ru:d.ru,top4:d.top4,points:d.points}];
       else rs=rs.map((r,j)=>j===i?{...r,win:(r.win||0)+d.win,ru:(r.ru||0)+d.ru,top4:(r.top4||0)+d.top4,points:(r.points||0)+d.points}:r); }); return rs; };
     const willRank=bumpRank&&rankKey&&!excluded, willSeason=bumpSeason&&season&&!champ&&!excluded;
+    const seasonRows=(data.seasons||[]).find(s=>s.name===season)?.rows||[];
+    const rankWasNew={}, seasonWasNew={};
+    Object.keys(deltas).forEach(name=>{ rankWasNew[name]=!rankRows.some(r=>r.name===name); seasonWasNew[name]=!seasonRows.some(r=>r.name===name); });
+    const recordMeta={source:"bracket",bracketId:b.id,rankKey,season,rankEnabled:bumpRank&&!excluded,seasonEnabled:bumpSeason&&!excluded,willRank,willSeason,deltas,rankWasNew,seasonWasNew,pointConfig:{win:ptWinN,ru:ptRuN,sf:ptSfN}};
+    nd={...nd,tournaments:nd.tournaments.map(x=>x.key!==tkey?x:{...x,rounds:(x.rounds||[]).map(r=>r.id===roundId?{...r,recordMeta}:r)})};
     if(willRank){ nd={...nd, rankings:nd.rankings.map(era=>era.key!==rankKey?era:{...era,rows:bumpRows(era.rows)})}; }
     if(willSeason){ nd={...nd, seasons:(nd.seasons||[]).map(s=>s.name!==season?s:{...s,rows:bumpRows(s.rows)})}; }
-    nd={...nd, brackets:nd.brackets.map(x=>x.id===b.id?{...x,status:"done",applied:{tournamentKey:tkey,date,season}}:x)};
+    nd={...nd, brackets:nd.brackets.map(x=>x.id===b.id?{...x,status:"done",applied:{tournamentKey:tkey,date,season,roundId,recordMeta}}:x)};
     return { nd, deltas, roundNum, willRank, willSeason };
   };
   const prepare=()=>{ if(!curT){alert("회차를 추가할 대회를 선택하세요.");return;} setPreview(buildResult()); };
@@ -740,7 +757,7 @@ export default function BracketsPage({ data, admin, save, flash }){
   const [drawId,setDrawId]=useState(null);
   const open=list.find(b=>b.id===openId);
   const create=(b)=>{ save({...data,brackets:[b,...list]}); setWizard(false); setOpenId(b.id); setDrawId(b.id); flash("대회 생성 ✓"); };
-  const del=(b)=>{ if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return; save({...data,brackets:list.filter(x=>x.id!==b.id)}); setOpenId(null); };
+  const del=(b)=>{ if(b.applied){alert("기록 반영 취소 후 대진표를 삭제할 수 있습니다.");return;} if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return; save({...data,brackets:list.filter(x=>x.id!==b.id)}); setOpenId(null); };
   const statusTag=(b)=>{ const r=b.format==="group"?(b.knockout?elimResult(b.knockout):null):elimResult(b.graph); if(b.applied)return"기록 반영됨"; if(r&&r.done)return"종료"; return"진행 중"; };
   return (<section className="sec">
     <Reveal className="sec-head"><div className="kick">Bracket</div><h2>대진표</h2>
@@ -756,7 +773,7 @@ export default function BracketsPage({ data, admin, save, flash }){
       </button>))}
     </div>}
     {open&&<div className="bk-open swap">
-      <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
+      <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" disabled={!!open.applied} title={open.applied?"기록 반영 취소 후 삭제할 수 있습니다.":""} onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
       {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} onApply={(b,res)=>setApply({b,res})}/>}
     </div>}
     {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create}/>}
