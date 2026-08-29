@@ -305,6 +305,19 @@ function buildPlacementHistory(data) {
   const events = [];
 
   for (const tournament of data.tournaments || []) {
+    const championSeriesRoundByIndex = new Map(
+      (tournament.rounds || [])
+        .map((round, index) => ({ round, index }))
+        .filter(({ round }) => !!round.champ)
+        .sort((a, b) => {
+          const ad = a.round.date || "";
+          const bd = b.round.date || "";
+          if (ad !== bd) return ad < bd ? -1 : 1;
+          return a.index - b.index;
+        })
+        .map(({ index }, seriesIndex) => [index, seriesIndex + 1])
+    );
+
     for (const [index, round] of (tournament.rounds || []).entries()) {
       const base = {
         id: round.id || `${tournament.key}:${index}`,
@@ -315,6 +328,7 @@ function buildPlacementHistory(data) {
         season: round.season || "",
         rule: round.rule || "",
         championSeries: !!round.champ,
+        championSeriesRound: round.champ ? championSeriesRoundByIndex.get(index) || null : null,
         team: !!round.team,
       };
 
@@ -621,7 +635,6 @@ export function buildRecordsSnapshot(data = {}) {
         b.wins - a.wins ||
         b.runnerUps - a.runnerUps ||
         b.top4 - a.top4 ||
-        b.matches - a.matches ||
         a.name.localeCompare(b.name, "ko")
     );
 

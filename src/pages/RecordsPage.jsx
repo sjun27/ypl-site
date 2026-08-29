@@ -13,8 +13,6 @@ const placementLabel = (p, team = false) => {
   return "참가";
 };
 
-const pct = (value) => (value == null ? "—" : `${value.toFixed(1)}%`);
-
 /* ============================== RECORDS ============================== */
 export default function RecordsPage({ data, admin, setModal, save }) {
   const [tab, setTab] = useState("trainer");
@@ -60,8 +58,8 @@ function CoverageNote({ snapshot }) {
       <div>
         <b>현재 저장 자료 기준</b>
         <span>
-          경기 전적은 <strong>YPL 시즌 3부터 기록에 반영된 개인전 대진표</strong>에서 실제 상대가 있었던 경기만 집계합니다.
-          이전 시즌의 승·패는 소급 추정하지 않습니다.
+          경기 결과 원본은 <strong>YPL 시즌 3부터 기록에 반영된 개인전 대진표</strong>에서 실제 상대가 있었던 경기만 보존합니다.
+          이전 시즌의 승·패는 소급 추정하지 않으며, 개인 승·패·승률은 기본 공개 지표로 표시하지 않습니다.
         </span>
       </div>
       <div className="records-coverage-stats">
@@ -74,12 +72,6 @@ function CoverageNote({ snapshot }) {
 }
 
 /* ============================== TRAINERS ============================== */
-function officialWLSeason(name) {
-  if (!name) return true;
-  const match = String(name).match(/YPL\s*시즌\s*(\d+)/i);
-  return !!match && Number(match[1]) >= 3;
-}
-
 function TrainerView({ snapshot }) {
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(snapshot.trainers[0]?.name || "");
@@ -93,7 +85,6 @@ function TrainerView({ snapshot }) {
 
   const seasonMatch = (value) => !season || value === season;
   const placements = profile.placements.filter((p) => seasonMatch(p.season));
-  const matches = profile.matches.filter((m) => seasonMatch(m.season));
   const participations = profile.participations.filter((p) => seasonMatch(p.season));
   const rosters = profile.rosters.filter((r) => seasonMatch(r.season));
 
@@ -101,21 +92,6 @@ function TrainerView({ snapshot }) {
   const championships = individualPlacements.filter((p) => p.placement === "win").length;
   const runnerUps = individualPlacements.filter((p) => p.placement === "ru").length;
   const top4 = individualPlacements.filter((p) => p.placement === "sf").length;
-  const wins = matches.filter((m) => m.won).length;
-  const losses = matches.length - wins;
-  const winRate = matches.length ? (wins / matches.length) * 100 : null;
-  const wlTracked = officialWLSeason(season);
-
-  const rivalMap = new Map();
-  for (const match of matches) {
-    const cur = rivalMap.get(match.opponent) || { name: match.opponent, games: 0, wins: 0, losses: 0 };
-    cur.games += 1;
-    if (match.won) cur.wins += 1;
-    else cur.losses += 1;
-    rivalMap.set(match.opponent, cur);
-  }
-  const rival = [...rivalMap.values()].sort((a, b) => b.games - a.games)[0] || null;
-
   const favoriteMap = new Map();
   for (const roster of rosters) {
     for (const pokemon of new Set(roster.pokemon || [])) {
@@ -141,7 +117,7 @@ function TrainerView({ snapshot }) {
               onClick={() => setSelected(trainer.name)}
             >
               <b>{trainer.name}</b>
-              <span>우승 {trainer.wins} · 공식 경기 {trainer.matches}</span>
+              <span>우승 {trainer.wins} · 준우승 {trainer.runnerUps} · 4강 {trainer.top4}</span>
             </button>
           ))}
           {!visible.length && <div className="none records-list-none">검색 결과 없음</div>}
@@ -170,25 +146,6 @@ function TrainerView({ snapshot }) {
             <Stat label="4강" value={top4} suffix="회" />
           </div>
 
-          <div className="records-match-summary">
-            {wlTracked ? (
-              <div>
-                <span>공식 경기 전적</span>
-                <b>{wins}승 {losses}패</b>
-                <em>{pct(winRate)}</em>
-              </div>
-            ) : (
-              <div>
-                <span>공식 경기 전적</span>
-                <b>미집계</b>
-              </div>
-            )}
-            <p>
-              {wlTracked
-                ? "YPL 시즌 3부터 기록에 반영된 개인전 대진표의 실제 경기만 집계합니다. 부전승은 경기 수와 승리에 포함하지 않으며, 팀전 개인경기는 집계 기준 확정 전까지 제외합니다."
-                : "YPL 시즌 1~2 및 그 이전 기록은 대회 성적만 보존하며, 경기별 승·패는 소급 집계하지 않습니다."}
-            </p>
-          </div>
         </div>
 
         <div className="records-profile-grid">
@@ -203,9 +160,19 @@ function TrainerView({ snapshot }) {
                 .sort((a, b) => (a.date < b.date ? 1 : -1))
                 .slice(0, 12)
                 .map((event) => (
-                  <div className="records-history-row" key={`${event.id}:${event.name}:${event.placement}`}>
+                  <div
+                    className={"records-history-row" + (event.championSeries ? " is-champions" : "")}
+                    key={`${event.id}:${event.name}:${event.placement}`}
+                  >
                     <div>
-                      <b>{event.tournamentName}{event.round ? ` ${event.round}회` : ""}</b>
+                      {event.championSeries && (
+                        <div className="records-history-kicker">CHAMPIONS SERIES</div>
+                      )}
+                      <b>
+                        {event.championSeries
+                          ? `챔피언스 시리즈 ${event.championSeriesRound || event.round || ""}회`
+                          : `${event.tournamentName}${event.round ? ` ${event.round}회` : ""}`}
+                      </b>
                       <span>{[event.date, event.season, event.rule].filter(Boolean).join(" · ")}</span>
                     </div>
                     <strong className={"records-placement p-" + event.placement}>
@@ -236,13 +203,6 @@ function TrainerView({ snapshot }) {
               <div className="none">저장된 엔트리가 없습니다.</div>
             )}
 
-            {wlTracked && rival && (
-              <div className="records-rival">
-                <span>가장 많이 만난 상대</span>
-                <b>{rival.name}</b>
-                <em>{rival.games}경기 · {rival.wins}승 {rival.losses}패</em>
-              </div>
-            )}
           </section>
         </div>
 
