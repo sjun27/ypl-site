@@ -127,13 +127,25 @@ function participantMap(bracket) {
 function bracketTournamentMeta(bracket, data) {
   const applied = bracket.applied || {};
   const tournament = (data.tournaments || []).find((t) => t.key === applied.tournamentKey);
+  const rounds = tournament?.rounds || [];
+  const linkedRound =
+    rounds.find((r) => applied.roundId && r?.id === applied.roundId) ||
+    rounds.find((r) => r?.recordMeta?.bracketId === bracket.id) ||
+    rounds.find((r) => applied.date && r?.date === applied.date) ||
+    null;
+
   return {
     bracketId: bracket.id,
     tournamentKey: applied.tournamentKey || "",
     tournamentName: tournament?.label || bracket.name || "대회",
     bracketName: bracket.name || tournament?.label || "대회",
-    season: applied.season || "",
-    date: applied.date || bracket.createdAt || "",
+    roundId: linkedRound?.id || applied.roundId || "",
+    round: linkedRound?.round || "",
+    season: linkedRound?.season || applied.season || "",
+    date: linkedRound?.date || applied.date || bracket.createdAt || "",
+    rule: linkedRound?.rule || "",
+    championSeries: !!linkedRound?.champ,
+    team: bracket.mode === "team",
     mode: bracket.mode || "single",
     format: bracket.format || "elim",
   };
@@ -152,32 +164,106 @@ function countsForOfficialWL(season) {
 function buildMatchRecords(data) {
   const records = [];
 
-  // 현재 정책이 확정되지 않은 팀전 개인경기는 통산 전적에서 제외한다.
-  // applied가 있는 개인전 대진표만 공식 경기 전적의 원본으로 사용한다.
+  // YPL 시즌 3부터 기록에 반영된 개인전·팀전 대진표의 실제 경기 원본을 보존한다.
+  // BYE는 경기로 보지 않는다. 공개 화면에서는 개인 승/패·승률을 기본 노출하지 않는다.
   for (const bracket of data.brackets || []) {
-    if (!bracket?.applied || bracket.mode === "team") continue;
+    if (!bracket?.applied) continue;
 
     const pmap = participantMap(bracket);
     const meta = bracketTournamentMeta(bracket, data);
     if (!countsForOfficialWL(meta.season)) continue;
 
-    const pushMatch = (match, stage, slotPlayer) => {
-      if (!match?.winner) return;
-      const aId = slotPlayer(match.a);
-      const bId = slotPlayer(match.b);
-      if (!aId || !bId || aId === BYE || bId === BYE) return;
-      const winnerId = match.winner === "a" ? aId : bId;
-      const loserId = match.winner === "a" ? bId : aId;
-      const winner = cleanName(pmap.get(winnerId)?.name);
-      const loser = cleanName(pmap.get(loserId)?.name);
+    const pushRecord = ({ id, stage, winner, loser, extra = {} }) => {
+      winner = cleanName(winner);
+      loser = cleanName(loser);
       if (!winner || !loser) return;
       records.push({
-        id: `${bracket.id}:${match.id}`,
+        id,
         ...meta,
         stage,
         winner,
         loser,
+        ...extra,
       });
+    };
+
+    const pushIndividualMatch = (match, stage, slotPlayer) => {
+      if (!match?.winner) return;
+      const aId = slotPlayer(match.a);
+      const bId = slotPlayer(match.b);
+      if (!aId || !bId || aId === BYE || bId === BYE) return;
+
+      const winnerId = match.winner === "a" ? aId : bId;
+      const loserId = match.winner === "a" ? bId : aId;
+      pushRecord({
+        id: `${bracket.id}:${match.id}`,
+        stage,
+        winner: pmap.get(winnerId)?.name,
+        loser: pmap.get(loserId)?.name,
+        extra: { teamMatch: false },
+      });
+    };
+
+    const pushTeamSeries = (match, stage, slotPlayer) => {
+      const series = match?.series;
+      if (!series) return;
+
+      const aTeamId = slotPlayer(match.a);
+      const bTeamId = slotPlayer(match.b);
+      if (!aTeamId || !bTeamId || aTeamId === BYE || bTeamId === BYE) return;
+
+      const teamA = cleanName(pmap.get(aTeamId)?.name);
+      const teamB = cleanName(pmap.get(bTeamId)?.name);
+      const lineupA = series.lineupA || [];
+      const lineupB = series.lineupB || [];
+      const games = series.games || [];
+      const gameCount = Math.min(lineupA.length, lineupB.length, games.length);
+
+      for (let i = 0; i < gameCount; i += 1) {
+        const side = games[i];
+        if (side !== "a" && side !== "b") continue;
+        const a = cleanName(lineupA[i]);
+        const b = cleanName(lineupB[i]);
+        if (!a || !b) continue;
+
+        pushRecord({
+          id: `${bracket.id}:${match.id}:team:${i}`,
+          stage: `${stage} · ${i + 1}경기`,
+          winner: side === "a" ? a : b,
+          loser: side === "a" ? b : a,
+          extra: {
+            teamMatch: true,
+            ace: false,
+            teamA,
+            teamB,
+          },
+        });
+      }
+
+      const ace = series.ace;
+      if (ace && (ace.winner === "a" || ace.winner === "b")) {
+        const a = cleanName(ace.a);
+        const b = cleanName(ace.b);
+        if (a && b) {
+          pushRecord({
+            id: `${bracket.id}:${match.id}:ace`,
+            stage: `${stage} · 에이스 결정전`,
+            winner: ace.winner === "a" ? a : b,
+            loser: ace.winner === "a" ? b : a,
+            extra: {
+              teamMatch: true,
+              ace: true,
+              teamA,
+              teamB,
+            },
+          });
+        }
+      }
+    };
+
+    const pushMatch = (match, stage, slotPlayer) => {
+      if (bracket.mode === "team") pushTeamSeries(match, stage, slotPlayer);
+      else pushIndividualMatch(match, stage, slotPlayer);
     };
 
     const handleGraph = (graph, prefix = "") => {
@@ -185,7 +271,8 @@ function buildMatchRecords(data) {
       const ev = evalGraph(graph);
       for (const item of collectGraphMatches(graph)) {
         if (item.reset && graph.gf?.winner !== "b") continue;
-        pushMatch(item.match, prefix ? `${prefix} ${item.stage}` : item.stage, ev.slotPlayer);
+        const stage = prefix ? `${prefix} ${item.stage}` : item.stage;
+        pushMatch(item.match, stage, ev.slotPlayer);
       }
     };
 
@@ -201,7 +288,6 @@ function buildMatchRecords(data) {
       handleGraph(bracket.graph);
     }
   }
-
 
   return records;
 }
@@ -253,23 +339,153 @@ function buildRosterEntries(data) {
   return entries.filter((e) => e.owner);
 }
 
+function graphParticipantIds(graph) {
+  const ids = new Set();
+  for (const round of graph?.rounds || []) {
+    for (const match of round || []) {
+      for (const slot of [match?.a, match?.b]) {
+        if (slot?.pid && slot.pid !== BYE) ids.add(slot.pid);
+      }
+    }
+  }
+  return [...ids];
+}
+
+function singleEliminationFinishMap(graph) {
+  const result = new Map();
+  if (!graph?.rounds?.length) return result;
+
+  const ev = evalGraph(graph);
+  const lastRoundIndex = graph.rounds.length - 1;
+
+  graph.rounds.forEach((round, ri) => {
+    for (const match of round || []) {
+      if (!match?.winner) continue;
+      const loser = ev.lose[match.id];
+      if (!loser || loser === BYE) continue;
+
+      if (ri === lastRoundIndex) {
+        result.set(loser, { placement: "ru", resultLabel: "준우승", rank: 2 });
+      } else {
+        const cut = (round?.length || 0) * 2;
+        result.set(loser, {
+          placement: cut === 4 ? "sf" : "participant",
+          resultLabel: `${cut}강`,
+          rank: null,
+        });
+      }
+    }
+  });
+
+  const finalMatch = graph.rounds[lastRoundIndex]?.[0];
+  const champion = finalMatch ? ev.win[finalMatch.id] : null;
+  if (champion && champion !== BYE) {
+    result.set(champion, { placement: "win", resultLabel: "우승", rank: 1 });
+  }
+
+  return result;
+}
+
+function doubleEliminationFinishMap(graph) {
+  const result = new Map();
+  if (!graph) return result;
+
+  const participantIds = graphParticipantIds(graph);
+  const ev = evalGraph(graph);
+  const finalResult = eliminationResult(graph);
+  let remaining = participantIds.length;
+
+  for (const round of graph.lb || []) {
+    const losers = [];
+    const seen = new Set();
+
+    for (const match of round || []) {
+      if (!match?.winner) continue;
+      const loser = ev.lose[match.id];
+      if (!loser || loser === BYE || seen.has(loser)) continue;
+      seen.add(loser);
+      losers.push(loser);
+    }
+
+    if (!losers.length) continue;
+    remaining = Math.max(0, remaining - losers.length);
+    const rank = remaining + 1;
+    const resultLabel = losers.length > 1 ? `공동 ${rank}위` : `${rank}위`;
+    const placement = rank <= 4 ? "sf" : "participant";
+
+    for (const loser of losers) {
+      result.set(loser, { placement, resultLabel, rank });
+    }
+  }
+
+  if (finalResult?.ru) {
+    result.set(finalResult.ru, { placement: "ru", resultLabel: "준우승", rank: 2 });
+  }
+  if (finalResult?.champ) {
+    result.set(finalResult.champ, { placement: "win", resultLabel: "우승", rank: 1 });
+  }
+
+  return result;
+}
+
+function eliminationFinishMap(graph) {
+  if (!graph) return new Map();
+  return graph.kind === "double"
+    ? doubleEliminationFinishMap(graph)
+    : singleEliminationFinishMap(graph);
+}
+
+function bracketFinishMap(bracket) {
+  if (!bracket) return new Map();
+
+  if (bracket.format === "group") {
+    const result = eliminationFinishMap(bracket.knockout);
+    for (const participant of bracket.participants || []) {
+      if (!result.has(participant.id)) {
+        result.set(participant.id, {
+          placement: "participant",
+          resultLabel: "조별리그 탈락",
+          rank: null,
+        });
+      }
+    }
+    return result;
+  }
+
+  return eliminationFinishMap(bracket.graph);
+}
+
+function resultLabelFor(placement, team = false) {
+  const base =
+    placement === "win" ? "우승" :
+    placement === "ru" ? "준우승" :
+    placement === "sf" ? "4강" :
+    "참가";
+  return team ? `팀 ${base}` : base;
+}
+
+function withTeamPrefix(label, team) {
+  if (!team) return label || "참가";
+  return `팀 ${label || "참가"}`;
+}
+
 function buildParticipationRecords(data) {
   const rows = [];
 
   for (const bracket of data.brackets || []) {
     if (!bracket?.applied) continue;
-    const meta = bracketTournamentMeta(bracket, data);
-    const result = bracketResult(bracket);
-    const pmap = participantMap(bracket);
 
-    const individualPlacement = new Map();
-    if (result?.champ) individualPlacement.set(result.champ, "win");
-    if (result?.ru) individualPlacement.set(result.ru, "ru");
-    for (const id of result?.sf || []) individualPlacement.set(id, "sf");
+    const meta = bracketTournamentMeta(bracket, data);
+    const finishMap = bracketFinishMap(bracket);
 
     if (bracket.mode === "team") {
       for (const team of bracket.participants || []) {
-        const placement = individualPlacement.get(team.id) || "participant";
+        const finish = finishMap.get(team.id) || {
+          placement: "participant",
+          resultLabel: "참가",
+          rank: null,
+        };
+
         for (const member of team.members || []) {
           const name = cleanName(member);
           if (!name) continue;
@@ -279,7 +495,9 @@ function buildParticipationRecords(data) {
             name,
             team: true,
             teamName: cleanName(team.name),
-            placement,
+            placement: finish.placement,
+            resultLabel: withTeamPrefix(finish.resultLabel, true),
+            resultRank: finish.rank,
           });
         }
       }
@@ -287,12 +505,20 @@ function buildParticipationRecords(data) {
       for (const participant of bracket.participants || []) {
         const name = cleanName(participant.name);
         if (!name) continue;
+        const finish = finishMap.get(participant.id) || {
+          placement: "participant",
+          resultLabel: "참가",
+          rank: null,
+        };
+
         rows.push({
           id: `${bracket.id}:${participant.id}`,
           ...meta,
           name,
           team: false,
-          placement: individualPlacement.get(participant.id) || "participant",
+          placement: finish.placement,
+          resultLabel: finish.resultLabel,
+          resultRank: finish.rank,
         });
       }
     }
@@ -305,22 +531,10 @@ function buildPlacementHistory(data) {
   const events = [];
 
   for (const tournament of data.tournaments || []) {
-    const championSeriesRoundByIndex = new Map(
-      (tournament.rounds || [])
-        .map((round, index) => ({ round, index }))
-        .filter(({ round }) => !!round.champ)
-        .sort((a, b) => {
-          const ad = a.round.date || "";
-          const bd = b.round.date || "";
-          if (ad !== bd) return ad < bd ? -1 : 1;
-          return a.index - b.index;
-        })
-        .map(({ index }, seriesIndex) => [index, seriesIndex + 1])
-    );
-
     for (const [index, round] of (tournament.rounds || []).entries()) {
       const base = {
         id: round.id || `${tournament.key}:${index}`,
+        roundId: round.id || `${tournament.key}:${index}`,
         tournamentKey: tournament.key,
         tournamentName: tournament.label || tournament.key || "대회",
         date: round.date || "",
@@ -328,34 +542,103 @@ function buildPlacementHistory(data) {
         season: round.season || "",
         rule: round.rule || "",
         championSeries: !!round.champ,
-        championSeriesRound: round.champ ? championSeriesRoundByIndex.get(index) || null : null,
         team: !!round.team,
       };
 
       if (round.team) {
         for (const name of round.winMembers || []) {
-          if (cleanName(name)) events.push({ ...base, name: cleanName(name), placement: "win", teamName: cleanName(round.win) });
+          if (cleanName(name)) {
+            events.push({
+              ...base,
+              name: cleanName(name),
+              placement: "win",
+              resultLabel: resultLabelFor("win", true),
+              teamName: cleanName(round.win),
+            });
+          }
         }
         for (const name of round.ruMembers || []) {
-          if (cleanName(name)) events.push({ ...base, name: cleanName(name), placement: "ru", teamName: cleanName(round.ru) });
+          if (cleanName(name)) {
+            events.push({
+              ...base,
+              name: cleanName(name),
+              placement: "ru",
+              resultLabel: resultLabelFor("ru", true),
+              teamName: cleanName(round.ru),
+            });
+          }
         }
         (round.sfMembers || []).forEach((members, idx) => {
           for (const name of members || []) {
-            if (cleanName(name)) events.push({ ...base, name: cleanName(name), placement: "sf", teamName: cleanName((round.sf || [])[idx]) });
+            if (cleanName(name)) {
+              events.push({
+                ...base,
+                name: cleanName(name),
+                placement: "sf",
+                resultLabel: resultLabelFor("sf", true),
+                teamName: cleanName((round.sf || [])[idx]),
+              });
+            }
           }
         });
       } else {
         const winner = cleanName(round.win);
-        if (winner) events.push({ ...base, name: winner, placement: "win" });
-        for (const name of splitNames(round.ru)) events.push({ ...base, name, placement: "ru" });
+        if (winner) {
+          events.push({
+            ...base,
+            name: winner,
+            placement: "win",
+            resultLabel: resultLabelFor("win", false),
+          });
+        }
+        for (const name of splitNames(round.ru)) {
+          events.push({
+            ...base,
+            name,
+            placement: "ru",
+            resultLabel: resultLabelFor("ru", false),
+          });
+        }
         for (const name of round.sf || []) {
-          if (cleanName(name)) events.push({ ...base, name: cleanName(name), placement: "sf" });
+          if (cleanName(name)) {
+            events.push({
+              ...base,
+              name: cleanName(name),
+              placement: "sf",
+              resultLabel: resultLabelFor("sf", false),
+            });
+          }
         }
       }
     }
   }
 
   return events;
+}
+
+function buildTrainerHistory(placements, participations) {
+  const history = participations.map((row) => ({ ...row, source: "bracket" }));
+
+  const hasLinkedParticipation = (placement) =>
+    participations.some((row) => {
+      if (row.roundId && placement.roundId) return row.roundId === placement.roundId;
+      return (
+        row.tournamentKey === placement.tournamentKey &&
+        row.date === placement.date &&
+        String(row.round || "") === String(placement.round || "")
+      );
+    });
+
+  for (const placement of placements) {
+    if (hasLinkedParticipation(placement)) continue;
+    history.push({
+      ...placement,
+      source: "legacy",
+      resultLabel: placement.resultLabel || resultLabelFor(placement.placement, placement.team),
+    });
+  }
+
+  return history;
 }
 
 function buildArchives(data, rosterEntries) {
@@ -610,6 +893,7 @@ export function buildRecordsSnapshot(data = {}) {
       matches: playerMatches,
       placements: playerPlacements,
       participations: playerParticipations,
+      history: buildTrainerHistory(playerPlacements, playerParticipations),
       rosters: playerRosters,
       titles: titleRecordsFor(data, name),
       champions: championRecordsFor(data, name),
@@ -621,12 +905,12 @@ export function buildRecordsSnapshot(data = {}) {
   const trainers = names
     .map((name) => {
       const profile = profiles[name];
-      const individual = profile.placements.filter((p) => !p.team);
+      const recorded = profile.placements;
       return {
         name,
-        wins: individual.filter((p) => p.placement === "win").length,
-        runnerUps: individual.filter((p) => p.placement === "ru").length,
-        top4: individual.filter((p) => p.placement === "sf").length,
+        wins: recorded.filter((p) => p.placement === "win").length,
+        runnerUps: recorded.filter((p) => p.placement === "ru").length,
+        top4: recorded.filter((p) => p.placement === "sf").length,
         matches: profile.matchSummary.total,
       };
     })

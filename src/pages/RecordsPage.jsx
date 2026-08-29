@@ -58,13 +58,14 @@ function CoverageNote({ snapshot }) {
       <div>
         <b>현재 저장 자료 기준</b>
         <span>
-          경기 결과 원본은 <strong>YPL 시즌 3부터 기록에 반영된 개인전 대진표</strong>에서 실제 상대가 있었던 경기만 보존합니다.
-          이전 시즌의 승·패는 소급 추정하지 않으며, 개인 승·패·승률은 기본 공개 지표로 표시하지 않습니다.
+          과거 대회는 남아 있는 우승·준우승·4강 등 확인 가능한 성적을 기준으로 제공합니다.
+          <strong>YPL 시즌 3부터는 기록에 반영된 개인전·팀전 대진표</strong>를 바탕으로 전체 참가 이력과 실제 경기 결과 원본을 보존합니다.
+          개인 승·패·승률 등 평가성 지표는 기본 공개 화면에 표시하지 않습니다.
         </span>
       </div>
       <div className="records-coverage-stats">
         <span>연결 대진표 <b>{coverage.appliedBrackets}</b></span>
-        <span>집계 경기 <b>{coverage.officialMatches}</b></span>
+        <span>보존 경기 <b>{coverage.officialMatches}</b></span>
         <span>저장 엔트리 <b>{coverage.savedRosters}</b></span>
       </div>
     </Reveal>
@@ -85,13 +86,13 @@ function TrainerView({ snapshot }) {
 
   const seasonMatch = (value) => !season || value === season;
   const placements = profile.placements.filter((p) => seasonMatch(p.season));
-  const participations = profile.participations.filter((p) => seasonMatch(p.season));
+  const history = profile.history.filter((p) => seasonMatch(p.season));
   const rosters = profile.rosters.filter((r) => seasonMatch(r.season));
 
-  const individualPlacements = placements.filter((p) => !p.team);
-  const championships = individualPlacements.filter((p) => p.placement === "win").length;
-  const runnerUps = individualPlacements.filter((p) => p.placement === "ru").length;
-  const top4 = individualPlacements.filter((p) => p.placement === "sf").length;
+  // 팀전 입상도 트레이너의 우승/준우승/4강 기록에 포함한다.
+  const championships = placements.filter((p) => p.placement === "win").length;
+  const runnerUps = placements.filter((p) => p.placement === "ru").length;
+  const top4 = placements.filter((p) => p.placement === "sf").length;
   const favoriteMap = new Map();
   for (const roster of rosters) {
     for (const pokemon of new Set(roster.pokemon || [])) {
@@ -140,7 +141,7 @@ function TrainerView({ snapshot }) {
           </div>
 
           <div className="records-stat-grid">
-            <Stat label="확인 가능한 참가" value={participations.length} suffix="회" />
+            <Stat label="확인 가능한 참가" value={history.length} suffix="회" />
             <Stat label="우승" value={championships} suffix="회" />
             <Stat label="준우승" value={runnerUps} suffix="회" />
             <Stat label="4강" value={top4} suffix="회" />
@@ -152,10 +153,10 @@ function TrainerView({ snapshot }) {
           <section className="panel records-block">
             <div className="records-block-head">
               <h4>대회 이력</h4>
-              <span>{placements.length}건의 입상 기록</span>
+              <span>{history.length}건의 대회 기록</span>
             </div>
             <div className="records-history">
-              {placements
+              {history
                 .slice()
                 .sort((a, b) => (a.date < b.date ? 1 : -1))
                 .slice(0, 12)
@@ -170,17 +171,17 @@ function TrainerView({ snapshot }) {
                       )}
                       <b>
                         {event.championSeries
-                          ? `챔피언스 시리즈 ${event.championSeriesRound || event.round || ""}회`
+                          ? `챔피언스 시리즈 ${event.round || ""}회`
                           : `${event.tournamentName}${event.round ? ` ${event.round}회` : ""}`}
                       </b>
-                      <span>{[event.date, event.season, event.rule].filter(Boolean).join(" · ")}</span>
+                      <span>{[event.date, event.season, event.teamName ? `소속 ${event.teamName}` : "", event.rule].filter(Boolean).join(" · ")}</span>
                     </div>
                     <strong className={"records-placement p-" + event.placement}>
-                      {placementLabel(event.placement, event.team)}
+                      {event.resultLabel || placementLabel(event.placement, event.team)}
                     </strong>
                   </div>
                 ))}
-              {!placements.length && <div className="none">현재 확인 가능한 입상 기록이 없습니다.</div>}
+              {!history.length && <div className="none">현재 확인 가능한 대회 기록이 없습니다.</div>}
             </div>
           </section>
 
