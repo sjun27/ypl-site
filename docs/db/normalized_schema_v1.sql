@@ -124,18 +124,6 @@ create table if not exists events (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
 
-    unique (id, event_id),
-
-    foreign key (parent_match_id, event_id)
-        references matches(id, event_id) on delete restrict,
-
-    foreign key (entry_a_id, event_id)
-        references entries(id, event_id) on delete restrict,
-    foreign key (entry_b_id, event_id)
-        references entries(id, event_id) on delete restrict,
-    foreign key (winner_entry_id, event_id)
-        references entries(id, event_id) on delete restrict,
-
     check (round_number is null or round_number > 0),
     check (
         team_reveal_mode <> 'scheduled'
@@ -401,6 +389,18 @@ create table if not exists matches (
 
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
+
+    unique (id, event_id),
+
+    foreign key (parent_match_id, event_id)
+        references matches(id, event_id) on delete restrict,
+
+    foreign key (entry_a_id, event_id)
+        references entries(id, event_id) on delete restrict,
+    foreign key (entry_b_id, event_id)
+        references entries(id, event_id) on delete restrict,
+    foreign key (winner_entry_id, event_id)
+        references entries(id, event_id) on delete restrict,
 
     check (round_number is null or round_number > 0),
     check (sequence_no is null or sequence_no > 0),
