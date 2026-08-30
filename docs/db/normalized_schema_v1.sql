@@ -71,8 +71,8 @@ create table if not exists events (
 
     event_type text not null,
     division text,
-    battle_format text not null,
-    competition_format text not null,
+    battle_format text,
+    competition_format text,
     is_team_event boolean not null default false,
 
     regulation_id text,
@@ -204,7 +204,7 @@ create table if not exists team_snapshots (
     id uuid primary key default gen_random_uuid(),
     schema_version smallint not null default 1,
 
-    regulation_id text not null,
+    regulation_id text,
     cup_rule_id text,
     cup_rule_settings jsonb not null default '{}'::jsonb,
 
@@ -237,7 +237,7 @@ create table if not exists team_snapshot_members (
     slot smallint not null,
 
     -- pokemon_id must be a stable form-specific canonical ID.
-    pokemon_id text not null,
+    pokemon_id text,
     pokemon_name_snapshot text not null,
 
     ability_id text,
@@ -295,7 +295,7 @@ create table if not exists entry_submissions (
         references team_snapshots(id) on delete restrict,
 
     revision integer not null,
-    submitted_at timestamptz not null default now(),
+    submitted_at timestamptz,
 
     source text not null default 'team_builder',
 
@@ -685,7 +685,44 @@ create unique index if not exists uq_title_awards_active
 
 
 -- =========================================================
--- 15. Hall of Fame
+-- 15. Player partner Pokémon
+-- =========================================================
+-- Legacy titleGroups.partner is NOT a normal title award.
+-- Its item name is a player and holders are Pokémon.
+-- Preserve that relationship separately instead of creating fake Players.
+
+create table if not exists player_partners (
+    id uuid primary key default gen_random_uuid(),
+
+    player_id uuid not null
+        references players(id) on delete restrict,
+
+    pokemon_id text,
+    pokemon_name_snapshot text not null,
+
+    source text not null,
+    created_at timestamptz not null default now(),
+    revoked_at timestamptz,
+
+    check (
+        revoked_at is null
+        or revoked_at >= created_at
+    )
+);
+
+create unique index if not exists uq_player_partners_active_name
+    on player_partners (player_id, pokemon_name_snapshot)
+    where revoked_at is null;
+
+create index if not exists idx_player_partners_player_id
+    on player_partners (player_id);
+
+create index if not exists idx_player_partners_pokemon_id
+    on player_partners (pokemon_id);
+
+
+-- =========================================================
+-- 16. Hall of Fame
 -- =========================================================
 
 create table if not exists hall_of_fame_entries (

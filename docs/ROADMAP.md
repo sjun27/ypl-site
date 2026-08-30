@@ -414,6 +414,7 @@ RankingAward
 RankingBaseline
 TitleDefinition
 TitleAward
+PlayerPartner
 HallOfFameEntry
 ```
 

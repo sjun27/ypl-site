@@ -525,6 +525,7 @@ PATCH_NOTES는 과거 상태가 현재 정책과 다르더라도 **변경 이력
 
 ```text
 Player
+└─ PlayerPartner
 
 Season
 └─ Event
@@ -626,8 +627,8 @@ Event
 - round_number
 - event_type
 - division nullable
-- battle_format
-- competition_format
+- battle_format nullable
+- competition_format nullable
 - is_team_event
 - regulation_id nullable
 - cup_rule_id nullable
@@ -763,7 +764,7 @@ EntrySubmission
 - entry_participant_id
 - snapshot_id
 - revision
-- submitted_at
+- submitted_at nullable
 - source
 - created_at
 ```
@@ -810,7 +811,7 @@ Team Snapshot의 목표:
 TeamSnapshot
 - id
 - schema_version
-- regulation_id
+- regulation_id nullable
 - cup_rule_id nullable
 - cup_rule_settings
 - source_type
@@ -837,7 +838,7 @@ TeamSnapshotMember
 - id
 - snapshot_id
 - slot
-- pokemon_id
+- pokemon_id nullable
 - pokemon_name_snapshot
 - ability_id nullable
 - nature_id nullable
@@ -1112,7 +1113,40 @@ AUTO/REVIEW 후보 자체는 v1에서 별도 테이블로 저장하지 않는다
 
 ---
 
-## 13. Hall of Fame
+## 13. Player Partner
+
+기존 `titleGroups.partner`는 일반적인 칭호 구조와 의미가 다르다.
+
+```text
+item.name = 선수
+holders   = 파트너 포켓몬 목록
+```
+
+예:
+
+```text
+정두호
+→ 이어롭 / 픽시 / 해피너스 / 다투곰
+```
+
+이를 `TitleAward`로 migration하면 포켓몬 이름을 Player로 잘못 해석하게 되므로 별도 관계로 보존한다.
+
+```text
+PlayerPartner
+- id
+- player_id
+- pokemon_id nullable
+- pokemon_name_snapshot
+- source
+- created_at
+- revoked_at nullable
+```
+
+과거 데이터는 Pokémon canonical ID를 확정할 수 없는 경우 이름 snapshot만 보존한다.
+
+---
+
+## 14. Hall of Fame
 
 ```text
 HallOfFameEntry
@@ -1170,7 +1204,7 @@ HallOfFameEntry
 
 ---
 
-## 14. Source of Truth 요약
+## 15. Source of Truth 요약
 
 | 알고 싶은 것 | 원본 |
 |---|---|
@@ -1186,9 +1220,10 @@ HallOfFameEntry
 | 실제 랭킹 지급값 | RankingAward |
 | 복원 불가능한 과거 랭킹 시작값 | RankingBaseline |
 | 칭호 획득 | TitleAward |
+| 파트너 포켓몬 | PlayerPartner |
 | 챔피언 명예의 전당 | HallOfFameEntry |
 
-## 15. 다음 단계
+## 16. 다음 단계
 
 1. 이 논리 모델을 PostgreSQL/Supabase DDL로 변환
 2. FK / UNIQUE / CHECK / index 설계
