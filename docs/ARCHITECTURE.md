@@ -502,3 +502,681 @@ PATCH_NOTES_2026-08-26.md
 ROADMAP에는 과거 구현 과정을 길게 누적하지 않습니다.
 
 PATCH_NOTES는 과거 상태가 현재 정책과 다르더라도 **변경 이력**으로 유지합니다.
+
+<!-- YPL_NORMALIZED_MODEL_V1_START -->
+# 정규화 데이터 모델 v1
+
+> 상태: **논리 모델 확정**
+> 이 절은 실제 PostgreSQL/Supabase DDL을 작성하기 전의 도메인 모델을 정의한다.
+> 물리 테이블명, index, FK delete policy, RLS 등은 다음 DDL 단계에서 확정한다.
+
+## 1. 설계 원칙
+
+- 통계 숫자보다 원본 사실을 저장한다.
+- 공식 대회 성적은 `Result`, 실제 랭킹 반영값은 `RankingAward`로 분리한다.
+- 과거에 없는 Match를 역산하거나 추정하지 않는다.
+- Team Builder 개인 작업본은 localStorage에 유지하고, 대회 제출 시 별도의 immutable Team Snapshot을 만든다.
+- 제출 후 수정은 기존 Snapshot UPDATE가 아니라 새 Submission + 새 Snapshot으로 기록한다.
+- 개인전과 팀전을 동일한 Event / Entry 모델로 표현한다.
+- 팀전의 공식 Result는 팀 Entry에 한 번만 기록하며 선수별 Result를 중복 생성하지 않는다.
+- 팀전 선수별 랭킹 변화는 RankingAward에서 각각 기록한다.
+
+## 2. 전체 관계
+
+```text
+Player
+
+Season
+└─ Event
+   ├─ Entry
+   │  └─ EntryParticipant ── Player
+   │     └─ EntrySubmission
+   │        └─ TeamSnapshot
+   │           └─ TeamSnapshotMember
+   │
+   ├─ Match
+   │  └─ Match (team_bout / ace)
+   │
+   └─ Result
+      ├─ RankingAward ── Player
+      └─ HallOfFameEntry
+
+RankingBaseline ── Player / Season
+
+TitleDefinition
+└─ TitleAward ── Player
+```
+
+### 제출 귀속 원칙
+
+`EntrySubmission`은 `Entry` 자체가 아니라 **EntryParticipant**에 귀속한다.
+
+이유:
+
+- 개인전: EntryParticipant 1명 → 해당 선수의 제출
+- 팀전: EntryParticipant 여러 명 → 각 선수의 제출을 독립적으로 관리
+- 팀전에서도 선수별 재제출, 기준 시각 이후 제출, 최종 제출본 확정이 가능해야 함
+
+따라서 공식 최종 제출 포인터도 `EntryParticipant.final_submission_id`로 관리한다.
+
+---
+
+## 3. Player
+
+```text
+Player
+- id
+- display_name
+- status
+- created_at
+- updated_at
+```
+
+- 이름 자체를 PK로 사용하지 않는다.
+- display_name은 동명이인 가능성을 고려해 전역 UNIQUE를 강제하지 않는다.
+- 필요 시 향후 PlayerAlias를 추가할 수 있다.
+
+---
+
+## 4. Season
+
+```text
+Season
+- id
+- code
+- name
+- series
+- number
+- starts_on nullable
+- ends_on nullable
+- sort_order
+- status
+- created_at
+```
+
+예:
+
+```text
+code   = classic-4
+name   = CLASSIC SEASON 4
+series = classic
+number = 4
+```
+
+```text
+code   = ypl-3
+name   = YPL SEASON 3
+series = ypl
+number = 3
+```
+
+정확한 날짜를 모르는 과거 시즌은 추측하지 않고 nullable로 둔다.
+
+---
+
+## 5. Event
+
+Event는 특정 시즌에 실제로 한 번 열린 대회 하나를 뜻한다.
+
+```text
+Event
+- id
+- season_id
+- name
+- round_number
+- event_type
+- division nullable
+- battle_format
+- competition_format
+- is_team_event
+- regulation_id nullable
+- cup_rule_id nullable
+- cup_rule_settings nullable
+- held_on nullable
+- date_precision
+- record_completeness
+- status
+- submission_target_at nullable
+- team_reveal_mode
+- team_reveal_at nullable
+- team_revealed_at nullable
+- record_applied_at nullable
+- created_at
+- updated_at
+```
+
+### 제출 기준 시각
+
+`submission_target_at`은 hard deadline이 아니라 **운영 기준 시각(soft deadline)** 이다.
+
+- 기준 시각 이후에도 최초 제출 및 재제출 가능
+- 제출 시각 이력은 보존
+- 대회 종료/기록 반영 성공 시 최종 제출본을 확정
+
+### 팀 공개
+
+```text
+team_reveal_mode
+- on_record_apply
+- scheduled
+- manual
+```
+
+실제 공개 여부의 기준은 `team_revealed_at != null`이다.
+
+일반 대회:
+
+```text
+기록 반영 성공
+→ Event completed
+→ 참가자별 final_submission_id 확정
+→ team_revealed_at 기록
+```
+
+챔피언스는 scheduled 또는 manual 공개를 사용할 수 있다.
+
+### 기록 완성도
+
+```text
+record_completeness
+- full_match
+- placement
+- winner_only
+- partial
+```
+
+`source`와 `record_completeness`는 의미를 분리한다.
+
+- completeness = 얼마나 복원되어 있는가
+- source = bracket / manual / migration 등 어디서 얻었는가
+
+---
+
+## 6. Entry / EntryParticipant
+
+### Entry
+
+한 Event에 참가한 하나의 참가 단위.
+
+```text
+Entry
+- id
+- event_id
+- entry_type
+- display_name nullable
+- seed nullable
+- status
+- created_at
+- updated_at
+```
+
+`entry_type`:
+
+```text
+individual
+team
+```
+
+### EntryParticipant
+
+```text
+EntryParticipant
+- id
+- entry_id
+- player_id
+- member_order
+- role nullable
+- final_submission_id nullable
+- created_at
+```
+
+개인전:
+
+```text
+Entry
+└─ EntryParticipant 1명
+```
+
+팀전:
+
+```text
+Entry "하나 히어로즈"
+├─ EntryParticipant A
+├─ EntryParticipant B
+├─ EntryParticipant C
+└─ ...
+```
+
+팀전 당시의 팀 구성은 EntryParticipant로 보존한다.
+
+---
+
+## 7. EntrySubmission
+
+```text
+EntrySubmission
+- id
+- entry_participant_id
+- snapshot_id
+- revision
+- submitted_at
+- source
+- created_at
+```
+
+권장 제약:
+
+```text
+UNIQUE(entry_participant_id, revision)
+```
+
+대회 진행 중 현재 공식 제출본:
+
+```text
+해당 EntryParticipant의 가장 높은 revision
+```
+
+대회 종료 후 공식 역사 기록:
+
+```text
+EntryParticipant.final_submission_id
+```
+
+과거 Submission은 삭제하지 않는다.
+
+`submitted_after_target` 같은 파생 상태는 저장하지 않고:
+
+```text
+submitted_at > Event.submission_target_at
+```
+
+으로 계산한다.
+
+---
+
+## 8. Team Snapshot v1
+
+Team Snapshot의 목표:
+
+> Snapshot만으로 제출 당시의 배틀 세팅을 Team Builder에서 다시 열 수 있어야 한다.
+
+### TeamSnapshot
+
+```text
+TeamSnapshot
+- id
+- schema_version
+- regulation_id
+- cup_rule_id nullable
+- cup_rule_settings
+- source_type
+- source_reference nullable
+- imported_at nullable
+- created_at
+```
+
+`source_type` 후보:
+
+```text
+manual
+replica_import
+historical
+```
+
+Replica Team ID 직접 Import는 현재 안정적인 공개 resolver를 확보하지 못했으므로 **보류**한다.
+향후 resolver가 확보되면 동일 Snapshot 규격으로 adapter만 추가한다.
+
+### TeamSnapshotMember
+
+```text
+TeamSnapshotMember
+- id
+- snapshot_id
+- slot
+- pokemon_id
+- pokemon_name_snapshot
+- ability_id nullable
+- nature_id nullable
+- stat_hp
+- stat_atk
+- stat_def
+- stat_spa
+- stat_spd
+- stat_spe
+- item_id nullable
+- move_1_id nullable
+- move_2_id nullable
+- move_3_id nullable
+- move_4_id nullable
+```
+
+정책:
+
+- Pokémon 1~6마리
+- Team Invalid만 제출 차단
+- Team Incomplete는 제출 허용
+- 기술 4개 미만, 일부 설정 미완성도 Regulation-invalid가 아니면 허용
+- Pokémon 0마리는 공식 제출 불가
+- Stat Points는 계산 결과가 아니라 입력 사실을 저장
+- IV는 Pokémon Champions에서 고정이므로 v1에 저장하지 않음
+- Tera Type은 현재 Mega Rule 기준 v1에서 제외하며 미래 Regulation 확정 후 schema version 증가로 추가 가능
+- `pokemon_id`는 form-specific stable canonical ID를 사용
+- species clause 판정용 identity와 Snapshot 복원용 pokemon_id를 분리
+- Snapshot 생성 후 기존 Snapshot을 수정하지 않음
+
+---
+
+## 9. Match
+
+```text
+Match
+- id
+- event_id
+- parent_match_id nullable
+- match_kind
+- round_number nullable
+- stage_label nullable
+- sequence_no nullable
+- entry_a_id nullable
+- entry_b_id nullable
+- player_a_id nullable
+- player_b_id nullable
+- winner_entry_id nullable
+- winner_player_id nullable
+- resolution
+- source
+- source_node_key nullable
+- played_at nullable
+- created_at
+- updated_at
+```
+
+`match_kind`:
+
+```text
+bracket
+team_bout
+ace
+```
+
+개인전:
+
+```text
+entry_a / entry_b / winner_entry
+```
+
+팀전:
+
+```text
+부모 Match = 팀 대 팀
+└─ 자식 Match = 선발 개인 경기 / 에이스 결정전
+```
+
+BYE는 Match로 만들지 않는다.
+
+승자만 저장하고 loser는 중복 저장하지 않는다.
+
+`source_node_key`를 통해 대진표 node와 Records Match를 안정적으로 연결한다.
+
+---
+
+## 10. Result
+
+```text
+Result
+- id
+- event_id
+- entry_id
+- placement_code
+- rank_min nullable
+- rank_max nullable
+- placement_label
+- source
+- created_at
+- updated_at
+```
+
+권장 제약:
+
+```text
+UNIQUE(event_id, entry_id)
+```
+
+예:
+
+```text
+우승
+placement_code = champion
+rank_min = 1
+rank_max = 1
+
+4강
+placement_code = semifinalist
+rank_min = 3
+rank_max = 4
+
+조별리그 탈락
+placement_code = group_stage_exit
+rank_min = null
+rank_max = null
+```
+
+팀전 공식 Result는 팀 Entry에 한 번만 생성한다.
+
+선수별 우승/준우승/4강 기록은:
+
+```text
+Result
+→ Entry
+→ EntryParticipant
+```
+
+로 계산한다.
+
+---
+
+## 11. RankingAward / RankingBaseline
+
+### RankingAward
+
+```text
+RankingAward
+- id
+- event_id
+- player_id
+- result_id nullable
+- award_kind
+- points_delta
+- win_delta
+- runner_up_delta
+- top4_delta
+- counts_overall
+- counts_season
+- related_award_id nullable
+- reason nullable
+- source
+- created_at
+```
+
+`award_kind`:
+
+```text
+placement
+adjustment
+reversal
+```
+
+실제 지급값을 저장한다.
+
+팀전 기본 배분식 자체보다 각 선수에게 최종 적용된 실제 값을 원본으로 본다.
+
+수정 이력은 overwrite가 아니라 ledger 방식:
+
+```text
+placement +20
+adjustment +5
+reversal -20
+```
+
+### RankingBaseline
+
+과거 Event별 Award를 정확히 복원할 수 없는 누적 랭킹은 역산하지 않는다.
+
+```text
+RankingBaseline
+- id
+- player_id
+- scope
+- season_id nullable
+- points
+- wins
+- runner_ups
+- top4s
+- source
+- captured_at
+- note nullable
+```
+
+새 시스템 이후 랭킹:
+
+```text
+RankingBaseline + SUM(RankingAward)
+```
+
+---
+
+## 12. Title
+
+### TitleDefinition
+
+```text
+TitleDefinition
+- id
+- code
+- name
+- description nullable
+- group_code nullable
+- award_mode
+- sort_order
+- active
+- created_at
+- updated_at
+```
+
+`award_mode`:
+
+```text
+auto
+review
+manual
+```
+
+### TitleAward
+
+```text
+TitleAward
+- id
+- title_id
+- player_id
+- event_id nullable
+- result_id nullable
+- source
+- reason nullable
+- awarded_at
+- revoked_at nullable
+```
+
+AUTO/REVIEW 후보 자체는 v1에서 별도 테이블로 저장하지 않는다.
+공식 승인된 칭호만 TitleAward로 만든다.
+
+잘못 지급된 칭호는 DELETE보다 `revoked_at`을 기록한다.
+
+---
+
+## 13. Hall of Fame
+
+```text
+HallOfFameEntry
+- id
+- event_id
+- result_id
+- player_id
+- generation_number
+- generation_label nullable
+- image_ref nullable
+- note nullable
+- created_at
+- updated_at
+```
+
+권장 제약:
+
+```text
+UNIQUE(event_id)
+```
+
+`generation_number`에는 UNIQUE를 걸지 않는다.
+
+### YPL 시즌 3 이후 챔피언 정책
+
+한 챔피언 세대에 싱글·더블 챔피언이 각각 존재할 수 있다.
+
+예:
+
+```text
+7대 챔피언
+├─ 7대 싱글 챔피언 A
+└─ 7대 더블 챔피언 B
+```
+
+두 HallOfFameEntry는 서로 다른 Champions Event를 가리키지만:
+
+```text
+generation_number = 7
+```
+
+을 동일하게 사용한다.
+
+battle format은 HallOfFameEntry에 중복 저장하지 않고:
+
+```text
+HallOfFameEntry
+→ Event
+→ battle_format
+```
+
+으로 판별한다.
+
+이미지는 DB에 base64로 직접 저장하지 않고 `image_ref`만 저장한다.
+
+---
+
+## 14. Source of Truth 요약
+
+| 알고 싶은 것 | 원본 |
+|---|---|
+| 시즌 | Season |
+| 대회 | Event |
+| 참가 단위 | Entry |
+| 실제 참가 선수 | EntryParticipant |
+| 제출/재제출 이력 | EntrySubmission |
+| 제출 당시 팀 세팅 | TeamSnapshot / TeamSnapshotMember |
+| 실제 경기 | Match |
+| 공식 최종 성적 | Result |
+| 공식 통산 우승·준우승·4강 | Result → EntryParticipant에서 계산 |
+| 실제 랭킹 지급값 | RankingAward |
+| 복원 불가능한 과거 랭킹 시작값 | RankingBaseline |
+| 칭호 획득 | TitleAward |
+| 챔피언 명예의 전당 | HallOfFameEntry |
+
+## 15. 다음 단계
+
+1. 이 논리 모델을 PostgreSQL/Supabase DDL로 변환
+2. FK / UNIQUE / CHECK / index 설계
+3. 운영 DB가 아닌 테스트 환경에서 schema 생성
+4. 현재 `ypl_data_v4` → 새 모델 migration dry-run
+5. 건수 및 대표 사례 대조
+6. 검증 후 운영 migration 계획 수립
+
+운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
+<!-- YPL_NORMALIZED_MODEL_V1_END -->

@@ -394,49 +394,61 @@ retrieval 경로 확보 후
 
 ## P2. 데이터 모델 정규화
 
-P0 운영 데이터 인벤토리를 마무리하고 P1.5 Team Snapshot 계약을 확정한 뒤 진행합니다.
+<!-- YPL_P2_MODEL_STATUS_START -->
+### 정규화 논리 모델 확정 — 2026-08-31
 
-목표 객체:
+논리 모델 확정:
 
 ```text
 Player
 Season
 Event
 Entry
-Team Snapshot / Entry Pokémon
+EntryParticipant
+EntrySubmission
+TeamSnapshot
+TeamSnapshotMember
 Match
 Result
 RankingAward
-Title Award
-Hall of Fame
+RankingBaseline
+TitleDefinition
+TitleAward
+HallOfFameEntry
 ```
 
-객체 책임:
+핵심 확정 사항:
+
+- 개인전/팀전을 동일한 Event / Entry 모델로 처리
+- EntrySubmission은 선수 단위인 EntryParticipant에 귀속
+- 재제출 이력 보존, 대회 종료 시 선수별 final_submission_id 확정
+- Team Invalid만 제출 차단, Team Incomplete 허용
+- 공식 제출은 Pokémon 1~6마리
+- Snapshot v1에 IV/Tera 제외
+- Team Snapshot은 immutable
+- 일반 대회는 기록 반영 성공 시 최종 제출 고정 및 팀 공개
+- 챔피언스는 scheduled/manual 사전 공개 가능
+- 팀전 Result는 팀 Entry에 한 번만 저장
+- 팀전 선수별 랭킹 변화는 RankingAward에 개별 저장
+- RankingAward는 ledger 방식
+- 과거 복원 불가능 랭킹은 RankingBaseline으로 보존
+- Hall of Fame 세대 번호는 싱글/더블이 공유 가능
+  - 예: 7대 싱글 챔피언 / 7대 더블 챔피언 모두 generation_number = 7
+- Replica Team ID 직접 Import는 안정적인 resolver 미확보로 보류하며 DB 정규화를 막지 않음
+
+다음 단계:
 
 ```text
-Season
-= 어느 시즌인가
-
-Event
-= 실제 한 번 열린 대회
-
-Entry
-= 누가 해당 Event에 참가했는가
-
-Team Snapshot
-= 제출 당시 포켓몬 전체 세팅의 고정본
-
-Match
-= 실제 경기 사실
-
-Result
-= Event의 공식 최종 성적
-
-RankingAward
-= 실제 지급된 랭킹 포인트·입상 delta
+논리 모델
+→ PostgreSQL/Supabase DDL 초안
+→ 테스트 schema
+→ ypl_data_v4 migration dry-run
+→ 검증
+→ 운영 migration
 ```
+<!-- YPL_P2_MODEL_STATUS_END -->
 
-기존 `ypl_data_v4`를 즉시 제거하지 않고 새 구조와 병행한 뒤 점진적으로 이전합니다.
+기존 `ypl_data_v4`는 새 정규화 구조가 검증되기 전까지 유지하며, 테스트 migration과 대조를 거쳐 점진적으로 이전합니다.
 
 ## P3. Team Builder → 대회 엔트리
 
