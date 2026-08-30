@@ -161,11 +161,7 @@ create table if not exists entries (
 
     unique (id, event_id),
 
-    check (seed is null or seed > 0),
-    check (
-        entry_type <> 'team'
-        or display_name is not null
-    )
+    check (seed is null or seed > 0)
 );
 
 create index if not exists idx_entries_event_id
@@ -522,7 +518,8 @@ create table if not exists ranking_baselines (
     player_id uuid not null references players(id) on delete restrict,
 
     scope text not null
-        check (scope in ('overall', 'season')),
+        check (scope in ('series', 'season')),
+    series text,
     season_id uuid references seasons(id) on delete restrict,
 
     points numeric(10,2) not null default 0,
@@ -535,9 +532,17 @@ create table if not exists ranking_baselines (
     note text,
 
     check (
-        (scope = 'overall' and season_id is null)
+        (
+            scope = 'series'
+            and series is not null
+            and season_id is null
+        )
         or
-        (scope = 'season' and season_id is not null)
+        (
+            scope = 'season'
+            and series is null
+            and season_id is not null
+        )
     ),
 
     check (wins >= 0),
@@ -545,9 +550,9 @@ create table if not exists ranking_baselines (
     check (top4s >= 0)
 );
 
-create unique index if not exists uq_ranking_baseline_overall
-    on ranking_baselines (player_id)
-    where scope = 'overall';
+create unique index if not exists uq_ranking_baseline_series
+    on ranking_baselines (player_id, series)
+    where scope = 'series';
 
 create unique index if not exists uq_ranking_baseline_season
     on ranking_baselines (player_id, season_id)
@@ -582,7 +587,7 @@ create table if not exists ranking_awards (
     runner_up_delta integer not null default 0,
     top4_delta integer not null default 0,
 
-    counts_overall boolean not null default true,
+    counts_series boolean not null default true,
     counts_season boolean not null default true,
 
     related_award_id uuid references ranking_awards(id) on delete restrict,

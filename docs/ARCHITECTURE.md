@@ -749,6 +749,10 @@ Entry "하나 히어로즈"
 
 팀전 당시의 팀 구성은 EntryParticipant로 보존한다.
 
+과거 기록 중 팀원 명단은 확인되지만 팀명이 남아 있지 않은 경우가 있으므로
+`Entry.display_name`은 DB에서 nullable로 둔다. 없는 팀명을 임의로 생성하지 않는다.
+신규 팀전의 팀명 필수 여부는 관리자 UI / application validation에서 처리한다.
+
 ---
 
 ## 7. EntrySubmission
@@ -990,7 +994,7 @@ RankingAward
 - win_delta
 - runner_up_delta
 - top4_delta
-- counts_overall
+- counts_series
 - counts_season
 - related_award_id nullable
 - reason nullable
@@ -1027,6 +1031,7 @@ RankingBaseline
 - id
 - player_id
 - scope
+- series nullable
 - season_id nullable
 - points
 - wins
@@ -1037,10 +1042,24 @@ RankingBaseline
 - note nullable
 ```
 
+랭킹 scope:
+
+```text
+series
+→ 클래식 누적 / YPL 누적 등 시즌 계열 누적
+
+season
+→ 특정 시즌 랭킹
+```
+
+기존 운영 데이터의 `rankings.key = era1 / era2`는 각각
+`series = classic / ypl` baseline으로 이전한다.
+
 새 시스템 이후 랭킹:
 
 ```text
-RankingBaseline + SUM(RankingAward)
+series 누적 = series RankingBaseline + 해당 series의 counts_series Award
+시즌 랭킹 = season RankingBaseline + 해당 season의 counts_season Award
 ```
 
 ---
