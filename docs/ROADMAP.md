@@ -5,7 +5,7 @@
 > - 과거 변경 이력: `docs/PATCH_NOTES_2026-08-26.md`
 > - 기술 구조·데이터 모델·운영 원칙: `docs/ARCHITECTURE.md`
 
-마지막 업데이트: 2026-08-29
+마지막 업데이트: 2026-08-30
 
 ---
 
@@ -34,15 +34,38 @@ YPL Records
 ```text
 Records 안정화
 → 운영 Supabase 백업·조사
+→ Team Builder Team Snapshot 규격 확정
+→ Replica Team ID 매핑 가능성 검증
 → 데이터 모델 정규화
 → Team Builder와 대회 운영 연결
 → 칭호·명예의 전당 자동화
 ```
 
+**DB schema 확정 전 선행 원칙**
+
+Replica Team ID Import 기능 전체를 먼저 완성한 뒤 DB를 만드는 것은 필수가 아닙니다.
+
+대신 DB schema를 확정하기 전에 다음 두 가지를 먼저 끝냅니다.
+
+1. Team Builder가 보존해야 할 전체 팀 정보의 canonical **Team Snapshot 규격 확정**
+2. Pokémon Champions Replica Team ID에서 불러온 정보를 같은 Team Snapshot 구조로 변환할 수 있는지 검증
+
+즉:
+
+```text
+Team Builder 직접 입력 ─┐
+                       ├→ canonical Team Snapshot → 대회 Entry
+Replica Team ID Import ─┘
+```
+
+Import UI와 사용자 흐름의 완성은 정규화 DB 구축 이후여도 무방합니다.
+
 ## 완료된 기반
 
 - 페이지 / 공통 컴포넌트 / 관리자 / 서비스 계층 분리
 - Team Builder 본사이트 통합 및 기존 핵심 기능 복원
+- Team Builder 개인 팀 localStorage 저장
+- Team Builder 저장 정보: Regulation / Cup Rule / 포켓몬 / 특성 / 성격(Alignment) / Stat Points / 도구 / 기술 4개
 - Records 1차 UI: `트레이너 / 대회 / 포켓몬 / 랭킹`
 - 대진표 → 회차 / 랭킹 / 시즌 성적 연동
 - 기록 반영 취소 및 원복
@@ -149,23 +172,68 @@ champ = true
 
 ---
 
+## 2.6 정규화 전 확정 정책
+
+### 팀전 입상
+
+- 팀전 우승 / 준우승 / 4강도 각 팀원의 공식 입상 경력으로 인정
+- 개인전 입상과 팀전 입상은 내부적으로 구분 저장
+- 전체 통계와 시즌별 통계에서는 필요에 따라 합산 가능
+
+### 팀전 포인트
+
+현재 기록 반영 UI의 기본 배점:
+
+```text
+우승   60
+준우승 40
+4강    20
+```
+
+- 팀전은 등수별 총점을 팀원 수로 균등분배하는 것을 기본값으로 사용
+- 운영자가 팀원별 포인트를 개별 조정할 수 있음
+- 정규화 이후에는 재계산값이 아니라 **최종 확정된 개인별 실제 지급값**을 보존
+- 회차 수정 시 custom point가 균등분배값으로 되돌아가는 문제는 RankingAward / scoring ledger 구조에서 해결
+
+### 날짜와 연결
+
+- 신규 대회는 가능한 한 정확한 `YYYY-MM-DD` 날짜 저장
+- 과거 자료는 확인 가능한 날짜 정밀도까지만 보존하고 임의의 일자를 생성하지 않음
+- 대진표 ↔ Event / Result 연결에 날짜 문자열을 식별자로 사용하지 않음
+- 영구 ID로 연결
+
+### Season
+
+- Season은 단순 문자열 필터가 아니라 정규화 DB의 독립 엔티티로 관리
+- Event가 `season_id`를 참조
+- Entry / Match / Result는 Event를 통해 시즌에 연결
+- 시작일 / 종료일은 알 수 있을 때만 저장하고 과거 불명 값은 NULL 허용
+
 # 3. 우선순위
 
 ## P0. 운영 데이터 백업 및 인벤토리
 
-**다음 작업.**
+**대부분 완료. 세부 diff만 남음.**
 
 Supabase 권한 확보가 완료되어 기존 선행조건이 해소됐습니다.
 
 순서:
 
-1. 운영 `site_data / ypl_data_v4` 원본 백업
-2. 현재 Supabase 테이블 / RLS / Auth 상태 확인
-3. 실제 운영 데이터 구조 인벤토리 작성
-4. GitHub SEED와 운영 데이터 차이 확인
-5. 과거 대진표·회차 데이터 복구 가능 범위 분류
+1. 운영 `site_data / ypl_data_v4` 원본 백업 — 완료
+2. 현재 Supabase 테이블 / RLS / Auth 상태 확인 — 완료
+3. 실제 운영 데이터 구조 인벤토리 작성 — 완료
+4. GitHub SEED와 운영 데이터 차이 확인 — 진행 필요
+5. 과거 대진표·회차 데이터 복구 가능 범위 분류 — 1차 완료
 
-원본 백업 전에는 운영 데이터 migration이나 스키마 변경을 하지 않습니다.
+현재 확인된 과거 대회 복구 품질:
+
+```text
+full_match   3회
+placement   48회
+winner_only  6회
+```
+
+확보한 운영 원본 백업을 migration 기준점으로 유지하며, 운영 데이터 migration이나 schema 변경은 별도 테스트 환경에서 검증한 뒤 진행합니다.
 
 ## P1. Records 1차 시스템 마무리
 
@@ -176,23 +244,83 @@ Supabase 권한 확보가 완료되어 기존 선행조건이 해소됐습니다
 - 포켓몬 기록 집계 점검
 - 시즌 / 대회 필터 정리
 - 대진표 연동 회차의 직접 편집 정책 확정
+- 팀전 custom point 재동기화 문제를 새 데이터 모델에서 해결
+- 날짜 변경 시 대진표 연결이 끊어지는 legacy 연결 방식 제거
 
 실제 시즌 3 운영에서 데이터를 쌓으면서 예외 케이스를 확인합니다.
 
+## P1.5. Team Builder Team Snapshot 계약 확정
+
+정규화 DB schema를 최종 확정하기 전에 진행합니다.
+
+현재 Team Builder의 canonical 팀 정보:
+
+```text
+Team
+├─ regulationId
+├─ cupRuleId / cupRuleSettings
+└─ members[0..5]
+   ├─ pokemonName
+   ├─ ability
+   ├─ alignment / nature
+   ├─ statPoints
+   ├─ item
+   └─ moves[0..3]
+```
+
+할 일:
+
+- Team Snapshot schema version 확정
+- 개인 Team Builder 저장본과 대회 제출 Snapshot을 분리
+- 제출 Snapshot은 이후 개인 Team Builder 수정과 무관한 immutable 기록으로 보존
+- Replica Team ID Import가 위 canonical 구조로 변환 가능한지 실제 데이터로 검증
+- Replica Import에서 추가 메타데이터가 필요하면 `source_type`, `source_code`, `imported_at` 등을 별도 보존
+- Import 구현 세부가 바뀌어도 Event / Entry schema를 다시 뜯지 않도록 Snapshot 경계를 먼저 확정
+
+**Replica Team ID Import UI 전체 구현은 DB 정규화 이후 진행해도 무방합니다.**
+
 ## P2. 데이터 모델 정규화
 
-운영 데이터 백업과 인벤토리가 끝난 뒤 진행합니다.
+P0 운영 데이터 인벤토리를 마무리하고 P1.5 Team Snapshot 계약을 확정한 뒤 진행합니다.
 
 목표 객체:
 
 ```text
 Player
 Season
-Tournament
+Event
 Entry
-Entry Pokémon / Team Snapshot
+Team Snapshot / Entry Pokémon
 Match
+Result
+RankingAward
 Title Award
+Hall of Fame
+```
+
+객체 책임:
+
+```text
+Season
+= 어느 시즌인가
+
+Event
+= 실제 한 번 열린 대회
+
+Entry
+= 누가 해당 Event에 참가했는가
+
+Team Snapshot
+= 제출 당시 포켓몬 전체 세팅의 고정본
+
+Match
+= 실제 경기 사실
+
+Result
+= Event의 공식 최종 성적
+
+RankingAward
+= 실제 지급된 랭킹 포인트·입상 delta
 ```
 
 기존 `ypl_data_v4`를 즉시 제거하지 않고 새 구조와 병행한 뒤 점진적으로 이전합니다.
@@ -200,9 +328,12 @@ Title Award
 ## P3. Team Builder → 대회 엔트리
 
 - Team Builder에서 실제 YPL 대회 엔트리 제출
-- 제출 당시 팀 스냅샷 고정
+- 제출 당시 전체 Team Snapshot 고정
+- 포켓몬 / 특성 / 성격 / Stat Points / 도구 / 기술까지 보존
 - 개인 Team Builder 수정과 과거 대회 엔트리 분리
 - 대진표 참가자와 Entry 연결
+- Replica Team ID로 불러온 팀도 동일한 제출 경로 사용
+- Replica Team ID Import UI 및 실제 사용자 흐름 완성
 
 ## P4. 대회 종료 자동화
 
@@ -212,8 +343,8 @@ Title Award
 
 ## P5. Team Builder 추가 기능
 
-- Pokémon Champions Replica Team ID Import
 - 과거 우승 팀을 Team Builder에서 열기
+- 저장 팀 공유 / 복제 등 추가 UX 검토
 
 ---
 
@@ -239,6 +370,20 @@ Title Award
 
 다만 향후 개인 통산 W/L을 만들 경우 개인전 Match와 합산할지는 별도 정책으로 결정합니다.
 
+## RankingAward 수정 이력 — 추후 결정
+
+정규화 이후 실제 지급값 자체는 반드시 보존합니다.
+
+운영자가 포인트를 수정했을 때:
+
+```text
+기존 Award 값을 수정
+vs
+원 지급 + 조정 delta를 ledger로 추가
+```
+
+중 어느 방식을 사용할지는 schema 확정 시 결정합니다.
+
 ## Rival / 연승 공개 — 보류
 
 Match 원본으로 계산은 가능하지만 기본 프로필에서는 공개하지 않습니다.
@@ -256,6 +401,7 @@ Match 원본으로 계산은 가능하지만 기본 프로필에서는 공개하
 - 운영 데이터 변경 전 백업
 - 과거 기록을 추측해 생성하지 않음
 - 통계 숫자보다 Match / Entry / Result 원본 사실을 우선 저장
+- 개인 Team Builder 저장본을 대회 엔트리 원본으로 직접 참조하지 않고 제출 당시 Snapshot을 고정
 - 베타 GitHub Pages에서 관리자 저장 기능 사용 금지
 - 대진표 결과 수정은 기본적으로 `반영 취소 → 수정 → 재반영`
 
@@ -266,11 +412,12 @@ Match 원본으로 계산은 가능하지만 기본 프로필에서는 공개하
 # 6. 바로 다음 작업
 
 ```text
-1. Supabase 운영 데이터 원본 백업
-2. Supabase 테이블 / RLS / Auth 현황 조사
-3. ypl_data_v4 실제 데이터 인벤토리 작성
+1. GitHub SEED ↔ 운영 Supabase 세부 diff 마무리
+2. Team Builder canonical Team Snapshot v1 규격 확정
+3. Replica Team ID → Team Snapshot 매핑 가능성 검증
 4. Records 시즌 3 운영 전 최종 회귀 테스트
-5. 정규화 DB 모델 확정
+5. Season / Event / Entry / Match / Result / RankingAward schema 확정
+6. 테스트 환경에서 정규화 migration 검증
 ```
 
-현재 최우선은 **새 기능 추가보다 운영 데이터의 안전한 백업과 Records 안정화**입니다.
+현재는 **Replica Team ID Import 전체 UI 구현보다 Team Snapshot 계약을 먼저 확정하는 것**이 중요합니다. 이 계약이 확정되면 DB 정규화를 진행하고, Import UI와 대회 제출 기능은 동일한 Snapshot 구조 위에 구현합니다.
