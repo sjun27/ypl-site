@@ -282,6 +282,116 @@ Team
 
 **Replica Team ID Import UI 전체 구현은 DB 정규화 이후 진행해도 무방합니다.**
 
+### Team Snapshot v1 canonical contract
+
+목표:
+
+> Snapshot 하나만으로 당시 제출 팀을 Team Builder에서 동일한 세팅으로 다시 열 수 있어야 한다.
+
+Team Snapshot v1은 개인 Team Builder 저장 포맷과 DB 테이블 구조 자체가 아니라, 직접 작성 / Replica Import / 과거 팀 복원 경로가 공통으로 변환되는 canonical domain contract로 사용합니다.
+
+```text
+TeamSnapshot v1
+├─ schemaVersion
+├─ regulationId
+├─ cupRuleId
+├─ cupRuleSettings
+│  └─ assignedType nullable
+├─ source
+│  ├─ type
+│  ├─ reference nullable
+│  └─ importedAt nullable
+└─ members[1..6]
+   ├─ slot
+   ├─ pokemonId
+   ├─ pokemonNameSnapshot
+   ├─ abilityId nullable
+   ├─ natureId nullable
+   ├─ statPoints
+   │  ├─ hp
+   │  ├─ atk
+   │  ├─ def
+   │  ├─ spa
+   │  ├─ spd
+   │  └─ spe
+   ├─ itemId nullable
+   └─ moves[4] nullable
+```
+
+정책:
+
+- 공식 제출은 Pokémon 1마리 이상 필요
+- 1~6마리 제출 가능
+- `Team Invalid`만 제출 차단
+- `Team Incomplete`는 공식 제출 가능
+- 일부 Ability / Item / Move 등이 비어 있어도 Regulation 위반이 아니면 Snapshot으로 보존 가능
+- Stat Points는 실제 입력 원본값을 저장하고 계산된 최종 능력치는 저장하지 않음
+- IV는 Pokémon Champions에서 고정되므로 저장하지 않음
+- Tera Type은 현재 Mega Rule에서는 v1에 포함하지 않고 향후 Regulation 공개 후 schema 확장 검토
+- UI 선택 상태 / 검색 상태 / sprite URL / 계산 결과는 Snapshot에 저장하지 않음
+- 개인 Team Builder의 저장용 팀 이름은 canonical 전투 세팅의 식별값으로 사용하지 않음
+- 대회 Entry 표시명 등 운영용 이름이 필요하면 Entry 계층에서 별도로 관리
+
+#### Pokémon 식별
+
+현재 Team Builder의 `speciesIdentity()`는 동일 도감번호 / 동일 종 중복 판정용으로 사용되므로 Snapshot 복원용 Pokémon ID와 역할을 분리합니다.
+
+Snapshot의 `pokemonId`는 리전폼 / 폼체인지까지 구분 가능한 stable form-specific canonical ID를 사용해야 합니다.
+
+예:
+
+```text
+Dragonite       → dragonite
+Wash Rotom      → rotomwash
+Hisuian Zoroark → zoroarkhisui
+```
+
+`pokemonNameSnapshot`은 당시 입력 / 소스 표현을 보존하기 위한 보조 정보이며 통계 연결의 기본 키로 사용하지 않습니다.
+
+#### Source provenance
+
+`source.type` 후보:
+
+- `manual`
+- `replica_import`
+- `historical`
+
+Replica ID는 Snapshot 자체의 ID가 아니라 출처 reference로만 취급합니다.
+
+Replica Import 후 사용자가 세팅을 수정하더라도 최종 전투 사실은 Snapshot 내부 값이 source of truth이며, Replica ID는 해당 팀의 출발점에 대한 provenance입니다.
+
+### Replica Team ID mapping 검증 상태
+
+확인된 사항:
+
+- Pokémon Champions Replica Team은 전체 팀 구성을 복제하는 기능
+- 공개 자료 기준 Pokémon / Held Item / Ability / Nature / Moves / Stat Points가 Replica Team에 포함됨
+- 따라서 위 Team Snapshot v1 핵심 전투 필드와 의미상 매핑 가능
+- Regulation / Season 정보도 외부 Replica Team DB에서 별도 관리되는 사례가 있음
+
+아직 미확인:
+
+- 임의의 10자리 Replica Team ID를 입력했을 때 전체 팀 세팅을 JSON 등 구조화 데이터로 반환하는 공식 또는 안정적인 공개 API 존재 여부
+- 해당 조회 기능을 브라우저 클라이언트에서 직접 사용할 수 있는지 여부
+- 코드 만료 / Regulation 변경 / 비공개 팀 등 예외 처리 방식
+
+따라서 **Team Snapshot v1 계약 확정과 Replica Import 조회 구현을 분리**합니다.
+
+```text
+현재
+→ Snapshot field mapping 가능성 확인
+
+다음 기술 검증
+→ Replica ID → full team data retrieval 경로 확인
+
+retrieval 경로 확보 후
+→ Replica Import adapter
+→ Team Snapshot v1
+→ 기존 Team Builder load path
+```
+
+조회 경로가 확정되기 전에는 특정 비공식 서비스의 내부 API에 DB 구조를 종속시키지 않습니다.
+
 ## P2. 데이터 모델 정규화
 
 P0 운영 데이터 인벤토리를 마무리하고 P1.5 Team Snapshot 계약을 확정한 뒤 진행합니다.
