@@ -272,7 +272,10 @@ Team
 
 - Team Snapshot schema version 확정
 - 개인 Team Builder 저장본과 대회 제출 Snapshot을 분리
-- 제출 Snapshot은 이후 개인 Team Builder 수정과 무관한 immutable 기록으로 보존
+- 제출 Snapshot은 이후 개인 Team Builder 수정과 무관한 기록으로 보존
+- Pokémon / 특성 / 성격 / Stat Points / 도구 / 기술 4개를 canonical Snapshot의 핵심 전투 정보로 사용
+- IV는 Pokémon Champions에서 고정되는 값이므로 Snapshot에 별도 저장하지 않음
+- Tera Type은 향후 Regulation에서 필요할 수 있으나 현재 Mega Rule에서는 보류하고, 새 Regulation 공개 후 실제 규칙을 확인해 Snapshot schema 확장을 검토
 - Replica Team ID Import가 위 canonical 구조로 변환 가능한지 실제 데이터로 검증
 - Replica Import에서 추가 메타데이터가 필요하면 `source_type`, `source_code`, `imported_at` 등을 별도 보존
 - Import 구현 세부가 바뀌어도 Event / Entry schema를 다시 뜯지 않도록 Snapshot 경계를 먼저 확정
@@ -328,12 +331,52 @@ RankingAward
 ## P3. Team Builder → 대회 엔트리
 
 - Team Builder에서 실제 YPL 대회 엔트리 제출
-- 제출 당시 전체 Team Snapshot 고정
-- 포켓몬 / 특성 / 성격 / Stat Points / 도구 / 기술까지 보존
-- 개인 Team Builder 수정과 과거 대회 엔트리 분리
+- 포켓몬 / 특성 / 성격 / Stat Points / 도구 / 기술까지 제출 Snapshot에 보존
+- 개인 Team Builder 수정과 대회 제출본을 분리
+- 제출 마감 전에는 자유롭게 재제출 가능
+- 재제출 시 최신 제출본을 현재 공식 제출본으로 사용하고, 마감 시점에 최종본을 고정
+- 마감 이후 참가자 임의 수정 불가
+- Team Builder의 `Team Invalid` 상태는 제출 차단
+- `Team Incomplete` 상태는 제출 허용
+  - 포켓몬 수를 6마리보다 적게 제출하는 경우
+  - 기술을 의도적으로 4개보다 적게 채용하는 경우
+  - 그 밖에 일부 세팅이 비어 있더라도 Regulation 위반이 아닌 경우
+  - 즉 대회 제출 차단 기준은 `Team Invalid`로 한정
 - 대진표 참가자와 Entry 연결
 - Replica Team ID로 불러온 팀도 동일한 제출 경로 사용
 - Replica Team ID Import UI 및 실제 사용자 흐름 완성
+
+### 대회 운영자 제출 관리
+
+대회 진행자는 대회 시작 전까지 참가자 제출 상태를 확인할 수 있어야 합니다.
+
+필요 기능:
+
+- 참가자별 제출 여부 확인
+- 최종 제출 시각 확인
+- 현재 공식 제출본 확인
+- 제출된 전체 팀 세팅 확인
+- 재제출 발생 시 최신본 반영 여부 확인
+- 제출 마감 상태 확인
+- 마감 이후 참가자 수정 차단 여부 확인
+
+이 기능은 향후 Event / Entry / Team Snapshot 구조 위에서 관리자용 대회 운영 화면으로 구현합니다.
+
+### 팀 세팅 공개 정책
+
+기본 원칙:
+
+```text
+일반 YPL 대회
+→ 대회 종료 후 공개
+
+챔피언스 시리즈
+→ 대회 직전 공개
+```
+
+- 제출 마감 전/후와 공개 시점은 별개의 상태로 관리
+- 운영진은 공개 전에도 운영상 필요한 제출 정보를 확인할 수 있어야 함
+- 일반 참가자에게는 Event의 공개 정책에 따라 팀 세팅을 노출
 
 ## P4. 대회 종료 자동화
 
@@ -369,6 +412,14 @@ RankingAward
 팀전 개별 경기와 에이스 결정전도 Match 원본으로 보존합니다.
 
 다만 향후 개인 통산 W/L을 만들 경우 개인전 Match와 합산할지는 별도 정책으로 결정합니다.
+
+## Tera Type Snapshot 확장 — Regulation 공개 후 결정
+
+현재 적용 Regulation은 Mega Rule이므로 Team Snapshot v1에 Tera Type을 당장 추가하지 않습니다.
+
+향후 Tera를 사용하는 Regulation이 공개되면 실제 Pokémon Champions 규칙과 Team Builder 입력 요구사항을 확인한 뒤 Snapshot schema를 확장합니다.
+
+IV는 Pokémon Champions에서 고정되므로 별도 저장 대상으로 두지 않습니다.
 
 ## RankingAward 수정 이력 — 추후 결정
 
@@ -413,7 +464,7 @@ Match 원본으로 계산은 가능하지만 기본 프로필에서는 공개하
 
 ```text
 1. GitHub SEED ↔ 운영 Supabase 세부 diff 마무리
-2. Team Builder canonical Team Snapshot v1 규격 확정
+2. Team Builder canonical Team Snapshot v1 규격 확정 — IV 제외, Tera Type 추후 Regulation 확인 후 확장
 3. Replica Team ID → Team Snapshot 매핑 가능성 검증
 4. Records 시즌 3 운영 전 최종 회귀 테스트
 5. Season / Event / Entry / Match / Result / RankingAward schema 확정
