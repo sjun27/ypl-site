@@ -785,3 +785,107 @@ create index if not exists idx_hall_of_fame_player_id
 --    No stable arbitrary-code resolver has been confirmed.
 --
 -- End of normalized_schema_v1.sql
+-- Champions qualifier / final extension
+--
+-- A qualifier and its final are separate Event rows so each stage has
+-- independent Entry / EntrySubmission / TeamSnapshot data.
+-- Historical Champions events may keep championship_phase NULL when the
+-- qualifier/final distinction was not preserved.
+alter table events
+    add column championship_phase text null,
+    add column championship_final_event_id uuid null,
+    add column qualification_slots integer null;
+
+alter table events
+    add constraint fk_events_championship_final_event
+        foreign key (championship_final_event_id)
+        references events(id)
+        on delete restrict,
+    add constraint chk_events_championship_phase
+        check (
+            championship_phase is null
+            or championship_phase in ('qualifier', 'final')
+        ),
+    add constraint chk_events_championship_only
+        check (
+            championship_phase is null
+            or event_type = 'champions'
+        ),
+    add constraint chk_events_championship_stage_shape
+        check (
+            (
+                championship_phase is null
+                and championship_final_event_id is null
+                and qualification_slots is null
+            )
+            or
+            (
+                championship_phase = 'qualifier'
+                and championship_final_event_id is not null
+                and championship_final_event_id <> id
+                and qualification_slots is not null
+                and qualification_slots > 0
+            )
+            or
+            (
+                championship_phase = 'final'
+                and championship_final_event_id is null
+                and qualification_slots is null
+            )
+        );
+
+create index idx_events_championship_final_event
+    on events(championship_final_event_id)
+    where championship_final_event_id is not null;
+
+-- Records how a Final Entry obtained its berth.
+--
+-- ranking   : operator selected the player directly from the season ranking
+-- qualifier : player advanced from a separate qualifier Entry
+-- manual    : operational exception such as a replacement
+--
+-- This relationship never copies a TeamSnapshot. The qualifier and final
+-- remain independent submissions.
+create table championship_advancements (
+    id uuid primary key default gen_random_uuid(),
+
+    final_entry_id uuid not null
+        references entries(id)
+        on delete restrict,
+
+    source_entry_id uuid null
+        references entries(id)
+        on delete restrict,
+
+    advancement_type text not null
+        check (advancement_type in ('ranking', 'qualifier', 'manual')),
+
+    reason text null,
+
+    created_at timestamptz not null default now(),
+
+    constraint uq_championship_advancement_final_entry
+        unique (final_entry_id),
+
+    constraint chk_championship_advancement_entries
+        check (
+            source_entry_id is null
+            or source_entry_id <> final_entry_id
+        ),
+
+    constraint chk_championship_advancement_source
+        check (
+            (advancement_type = 'ranking' and source_entry_id is null)
+            or
+            (advancement_type = 'qualifier' and source_entry_id is not null)
+            or
+            advancement_type = 'manual'
+        )
+);
+
+create index idx_championship_advancements_source_entry
+    on championship_advancements(source_entry_id)
+    where source_entry_id is not null;
+
+create index idx_championship_advancements_type
+    on championship_advancements(advancement_type);

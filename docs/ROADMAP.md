@@ -5,7 +5,7 @@
 > - 과거 변경 이력: `docs/PATCH_NOTES_2026-08-26.md`
 > - 기술 구조·데이터 모델·운영 원칙: `docs/ARCHITECTURE.md`
 
-마지막 업데이트: 2026-08-30
+마지막 업데이트: 2026-08-31
 
 ---
 
@@ -450,6 +450,39 @@ HallOfFameEntry
 <!-- YPL_P2_MODEL_STATUS_END -->
 
 기존 `ypl_data_v4`는 새 정규화 구조가 검증되기 전까지 유지하며, 테스트 migration과 대조를 거쳐 점진적으로 이전합니다.
+
+
+## 챔피언스 선발전 / 본선 모델 확장
+
+정규화 DB 및 대회 운영 기능에 다음 구조를 추가합니다.
+
+- 챔피언스 선발전과 본선을 **서로 다른 Event**로 저장
+- 같은 챔피언스 회차의 선발전 / 본선을 연결할 수 있는 관계 추가
+- 선발전 Event에 회차별 `qualification_slots` 저장
+- 운영자가 당시 시즌 순위와 운영 규정을 보고 본선 직행자를 직접 결정
+- 선발전 통과자 / 랭킹 직행자 / 운영상 예외 진출 경로 기록
+  - `ranking`
+  - `qualifier`
+  - `manual`
+- 선발전과 본선의 Entry / EntrySubmission / TeamSnapshot은 완전히 독립
+- 선발전 통과 시 Player만 동일하게 연결하고 본선 파티는 새로 제출
+- 선발전 Match는 트레이너 승 / 패 기록에 포함
+- 선발전에는 우승 / 준우승 / 4강 Result를 생성하지 않음
+- 선발전에는 RankingAward / HallOfFameEntry를 생성하지 않음
+- 지정된 본선 진출자 수가 확정되면 선발전을 종료할 수 있도록 대진표 처리 확장
+- 과거 선발전 자료가 없는 챔피언스 회차는 역추정하지 않음
+
+구현 순서:
+
+```text
+1. Event의 챔피언스 phase / 회차 연결 방식 확정
+2. 본선 진출 관계 스키마 확정
+3. normalized_schema_v1.sql 반영
+4. YPL_DB_Test에서 빈 DB 재생성 테스트
+5. 기존 migration 재실행 및 회귀 검증
+6. 관리자 선발전 / 본선 참가자 관리 UX 구현
+7. 선발전 대진표의 N명 선발 종료 처리 구현
+```
 
 ## P3. Team Builder → 대회 엔트리
 
