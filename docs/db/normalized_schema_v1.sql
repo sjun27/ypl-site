@@ -73,11 +73,13 @@ create table if not exists events (
     division text,
     battle_format text,
     competition_format text,
+    competition_settings jsonb not null default '{}'::jsonb,
     is_team_event boolean not null default false,
 
     regulation_id text,
     cup_rule_id text,
     cup_rule_settings jsonb not null default '{}'::jsonb,
+    registration_settings jsonb not null default '{}'::jsonb,
 
     held_on date,
     date_precision text not null default 'exact'
@@ -141,8 +143,63 @@ create index if not exists idx_events_type_format
     on events (event_type, battle_format);
 
 
+
 -- =========================================================
--- 4. Entries
+-- 4. Event registrations
+-- =========================================================
+-- Canonical person-event anchor for application/submission.
+--
+-- application = real new application
+-- advancement = Champions final berth created from ranking/qualifier/manual advancement
+-- manual      = operator-created operational registration
+-- migration   = technical legacy anchor; not evidence that an old
+--               application form existed.
+
+create table if not exists event_registrations (
+    id uuid primary key default gen_random_uuid(),
+    event_id uuid not null references events(id) on delete restrict,
+    player_id uuid not null references players(id) on delete restrict,
+
+    registration_name text not null,
+    registration_data jsonb not null default '{}'::jsonb,
+
+    registration_source text not null default 'application'
+        check (
+            registration_source in (
+                'application',
+                'advancement',
+                'manual',
+                'migration'
+            )
+        ),
+
+    registered_at timestamptz,
+
+    -- FK added after registration_submissions.
+    final_submission_id uuid,
+
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+
+    unique (event_id, player_id),
+    unique (id, event_id, player_id)
+);
+
+create index if not exists idx_event_registrations_event_id
+    on event_registrations (event_id);
+
+create index if not exists idx_event_registrations_player_id
+    on event_registrations (player_id);
+
+create index if not exists idx_event_registrations_name
+    on event_registrations (event_id, registration_name);
+
+create index if not exists idx_event_registrations_source
+    on event_registrations (registration_source);
+
+
+-- =========================================================
+-- 5. Entries
 -- =========================================================
 
 create table if not exists entries (
@@ -169,14 +226,17 @@ create index if not exists idx_entries_event_id
 
 
 -- =========================================================
--- 5. Entry participants
+-- 6. Entry participants
 -- =========================================================
--- final_submission_id is added later because EntrySubmission
--- depends on this table.
+-- Actual bracket participants. Each row is linked back to the
+-- EventRegistration that existed before bracket/team assignment.
 
 create table if not exists entry_participants (
     id uuid primary key default gen_random_uuid(),
-    entry_id uuid not null references entries(id) on delete restrict,
+
+    event_id uuid not null references events(id) on delete restrict,
+    entry_id uuid not null,
+    registration_id uuid not null,
     player_id uuid not null references players(id) on delete restrict,
 
     member_order smallint not null default 1,
@@ -186,6 +246,17 @@ create table if not exists entry_participants (
 
     unique (entry_id, player_id),
     unique (entry_id, member_order),
+    unique (event_id, player_id),
+    unique (registration_id),
+
+    foreign key (entry_id, event_id)
+        references entries(id, event_id)
+        on delete restrict,
+
+    foreign key (registration_id, event_id, player_id)
+        references event_registrations(id, event_id, player_id)
+        on delete restrict,
+
     check (member_order > 0)
 );
 
@@ -195,10 +266,15 @@ create index if not exists idx_entry_participants_entry_id
 create index if not exists idx_entry_participants_player_id
     on entry_participants (player_id);
 
+create index if not exists idx_entry_participants_registration_id
+    on entry_participants (registration_id);
+
 
 -- =========================================================
--- 6. Team snapshots
+-- 7. Team snapshots
 -- =========================================================
+-- Immutable competition facts.
+-- Participant-local monotype assignedType is intentionally excluded.
 
 create table if not exists team_snapshots (
     id uuid primary key default gen_random_uuid(),
@@ -226,7 +302,7 @@ create table if not exists team_snapshots (
 
 
 -- =========================================================
--- 7. Team snapshot members
+-- 8. Team snapshot members
 -- =========================================================
 
 create table if not exists team_snapshot_members (
@@ -279,61 +355,55 @@ create index if not exists idx_team_snapshot_members_pokemon_id
 
 
 -- =========================================================
--- 8. Entry submissions
+-- 9. Registration submissions
 -- =========================================================
+-- Submission belongs to EventRegistration so it can exist before
+-- Entry/team assignment.
 
-create table if not exists entry_submissions (
+create table if not exists registration_submissions (
     id uuid primary key default gen_random_uuid(),
 
-    -- Submission belongs to a PLAYER PARTICIPATION, not directly
-    -- to the whole Entry. This supports team-event members submitting
-    -- their own teams independently.
-    entry_participant_id uuid not null
-        references entry_participants(id) on delete restrict,
+    registration_id uuid not null
+        references event_registrations(id) on delete restrict,
 
     snapshot_id uuid not null
         references team_snapshots(id) on delete restrict,
 
     revision integer not null,
+
+    -- Nullable for historical migration when the original submission
+    -- timestamp is unknown. New application code should always provide it.
     submitted_at timestamptz,
 
     source text not null default 'team_builder',
 
     created_at timestamptz not null default now(),
 
-    unique (entry_participant_id, revision),
+    unique (registration_id, revision),
     unique (snapshot_id),
-
-    -- Used by the composite final_submission FK below.
-    unique (id, entry_participant_id),
+    unique (id, registration_id),
 
     check (revision > 0)
 );
 
-create index if not exists idx_entry_submissions_participant_id
-    on entry_submissions (entry_participant_id);
+create index if not exists idx_registration_submissions_registration_id
+    on registration_submissions (registration_id);
 
-create index if not exists idx_entry_submissions_submitted_at
-    on entry_submissions (submitted_at);
-
-
--- The official frozen submission is stored on EntryParticipant.
--- Composite FK guarantees that final_submission_id belongs to
--- the SAME EntryParticipant.
-alter table entry_participants
-    add column if not exists final_submission_id uuid;
+create index if not exists idx_registration_submissions_submitted_at
+    on registration_submissions (submitted_at);
 
 do $$
 begin
     if not exists (
         select 1
         from pg_constraint
-        where conname = 'fk_entry_participant_final_submission'
+        where conname = 'fk_event_registration_final_submission'
+          and conrelid = 'event_registrations'::regclass
     ) then
-        alter table entry_participants
-            add constraint fk_entry_participant_final_submission
+        alter table event_registrations
+            add constraint fk_event_registration_final_submission
             foreign key (final_submission_id, id)
-            references entry_submissions (id, entry_participant_id)
+            references registration_submissions (id, registration_id)
             on delete restrict;
     end if;
 end
@@ -341,7 +411,7 @@ $$;
 
 
 -- =========================================================
--- 9. Matches
+-- 10. Matches
 -- =========================================================
 
 create table if not exists matches (
@@ -466,7 +536,7 @@ create unique index if not exists uq_matches_source_node
 
 
 -- =========================================================
--- 10. Results
+-- 11. Results
 -- =========================================================
 
 create table if not exists results (
@@ -510,7 +580,7 @@ create index if not exists idx_results_placement_code
 
 
 -- =========================================================
--- 11. Ranking baselines
+-- 12. Ranking baselines
 -- =========================================================
 
 create table if not exists ranking_baselines (
@@ -563,7 +633,7 @@ create index if not exists idx_ranking_baselines_season_id
 
 
 -- =========================================================
--- 12. Ranking awards
+-- 13. Ranking awards
 -- =========================================================
 
 create table if not exists ranking_awards (
@@ -616,7 +686,7 @@ create index if not exists idx_ranking_awards_related_award_id
 
 
 -- =========================================================
--- 13. Title definitions
+-- 14. Title definitions
 -- =========================================================
 
 create table if not exists title_definitions (
@@ -642,7 +712,7 @@ create index if not exists idx_title_definitions_group_code
 
 
 -- =========================================================
--- 14. Title awards
+-- 15. Title awards
 -- =========================================================
 
 create table if not exists title_awards (
@@ -659,7 +729,9 @@ create table if not exists title_awards (
     source text not null,
     reason text,
 
-    awarded_at timestamptz not null default now(),
+    -- Nullable when a historical award date cannot be reconstructed.
+    -- New awards may omit this column and use the current timestamp default.
+    awarded_at timestamptz default now(),
     revoked_at timestamptz,
 
     foreign key (result_id, event_id)
@@ -685,7 +757,7 @@ create unique index if not exists uq_title_awards_active
 
 
 -- =========================================================
--- 15. Player partner Pokémon
+-- 16. Player partner Pokémon
 -- =========================================================
 -- Legacy titleGroups.partner is NOT a normal title award.
 -- Its item name is a player and holders are Pokémon.
@@ -722,7 +794,7 @@ create index if not exists idx_player_partners_pokemon_id
 
 
 -- =========================================================
--- 16. Hall of Fame
+-- 17. Hall of Fame
 -- =========================================================
 
 create table if not exists hall_of_fame_entries (
@@ -741,6 +813,8 @@ create table if not exists hall_of_fame_entries (
     generation_number integer not null,
     generation_label text,
 
+    -- Legacy/custom image compatibility only.
+    -- New Pokémon party visuals derive from the winner's final TeamSnapshot.
     image_ref text,
     note text,
 
@@ -784,61 +858,107 @@ create index if not exists idx_hall_of_fame_player_id
 -- 5. Replica Team ID resolver
 --    No stable arbitrary-code resolver has been confirmed.
 --
--- End of normalized_schema_v1.sql
+-- 6. Latest migration compatibility
+--    Existing historical EntryParticipant/Submission rows must be
+--    connected through registration_source = 'migration' anchors.
+--    These anchors are not evidence of historical application forms.
+--
+-- 7. Monotype assignedType
+--    Participant-local selector only. Do not persist it in Registration
+--    or TeamSnapshot.
+--
 -- Champions qualifier / final extension
 --
 -- A qualifier and its final are separate Event rows so each stage has
--- independent Entry / EntrySubmission / TeamSnapshot data.
+-- independent EventRegistration / Entry / RegistrationSubmission /
+-- TeamSnapshot data.
 -- Historical Champions events may keep championship_phase NULL when the
 -- qualifier/final distinction was not preserved.
 alter table events
-    add column championship_phase text null,
-    add column championship_final_event_id uuid null,
-    add column qualification_slots integer null;
+    add column if not exists championship_phase text null,
+    add column if not exists championship_final_event_id uuid null,
+    add column if not exists qualification_slots integer null;
 
-alter table events
-    add constraint fk_events_championship_final_event
-        foreign key (championship_final_event_id)
-        references events(id)
-        on delete restrict,
-    add constraint chk_events_championship_phase
-        check (
-            championship_phase is null
-            or championship_phase in ('qualifier', 'final')
-        ),
-    add constraint chk_events_championship_only
-        check (
-            championship_phase is null
-            or event_type = 'champions'
-        ),
-    add constraint chk_events_championship_stage_shape
-        check (
-            (
+do $$
+begin
+    if not exists (
+        select 1 from pg_constraint
+        where conname = 'fk_events_championship_final_event'
+          and conrelid = 'events'::regclass
+    ) then
+        alter table events
+            add constraint fk_events_championship_final_event
+            foreign key (championship_final_event_id)
+            references events(id)
+            on delete restrict;
+    end if;
+
+    if not exists (
+        select 1 from pg_constraint
+        where conname = 'chk_events_championship_phase'
+          and conrelid = 'events'::regclass
+    ) then
+        alter table events
+            add constraint chk_events_championship_phase
+            check (
                 championship_phase is null
-                and championship_final_event_id is null
-                and qualification_slots is null
-            )
-            or
-            (
-                championship_phase = 'qualifier'
-                and championship_final_event_id is not null
-                and championship_final_event_id <> id
-                and qualification_slots is not null
-                and qualification_slots > 0
-            )
-            or
-            (
-                championship_phase = 'final'
-                and championship_final_event_id is null
-                and qualification_slots is null
-            )
-        );
+                or championship_phase in ('qualifier', 'final')
+            );
+    end if;
 
-create index idx_events_championship_final_event
+    if not exists (
+        select 1 from pg_constraint
+        where conname = 'chk_events_championship_only'
+          and conrelid = 'events'::regclass
+    ) then
+        alter table events
+            add constraint chk_events_championship_only
+            check (
+                championship_phase is null
+                or event_type = 'champions'
+            );
+    end if;
+
+    if not exists (
+        select 1 from pg_constraint
+        where conname = 'chk_events_championship_stage_shape'
+          and conrelid = 'events'::regclass
+    ) then
+        alter table events
+            add constraint chk_events_championship_stage_shape
+            check (
+                (
+                    championship_phase is null
+                    and championship_final_event_id is null
+                    and qualification_slots is null
+                )
+                or
+                (
+                    championship_phase = 'qualifier'
+                    and championship_final_event_id is not null
+                    and championship_final_event_id <> id
+                    and qualification_slots is not null
+                    and qualification_slots > 0
+                )
+                or
+                (
+                    championship_phase = 'final'
+                    and championship_final_event_id is null
+                    and qualification_slots is null
+                )
+            );
+    end if;
+end
+$$;
+
+create index if not exists idx_events_championship_final_event
     on events(championship_final_event_id)
     where championship_final_event_id is not null;
 
--- Records how a Final Entry obtained its berth.
+-- Records how a Final EventRegistration obtained its berth.
+--
+-- The Final Registration exists before the Final bracket/Entry so the
+-- participant can submit a completely independent Final TeamSnapshot.
 --
 -- ranking   : operator selected the player directly from the season ranking
 -- qualifier : player advanced from a separate qualifier Entry
@@ -846,11 +966,11 @@ create index idx_events_championship_final_event
 --
 -- This relationship never copies a TeamSnapshot. The qualifier and final
 -- remain independent submissions.
-create table championship_advancements (
+create table if not exists championship_advancements (
     id uuid primary key default gen_random_uuid(),
 
-    final_entry_id uuid not null
-        references entries(id)
+    final_registration_id uuid not null
+        references event_registrations(id)
         on delete restrict,
 
     source_entry_id uuid null
@@ -864,14 +984,8 @@ create table championship_advancements (
 
     created_at timestamptz not null default now(),
 
-    constraint uq_championship_advancement_final_entry
-        unique (final_entry_id),
-
-    constraint chk_championship_advancement_entries
-        check (
-            source_entry_id is null
-            or source_entry_id <> final_entry_id
-        ),
+    constraint uq_championship_advancement_final_registration
+        unique (final_registration_id),
 
     constraint chk_championship_advancement_source
         check (
@@ -883,9 +997,11 @@ create table championship_advancements (
         )
 );
 
-create index idx_championship_advancements_source_entry
+create index if not exists idx_championship_advancements_source_entry
     on championship_advancements(source_entry_id)
     where source_entry_id is not null;
 
-create index idx_championship_advancements_type
+create index if not exists idx_championship_advancements_type
     on championship_advancements(advancement_type);
+
+-- End of normalized_schema_v1.sql

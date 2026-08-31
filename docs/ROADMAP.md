@@ -296,7 +296,6 @@ TeamSnapshot v1
 ├─ regulationId
 ├─ cupRuleId
 ├─ cupRuleSettings
-│  └─ assignedType nullable
 ├─ source
 │  ├─ type
 │  ├─ reference nullable
@@ -329,6 +328,7 @@ TeamSnapshot v1
 - IV는 Pokémon Champions에서 고정되므로 저장하지 않음
 - Tera Type은 현재 Mega Rule에서는 v1에 포함하지 않고 향후 Regulation 공개 후 schema 확장 검토
 - UI 선택 상태 / 검색 상태 / sprite URL / 계산 결과는 Snapshot에 저장하지 않음
+- 모노타입 `assignedType`은 참가자가 Team Builder에서 직접 선택하고 localStorage/validation에만 사용하며 DB/Snapshot/Records에는 저장하지 않음
 - 개인 Team Builder의 저장용 팀 이름은 canonical 전투 세팅의 식별값으로 사용하지 않음
 - 대회 Entry 표시명 등 운영용 이름이 필요하면 Entry 계층에서 별도로 관리
 
@@ -395,19 +395,22 @@ retrieval 경로 확보 후
 ## P2. 데이터 모델 정규화
 
 <!-- YPL_P2_MODEL_STATUS_START -->
-### 정규화 논리 모델 확정 — 2026-08-31
+### 정규화 논리 모델 최신 revision — 2026-08-31
 
-논리 모델 확정:
+기존 normalized schema와 legacy migration은 Registration 도입 전 모델에서 테스트 검증을 완료했다.
+
+최신 논리 구조:
 
 ```text
 Player
 Season
 Event
-Entry
-EntryParticipant
-EntrySubmission
+EventRegistration
+RegistrationSubmission
 TeamSnapshot
 TeamSnapshotMember
+Entry
+EntryParticipant
 Match
 Result
 RankingAward
@@ -416,35 +419,36 @@ TitleDefinition
 TitleAward
 PlayerPartner
 HallOfFameEntry
+ChampionshipAdvancement
 ```
 
 핵심 확정 사항:
 
-- 개인전/팀전을 동일한 Event / Entry 모델로 처리
-- EntrySubmission은 선수 단위인 EntryParticipant에 귀속
-- 재제출 이력 보존, 대회 종료 시 선수별 final_submission_id 확정
+- `EventRegistration` = 참가 신청 및 제출 기준 단위
+- `Entry` = 실제 대진표 참가 단위
+- 신청과 Entry를 분리하여 팀전 사후 편성을 지원
+- Submission은 대진표/팀 편성 전에도 가능하도록 EventRegistration에 귀속
+- 재제출 revision 보존, 결과 적용 시 Registration.final_submission_id 확정
+- 파티 제출 Snapshot은 Pokémon 목록만이 아니라 **특성 / 성격 / Stat Points / 지닌물건 / 기술 4개**까지 전체 세팅 보존
 - Team Invalid만 제출 차단, Team Incomplete 허용
-- 공식 제출은 Pokémon 1~6마리
 - Snapshot v1에 IV/Tera 제외
-- Team Snapshot은 immutable
-- 일반 대회는 기록 반영 성공 시 최종 제출 고정 및 팀 공개
-- 챔피언스는 scheduled/manual 사전 공개 가능
+- 모노타입 assignedType은 로컬 전용, DB/Snapshot 저장 안 함
+- Team Snapshot immutable
 - 팀전 Result는 팀 Entry에 한 번만 저장
-- 팀전 선수별 랭킹 변화는 RankingAward에 개별 저장
-- RankingAward는 ledger 방식
+- 선수별 실제 포인트는 RankingAward에 개별 저장
 - 과거 복원 불가능 랭킹은 RankingBaseline으로 보존
-- Hall of Fame 세대 번호는 싱글/더블이 공유 가능
-  - 예: 7대 싱글 챔피언 / 7대 더블 챔피언 모두 generation_number = 7
-- Replica Team ID 직접 Import는 안정적인 resolver 미확보로 보류하며 DB 정규화를 막지 않음
+- Champions qualifier/final은 별도 Event이며 Snapshot 공유 안 함
+- ChampionshipAdvancement는 본선 Entry가 아니라 **본선 EventRegistration**을 대상으로 기록하여 대진표 생성 전 제출을 지원
+- legacy historical submission은 migration-source Registration anchor를 사용하되 실제 과거 신청 사실로 집계하지 않음
 
 다음 단계:
 
 ```text
-논리 모델
-→ PostgreSQL/Supabase DDL 초안
-→ 테스트 schema
-→ ypl_data_v4 migration dry-run
-→ 검증
+최신 DDL
+→ migration generator 갱신
+→ YPL_DB_Test 재생성
+→ ypl_data_v4 migration 회귀
+→ 신규 Registration flow 테스트
 → 운영 migration
 ```
 <!-- YPL_P2_MODEL_STATUS_END -->
@@ -464,8 +468,10 @@ HallOfFameEntry
   - `ranking`
   - `qualifier`
   - `manual`
-- 선발전과 본선의 Entry / EntrySubmission / TeamSnapshot은 완전히 독립
-- 선발전 통과 시 Player만 동일하게 연결하고 본선 파티는 새로 제출
+- 선발전과 본선의 EventRegistration / Entry / RegistrationSubmission / TeamSnapshot은 완전히 독립
+- 선발전 통과/랭킹 직행 확정 시 본선에 `registration_source = advancement` Registration 생성
+- 본선 파티는 그 Registration에 새로 제출
+- 본선 Entry는 실제 본선 대진표 생성 시 별도로 생성
 - 선발전 Match는 트레이너 승 / 패 기록에 포함
 - 선발전에는 우승 / 준우승 / 4강 Result를 생성하지 않음
 - 선발전에는 RankingAward / HallOfFameEntry를 생성하지 않음
@@ -484,100 +490,109 @@ HallOfFameEntry
 7. 선발전 대진표의 N명 선발 종료 처리 구현
 ```
 
-## P3. Team Builder → 대회 엔트리
+## P3. 신청 → Team Builder 제출 → 대진표
 
-- Team Builder에서 실제 YPL 대회 엔트리 제출
-- 포켓몬 / 특성 / 성격 / Stat Points / 도구 / 기술까지 제출 Snapshot에 보존
-- 개인 Team Builder 수정과 대회 제출본을 분리
-- 참가자에게 안내할 제출 기준 시각은 둘 수 있으나 **자동 잠금되는 hard deadline으로 사용하지 않음**
-- 제출 기준 시각 이후에도 참가자는 자유롭게 최초 제출 / 재제출 가능
-- 재제출 시 가장 최신 제출본을 현재 공식 제출본으로 사용
-- 제출 이력과 각 제출 시각은 보존하여 운영자가 늦은 제출 / 변경을 확인할 수 있게 함
-- 대회 종료 후 `기록 반영`이 성공하면 해당 Event의 최종 제출본을 고정하고 이후 참가자 수정 불가
-- 공식 제출은 포켓몬 **1마리 이상** 필요
-- Team Builder의 `Team Invalid` 상태만 제출 차단
-- `Team Incomplete` 상태는 제출 허용
-  - 포켓몬 수를 6마리보다 적게 제출하는 경우
-  - 기술을 의도적으로 4개보다 적게 채용하는 경우
-  - 그 밖에 일부 세팅이 비어 있더라도 Regulation 위반이 아닌 경우
-- 대진표 참가자와 Entry 연결
-- Replica Team ID로 불러온 팀도 동일한 제출 경로 사용
-- Replica Team ID Import UI 및 실제 사용자 흐름 완성
+### 대회 신청
 
-### 대회 운영자 제출 관리
+- 대회 신청 공지를 만들 때 Event를 생성/연결
+- Event의 regulation / cup rule / 공통 rule settings가 규칙 source of truth
+- 신청 완료 시 EventRegistration 생성
+- 팀전 1·2·3지망 등 대회별 답변은 registration_data에 저장
+- 참가자는 파티 제출 시 해당 Event를 선택하고 **자기 이름을 직접 입력**
+- 해당 Event의 제출 가능 Registration(`application / advancement / manual`)과 exact match
+- 개인 링크/token/별도 회원 로그인은 만들지 않음
 
-대회 진행자는 대회 시작 전까지 참가자 제출 상태를 확인할 수 있어야 합니다.
+### 파티 제출
 
-필요 기능:
+- 신청 직후부터 제출 가능
+- 대진표 생성 전/후 모두 재제출 가능
+- 결과 적용 전까지 제출 가능
+- 결과 적용 시 final_submission_id freeze
+- 제출 revision과 제출 시각 전체 보존
+- Pokémon 1~6마리
+- Team Invalid만 제출 차단
+- Team Incomplete 허용
+- Snapshot은 포켓몬 / 특성 / 성격 / Stat Points / 지닌물건 / 기술 4개를 모두 보존
+- 개인 Team Builder localStorage와 공식 제출 Snapshot은 분리
 
-- 참가자별 제출 여부 확인
-- 최종 제출 시각 확인
-- 현재 공식 제출본 확인
-- 제출된 전체 팀 세팅 확인
-- 재제출 발생 시 최신본 반영 여부 확인
-- 제출 기준 시각 이후 제출 / 변경 여부 확인
-- Event 종료 후 최종 Snapshot 고정 여부 확인
+### 운영자 제출 관리
 
-운영자는 대회 진행 중 지속적으로 대진표를 확인하므로, **대진표 참가자 표시에서 제출 상태를 바로 확인할 수 있게 하는 것을 우선 UX로 검토**합니다.
-
-예시 상태:
+대진표 참가자 목록에서 다음을 바로 확인할 수 있게 한다.
 
 ```text
 미제출
 제출 완료
 기준 시각 이후 제출
-공개 후 변경
+최종 제출 시각
 ```
 
-운영자는 팀이 아직 일반 공개되지 않은 상태에서도 해당 참가자의 현재 제출 세팅을 확인할 수 있어야 합니다.
+파티 미제출은 대진표 참가를 막지 않는다.
 
-이 기능은 향후 Event / Entry / Team Snapshot 구조 위에서 대진표 및 관리자용 대회 운영 화면에 구현합니다.
+### 참가 확정 / Entry 생성
 
-### 팀 세팅 공개 정책
-
-기본 원칙:
+기존 `대진표 → 새 대회 만들기` UX 큰 틀은 유지한다.
 
 ```text
-일반 YPL 대회
-→ 기록 반영 성공
-→ Event 종료 확정
-→ 최종 Team Snapshot 고정
-→ 팀 세팅 자동 공개
-
-챔피언스 시리즈
-→ 대회 직전 공개
-→ 예약 공개 시각 설정 가능
-→ 운영자 수동 공개 가능
+기존 Event 선택
+→ 신청자 전원 기본 체크
+→ 불참자만 체크 해제
+→ 대진표 생성
+→ 실제 Entry / EntryParticipant 생성
 ```
 
-- 제출 기준 시각과 공개 시점은 별개의 상태로 관리
-- 챔피언스 시리즈는 예약 공개와 수동 공개를 모두 지원
-- 공개 이후에도 Event가 종료되지 않았다면 참가자의 재제출 자체는 시스템에서 강제 차단하지 않음
-- 공개 이후 제출본이 변경되면 운영자가 대진표에서 이를 확인할 수 있어야 함
-- 공개 상태에서는 최신 공식 제출본을 일반 사용자에게 표시
-- 운영진은 공개 전에도 운영상 필요한 제출 정보를 확인할 수 있어야 함
+별도 참가 확정 화면과 참가 취소 UI는 만들지 않는다.
 
-### Records 팀 세팅 조회 UX — 디자인 검토 필요
+Bracket participant identity는 이름/party 복사본이 아니라 Entry ID를 기준으로 전환한다.
 
-대회 종료 후 공개된 Team Snapshot은 Records의 트레이너 대회 이력 및 대회 아카이브에서 확인할 수 있어야 합니다.
+### 팀전 편성
 
-현재 후보 UX:
+기존 1·2·3지망 방식 유지.
 
-- 대회 이력 행의 `엔트리 보기` / 펼치기
-- 6마리 로스터는 행 확장 영역에서 요약
-- 포켓몬별 특성 / 성격 / Stat Points / 도구 / 기술은 추가 상세보기
-- 데스크톱은 row expansion 또는 modal / side panel
-- 모바일은 modal / bottom sheet 계열 검토
+자동 추천 기준:
 
-Records 화면의 정보 밀도가 과도하게 높아지지 않도록 **기본은 접힌 상태**를 우선 검토합니다.
+1. 팀 인원을 최대한 균등하게 배치
+2. 전체 참가자의 1·2·3지망 만족도 최대화
 
-정확한 UI 패턴은 Records 전체 디자인을 보면서 별도로 확정합니다.
+실력 밸런스는 시스템에서 계산하지 않는다.
+
+추천안은 여러 번 재생성할 수 있고 운영진이 최종 수정한다.
+
+운영진 수동 이동 UI에서는 참가자별 1·2·3지망 전체와 현재 배정이 몇 지망인지 상시 표시한다.
+
+최종 확정 후 Team Entry / EntryParticipant를 생성하며 팀원 수는 고정하지 않는다.
+
+### 에이스전
+
+- 실제 정규 개인전 수 홀수 → 동률 불가 → ace 없음
+- 실제 정규 개인전 수 짝수 → 동률 가능
+- 실제 동률일 때만 ace Match 생성
+
+### 팀 세팅 공개
+
+일반 대회:
+
+```text
+결과 적용
+→ Match / Result / RankingAward 확정
+→ final submission freeze
+→ team_revealed_at
+→ Records 공개
+```
+
+Records Event 상세에서 결과 / 대진표 / 참가자 / 최종 공개 파티를 함께 조회한다.
+
+과거 revision은 공개하지 않고 운영 이력으로 보존한다.
 
 ## P4. 대회 종료 자동화
 
-- Champions 우승 → 명예의 전당 등록 후보
+- 결과 적용 → Match / Result / RankingAward 확정
+- EventRegistration.final_submission_id freeze
+- 일반 대회 최종 파티 자동 공개
+- Records 대회 상세 자동 연결 강화
+- Champions 본선 우승 → HallOfFameEntry 자동 연결
+- 신규 HOF Pokémon 파티는 winner final TeamSnapshot의 pokemon_id sprite로 렌더링
+- 기존 image_ref는 legacy/custom 호환용만 유지
 - 기록 → 칭호 AUTO / REVIEW 후보
-- 대회 아카이브 자동 연결 강화
 
 ## P5. Team Builder 추가 기능
 
@@ -658,12 +673,19 @@ Match 원본으로 계산은 가능하지만 기본 프로필에서는 공개하
 # 6. 바로 다음 작업
 
 ```text
-1. GitHub SEED ↔ 운영 Supabase 세부 diff 마무리
-2. Team Builder canonical Team Snapshot v1 규격 확정 — IV 제외, Tera Type 추후 Regulation 확인 후 확장
-3. Replica Team ID → Team Snapshot 매핑 가능성 검증
-4. Records 시즌 3 운영 전 최종 회귀 테스트
-5. Season / Event / Entry / Match / Result / RankingAward schema 확정
-6. 테스트 환경에서 정규화 migration 검증
+완료: normalized_schema_v1.sql 최신 구조 Test schema 적용
+완료: EventRegistration / RegistrationSubmission 기반 legacy migration generator 작성
+완료: ypl_data_v4 전체 migration 회귀 검증
+완료: count / identity / Result / RankingBaseline / Snapshot / Match / Title / Partner / HOF 검증
+완료: 신규 Registration → Submission → Entry → Result freeze happy-path 검증
+완료: 팀전 지망 데이터 / 수동 배정 구조 / ace Match 구조 검증
+
+다음 작업:
+1. generator / DDL / 문서 최종 diff 검토
+2. 랭킹 반영 정책(rankingEnabled) 신규 Event 생성·결과 반영 코드에 적용
+3. 현재 legacy 프론트의 파트너 Pokémon Player 검색 오염 수정
+4. normalized DB를 사용하는 애플리케이션 연결 구현
+5. 전체 회귀 테스트 후 Production migration 계획 확정
 ```
 
-현재는 **Replica Team ID Import 전체 UI 구현보다 Team Snapshot 계약을 먼저 확정하는 것**이 중요합니다. 이 계약이 확정되면 DB 정규화를 진행하고, Import UI와 대회 제출 기능은 동일한 Snapshot 구조 위에 구현합니다.
+Replica Team ID Import UI는 운영 흐름 안정화 이후 진행해도 무방합니다.

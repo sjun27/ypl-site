@@ -345,8 +345,9 @@ champ = true
 분리 이유:
 
 - 선발전과 본선은 서로 다른 파티를 사용할 수 있습니다.
-- 따라서 `Entry`, `EntryParticipant`, `EntrySubmission`, `TeamSnapshot`을 서로 공유하지 않습니다.
-- 선발전 통과 시 본선에는 새 Entry를 만들고, 본선용 팀은 새로 제출합니다.
+- 따라서 `EventRegistration`, `Entry`, `EntryParticipant`, `RegistrationSubmission`, `TeamSnapshot`을 서로 공유하지 않습니다.
+- 선발전 통과 시 본선에는 `registration_source = advancement`인 새 Registration을 만들고, 본선 파티를 새로 제출합니다.
+- 본선 Entry는 실제 본선 대진표를 생성할 때 그 Registration에서 생성합니다.
 - 선발전의 TeamSnapshot을 본선으로 복사하거나 재사용하지 않습니다.
 
 같은 Player가 두 Event에 참가하는 것은 정상이며, Player 식별자만 동일하게 유지합니다.
@@ -661,11 +662,13 @@ Player
 
 Season
 └─ Event
+   ├─ EventRegistration ── Player
+   │  └─ RegistrationSubmission
+   │     └─ TeamSnapshot
+   │        └─ TeamSnapshotMember
+   │
    ├─ Entry
-   │  └─ EntryParticipant ── Player
-   │     └─ EntrySubmission
-   │        └─ TeamSnapshot
-   │           └─ TeamSnapshotMember
+   │  └─ EntryParticipant ── Player / EventRegistration
    │
    ├─ Match
    │  └─ Match (team_bout / ace)
@@ -682,15 +685,18 @@ TitleDefinition
 
 ### 제출 귀속 원칙
 
-`EntrySubmission`은 `Entry` 자체가 아니라 **EntryParticipant**에 귀속한다.
+`RegistrationSubmission`은 **EventRegistration**에 귀속한다.
 
 이유:
 
-- 개인전: EntryParticipant 1명 → 해당 선수의 제출
-- 팀전: EntryParticipant 여러 명 → 각 선수의 제출을 독립적으로 관리
-- 팀전에서도 선수별 재제출, 기준 시각 이후 제출, 최종 제출본 확정이 가능해야 함
+- 참가 신청 직후부터 파티를 제출할 수 있어야 함
+- 개인전은 대진표 생성 전에도 제출 가능해야 함
+- 팀전은 최종 팀 Entry가 만들어지기 전에도 선수별 제출이 가능해야 함
+- 재제출 revision은 실제 대진표 참가 단위와 독립적으로 보존해야 함
 
-따라서 공식 최종 제출 포인터도 `EntryParticipant.final_submission_id`로 관리한다.
+따라서 공식 최종 제출 포인터는 `EventRegistration.final_submission_id`로 관리한다.
+
+`Entry`는 신청 객체가 아니라 실제 대진표 참가 단위다.
 
 ---
 
@@ -761,10 +767,12 @@ Event
 - division nullable
 - battle_format nullable
 - competition_format nullable
+- competition_settings
 - is_team_event
 - regulation_id nullable
 - cup_rule_id nullable
-- cup_rule_settings nullable
+- cup_rule_settings
+- registration_settings
 - held_on nullable
 - date_precision
 - record_completeness
@@ -825,6 +833,55 @@ record_completeness
 
 ---
 
+## 5.5 EventRegistration
+
+대회 참가 신청과 실제 대진표 참가를 분리한다.
+
+```text
+EventRegistration
+- id
+- event_id
+- player_id
+- registration_name
+- registration_data
+- registration_source
+- registered_at nullable
+- final_submission_id nullable
+- created_at
+- updated_at
+```
+
+`registration_source`:
+
+```text
+application
+advancement
+manual
+migration
+```
+
+- `application`: 실제 신규 참가 신청
+- `advancement`: 랭킹 직행 / 선발전 통과 등으로 Champions 본선 참가 자격을 얻어 생성된 등록
+- `manual`: 운영진이 필요에 따라 만든 신규 운영 등록
+- `migration`: legacy Entry/Submission을 최신 모델에 연결하기 위한 기술적 anchor
+
+`migration` row는 당시 실제 참가 신청서가 존재했다는 뜻이 아니며, 과거 신청자 수를 복원하는 근거로 사용하지 않는다.
+
+팀전의 1·2·3지망 등 대회별 신청 데이터는 `registration_data JSONB`에 저장한다.
+
+참가자 파티 제출 화면에서는 개인 링크/token/별도 로그인을 만들지 않고:
+
+```text
+Event 선택
+→ 자기 이름 직접 입력
+→ 해당 Event의 submission-eligible Registration exact match
+  (application / advancement / manual)
+```
+
+방식을 사용한다. 앞뒤 공백 정리는 허용하되 fuzzy match로 다른 사람을 자동 선택하지 않는다.
+
+---
+
 ## 6. Entry / EntryParticipant
 
 ### Entry
@@ -855,11 +912,12 @@ team
 ```text
 EntryParticipant
 - id
+- event_id
 - entry_id
+- registration_id
 - player_id
 - member_order
 - role nullable
-- final_submission_id nullable
 - created_at
 ```
 
@@ -888,12 +946,12 @@ Entry "하나 히어로즈"
 
 ---
 
-## 7. EntrySubmission
+## 7. RegistrationSubmission
 
 ```text
-EntrySubmission
+RegistrationSubmission
 - id
-- entry_participant_id
+- registration_id
 - snapshot_id
 - revision
 - submitted_at nullable
@@ -904,22 +962,24 @@ EntrySubmission
 권장 제약:
 
 ```text
-UNIQUE(entry_participant_id, revision)
+UNIQUE(registration_id, revision)
 ```
 
 대회 진행 중 현재 공식 제출본:
 
 ```text
-해당 EntryParticipant의 가장 높은 revision
+해당 EventRegistration의 가장 높은 revision
 ```
 
-대회 종료 후 공식 역사 기록:
+결과 적용 후 공식 역사 기록:
 
 ```text
-EntryParticipant.final_submission_id
+EventRegistration.final_submission_id
 ```
 
 과거 Submission은 삭제하지 않는다.
+
+과거 migration에서 실제 제출 시각을 확인할 수 없으면 `submitted_at = NULL`로 보존하며 현재 시각을 임의로 생성하지 않는다.
 
 `submitted_after_target` 같은 파생 상태는 저장하지 않고:
 
@@ -1000,6 +1060,8 @@ TeamSnapshotMember
 - `pokemon_id`는 form-specific stable canonical ID를 사용
 - species clause 판정용 identity와 Snapshot 복원용 pokemon_id를 분리
 - Snapshot 생성 후 기존 Snapshot을 수정하지 않음
+- 파티 제출은 단순 Pokémon 엔트리 목록이 아니라 **특성 / 성격 / Stat Points / 지닌물건 / 기술 4개를 포함한 전체 배틀 세팅**을 보존
+- 모노타입 `assignedType`은 Team Builder 로컬 선택/검증 상태이며 EventRegistration / TeamSnapshot / Records에 저장하지 않음
 
 ---
 
@@ -1144,6 +1206,30 @@ reversal
 ```
 
 실제 지급값을 저장한다.
+YPL 시즌 3 이후에는 Event별 랭킹 반영 여부를 `competition_settings.rankingEnabled`에 명시한다.
+
+```text
+마스터 리그       → true
+팀전              → true
+파이컵 라이트     → true
+루키 리그         → false
+```
+
+팀전은 리그 구분과 관계없이 `is_team_event = true`이면 랭킹 반영 대상으로 본다.
+
+결과 반영 흐름:
+
+```text
+Result 생성
+→ competition_settings.rankingEnabled = true
+   → RankingAward 생성
+→ false
+   → Result만 보존하고 RankingAward는 생성하지 않음
+```
+
+따라서 공식 대회 성적과 랭킹 포인트 지급 여부는 서로 독립된 사실로 관리한다.
+
+과거 `ypl_data_v4`는 Event별 실제 RankingAward 지급 이력을 정확히 복원할 수 없으므로 historical migration에서 RankingAward를 역산하지 않고 RankingBaseline만 이전한다.
 
 팀전 기본 배분식 자체보다 각 선수에게 최종 적용된 실제 값을 원본으로 본다.
 
@@ -1332,7 +1418,19 @@ HallOfFameEntry
 
 으로 판별한다.
 
-이미지는 DB에 base64로 직접 저장하지 않고 `image_ref`만 저장한다.
+신규 Hall of Fame의 Pokémon 파티 이미지는 별도 업로드하지 않는다.
+
+```text
+HallOfFameEntry
+→ Result
+→ winner Entry
+→ EntryParticipant
+→ EventRegistration.final_submission_id
+→ TeamSnapshot
+→ pokemon_id 기반 sprite 렌더링
+```
+
+`image_ref`는 기존 HOF/custom 이미지 호환용 nullable 필드로만 유지하고 신규 Pokémon 파티의 source of truth로 사용하지 않는다.
 
 ---
 
@@ -1342,9 +1440,11 @@ HallOfFameEntry
 |---|---|
 | 시즌 | Season |
 | 대회 | Event |
+| 참가 신청 | EventRegistration(source=application) |
+| 신청 추가 정보 / 팀 지망 | EventRegistration.registration_data |
 | 참가 단위 | Entry |
-| 실제 참가 선수 | EntryParticipant |
-| 제출/재제출 이력 | EntrySubmission |
+| 실제 참가 선수 / 최종 팀 구성 | EntryParticipant |
+| 제출/재제출 이력 | RegistrationSubmission |
 | 제출 당시 팀 세팅 | TeamSnapshot / TeamSnapshotMember |
 | 실제 경기 | Match |
 | 공식 최종 성적 | Result |
@@ -1355,14 +1455,101 @@ HallOfFameEntry
 | 파트너 포켓몬 | PlayerPartner |
 | 챔피언 명예의 전당 | HallOfFameEntry |
 
-## 16. 다음 단계
 
-1. 이 논리 모델을 PostgreSQL/Supabase DDL로 변환
-2. FK / UNIQUE / CHECK / index 설계
-3. 운영 DB가 아닌 테스트 환경에서 schema 생성
-4. 현재 `ypl_data_v4` → 새 모델 migration dry-run
-5. 건수 및 대표 사례 대조
-6. 검증 후 운영 migration 계획 수립
+---
+
+## 17. 신청 → 제출 → 대진표 → 결과 운영 흐름
+
+### Event 생성 시점
+
+Event는 대진표 생성 시점이 아니라 **대회 신청 공지를 게시할 때 생성/연결**한다.
+
+공지 본문의 자연어 대신 다음 구조화 필드를 대회 규칙의 기준으로 사용한다.
+
+```text
+regulation_id
+cup_rule_id
+cup_rule_settings
+registration_settings
+competition_format
+competition_settings
+```
+
+### 개인전 참가 확정
+
+기존 관리자 `대진표 → 새 대회 만들기` UX의 큰 틀은 유지한다.
+
+```text
+기존 Event 선택
+→ 신청자 전원 기본 체크
+→ 불참자만 체크 해제
+→ 대진표 생성
+→ 선택된 Registration에서 Entry / EntryParticipant 생성
+```
+
+파티 미제출은 참가를 막지 않는다.
+
+별도 참가 확정 화면이나 참가 취소 UI는 만들지 않는다.
+
+대진표 생성 후 불참자는 별도 reseed/remove workflow를 만들지 않고 실제 경기 결과에서 상대 승 / 해당 선수 패로 처리한다.
+
+### 팀전 편성
+
+신청 단계에서 각 참가자는 기존 방식대로 1·2·3지망 팀을 제출한다.
+
+자동 편성은 최종 확정이 아니라 추천 초안이다.
+
+최적화 기준:
+
+1. 팀별 인원을 최대한 균등하게 배치
+2. 전체 참가자의 1·2·3지망 만족도를 최대화
+
+실력 밸런스는 시스템에서 계산하지 않는다.
+
+추천안은 여러 번 재생성할 수 있고 운영진이 최종 수정한다.
+
+운영진이 선수를 이동할 때 참가자별 1·2·3지망 전체와 현재 배정이 몇 지망인지 즉시 확인할 수 있어야 한다.
+
+최종 편성 시 Team Entry와 EntryParticipant를 생성한다. 팀원 수는 DB에서 고정하지 않는다.
+
+### 에이스전
+
+에이스전 필요 여부는 roster 인원수가 아니라 **실제 정규 개인전 수**를 기준으로 한다.
+
+- 정규 개인전 수 홀수 → 동률 불가능 → ace 불필요
+- 정규 개인전 수 짝수 → 동률 가능
+- 실제 정규전 결과가 동률일 때만 ace Match 생성
+
+### 결과 적용과 제출 freeze
+
+일반 대회:
+
+```text
+결과 적용
+→ Match / Result / RankingAward 확정
+→ EventRegistration.final_submission_id 고정
+→ record_applied_at 기록
+→ team_revealed_at 기록
+→ Records 공개
+```
+
+결과 적용 전까지 최초 제출/재제출을 허용한다.
+
+공개 Records에는 final_submission_id가 가리키는 최종 Snapshot만 표시하고 이전 revision은 운영 이력으로 보존한다.
+
+Bracket participant identity는 복사된 이름/party가 아니라 Entry ID를 기준으로 연결한다.
+
+
+## 18. 다음 단계
+
+1. 최신 EventRegistration / RegistrationSubmission 구조를 DDL에 반영
+2. legacy migration generator를 최신 구조에 맞게 수정
+3. YPL_DB_Test 빈 schema 재생성
+4. 현재 `ypl_data_v4` → 최신 모델 migration 재실행
+5. 기존 건수 / identity / Result / Ranking / Snapshot / Champions 회귀 검증
+6. 신규 Registration → Submission → Entry → 결과 freeze 흐름 검증
+7. 팀전 지망 추천 / 수동 수정 / ace 조건 검증
+8. 검증 후 운영 migration 계획 수립
 
 운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
 <!-- YPL_NORMALIZED_MODEL_V1_END -->

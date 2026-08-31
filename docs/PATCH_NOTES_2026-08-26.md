@@ -983,3 +983,227 @@ Records 상단 안내는 과거 기록과 대진표 기반 신규 기록의 범�
 
 현재 `ypl_data_v4`의 대진표 graph, 팀전 `series`, 연결 회차 정보를 읽어 Records 분석 계층에서 파생한다.
 
+---
+
+<!-- YPL_2026_08_31_FINAL_OPERATION_MODEL -->
+
+## 8단계 — 정규화 DB 및 migration 검증
+
+운영 `site_data / ypl_data_v4`를 조사해 정규화 모델과 DDL을 작성하고 별도 Test Supabase에서 legacy migration을 검증했다.
+
+Registration 도입 이전 회귀 기준:
+
+```text
+Players              64
+Seasons               6
+Events                57
+Entries              214
+EntryParticipants    254
+Results              204
+Matches               39
+RankingBaselines     160
+TeamSnapshots         13
+SnapshotMembers       78
+Submissions           13
+HallOfFame              6
+PlayerPartners          8
+TitleDefinitions       42
+TitleAwards            44
+```
+
+과거 기록은 없는 사실을 역추정하지 않고 확인 가능한 사실만 이전한다.
+
+관련 Git:
+
+```text
+6653125 fix: correct normalized schema constraints
+b33b1d4 fix: align normalized schema with legacy records
+b4eb8ed fix: preserve legacy records in normalized schema
+```
+
+---
+
+## 9단계 — Champions qualifier / final 모델
+
+- 선발전 / 본선을 별도 Event로 저장
+- Player identity만 공유
+- Entry / Submission / TeamSnapshot 독립
+- qualifier Match 저장
+- qualifier Result / RankingAward / HOF 없음
+- advancement type = ranking / qualifier / manual
+- 과거 자료가 없으면 qualifier를 역추정하지 않음
+
+관련 Git:
+
+```text
+6b89002 feat: model champions qualifier and final stages
+```
+
+---
+
+## 10단계 — 신청 / 제출 / 팀 편성 / 대진표 운영 구조 확정
+
+> 이 단계는 사용자-facing 구현이 아니라 최신 운영 구조의 설계 확정이다.
+
+### 신청과 실제 참가
+
+초기 잠정안의 `신청 = Entry(applied)`를 폐기했다.
+
+```text
+EventRegistration = 참가 신청
+Entry = 실제 대진표 참가 단위
+```
+
+### 파티 제출
+
+팀 편성/대진표 생성 전에도 제출할 수 있도록 Submission을 EventRegistration에 귀속한다.
+
+```text
+EventRegistration
+└─ RegistrationSubmission
+   └─ immutable TeamSnapshot
+```
+
+Snapshot은 단순 Pokémon 엔트리 목록이 아니라 다음 전체 배틀 세팅을 보존한다.
+
+```text
+Pokémon
+특성
+성격
+Stat Points 6종
+지닌물건
+기술 최대 4개
+```
+
+- 신청 직후 제출 가능
+- 결과 적용 전까지 재제출 가능
+- 결과 적용 시 final submission freeze
+- revision 전체 보존
+
+### 모노타입
+
+`assignedType`은 참가자가 Team Builder에서 직접 선택하는 로컬 상태다.
+
+- localStorage / validation 사용 가능
+- DB 저장 안 함
+- TeamSnapshot 저장 안 함
+- Records 표시 안 함
+
+### 대진표 참가 확정
+
+- 신청자 전원 기본 체크
+- 불참자만 체크 해제
+- 미제출자도 참가 가능
+- 대진표 생성 시 실제 Entry 생성
+- 별도 참가 확정/취소 화면 없음
+
+### 팀전 편성
+
+기존 1·2·3지망 신청 방식을 유지한다.
+
+자동 추천은:
+
+```text
+인원 균등
++ 1/2/3지망 만족도
+→ 추천 초안
+→ 재생성 가능
+→ 운영진 수정
+```
+
+실력 밸런스는 시스템이 계산하지 않는다.
+
+### 에이스전
+
+실제 정규 개인전 수를 기준으로 한다.
+
+- 홀수 → 동률 불가 → ace 없음
+- 짝수 → 동률 가능
+- 실제 동률일 때만 ace Match
+
+### HOF
+
+신규 Champions 본선 HOF는 우승자의 final TeamSnapshot에서 Pokémon ID를 읽어 sprite를 자동 렌더링한다.
+
+Pokémon 파티 이미지를 새로 업로드/base64 저장하지 않는다.
+
+### Champions 본선 Registration
+
+본선 진출 확정 시 실제 본선 Entry를 미리 만들지 않는다.
+
+```text
+ranking / qualifier / manual advancement 확정
+→ Final EventRegistration(source=advancement)
+→ 본선 파티 제출 가능
+→ 본선 대진표 생성 시 Entry 생성
+```
+
+따라서 ChampionshipAdvancement의 대상은 `final_entry_id`가 아니라 `final_registration_id`로 변경한다.
+
+### legacy Registration
+
+기존 13개 historical Submission을 잃지 않기 위해 최신 migration에서는 `registration_source = migration`인 기술적 EventRegistration anchor를 사용한다.
+
+이는 실제 과거 신청서가 존재했다는 뜻이 아니며 과거 신청자 수 통계에 사용하지 않는다.
+
+## 2026-09-01 normalized DB migration 검증
+
+### legacy migration generator
+
+`ypl_data_v4`를 최신 normalized schema로 이전하는 generator를 새로 작성했다.
+
+- EventRegistration(source=migration) 기술 anchor 생성
+- 기존 Entry / EntryParticipant / Result 관계 보존
+- historical TeamSnapshot / RegistrationSubmission 복원
+- 저장된 bracket에서 recoverable Match 복원
+- 과거 랭킹은 RankingAward를 역산하지 않고 RankingBaseline으로 보존
+- partner 그룹의 Pokémon을 Player로 오인하지 않고 PlayerPartner로 분리
+- Champions HOF를 실제 champion Result 및 final TeamSnapshot과 연결
+
+### Test DB 회귀검증
+
+YPL_DB_Test의 빈 `ypl_schema_validation` schema에 최신 DDL과 생성 migration SQL을 적용하여 검증했다.
+
+```text
+Players                   64
+Seasons                    6
+Events                    57
+EventRegistrations       254
+Entries                  214
+EntryParticipants        254
+Results                  204
+Matches                   39
+RankingBaselines         160
+RankingAwards              0
+TeamSnapshots             13
+TeamSnapshotMembers       78
+RegistrationSubmissions   13
+TitleDefinitions          42
+TitleAwards               44
+PlayerPartners             8
+HallOfFameEntries          6
+```
+
+추가 회귀검증:
+
+- 이동하 Player identity 1건 유지 및 클래식 누적 25점 확인
+- HOF 6건 모두 champion Result → Registration → final Submission → 6 Pokémon Snapshot 연결 확인
+- partner Pokémon과 Player 이름 충돌 0건 확인
+- 과거 battle_format은 추정하지 않아 전부 NULL 유지
+- 저장된 3개 bracket만 competition_format = double_elimination 적용
+- 팀명이 없는 historical 팀전은 임의 이름을 만들지 않고 Entry.display_name = NULL 유지
+- historical title award date가 없는 44건은 `awarded_at = NULL`로 보존
+- Production Supabase는 이번 검증 과정에서 변경하지 않음
+- 최신 normalized DDL은 기존 Test schema에 재실행해도 constraint/table/index 충돌 없이 정상 적용됨
+- 빈 Test schema에서도 최신 DDL → legacy migration 전체 재적용 및 회귀검증 통과
+
+### 랭킹 반영 정책
+
+YPL 시즌 3 이후 랭킹 반영 여부는 Event의 `competition_settings.rankingEnabled`를 기준으로 처리한다.
+
+- 마스터 리그: 반영
+- 팀전: 반영
+- 파이컵 라이트: 반영
+- 루키 리그: 미반영
+
+Result와 RankingAward는 분리하여, 랭킹 비반영 대회도 공식 성적 Result는 그대로 보존한다.
