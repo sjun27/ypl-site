@@ -1,4 +1,5 @@
 import React from "react";
+import { cancelApplicationEvent, saveApplicationEvent } from "../services/index.js";
 import {
   AnnEditor,
   ChampionEditor,
@@ -82,15 +83,84 @@ export default function AdminModalHost({ modal, data, setModal, save, setAdmin, 
       <AnnEditor
         item={modal.item}
         onClose={close}
-        onSave={(announcement) => {
+        onSave={async (announcement) => {
+          let nextAnnouncement = announcement;
+
+          if (announcement.form?.enabled && announcement.form?.eventDraft?.name?.trim()) {
+            try {
+              const event = await saveApplicationEvent({
+                eventId: announcement.form.eventId || null,
+                announcementId: announcement.id,
+                eventDraft: {
+                  ...announcement.form.eventDraft,
+                },
+              });
+
+              nextAnnouncement = {
+                ...announcement,
+                form: {
+                  ...announcement.form,
+                  eventId: event.id,
+                },
+              };
+            } catch (error) {
+              flash(`대회 연결 실패: ${error.message}`);
+              return;
+            }
+          }
+
           const announcements = modal.item
-            ? data.announcements.map((item) => item.id === announcement.id ? announcement : item)
-            : [announcement, ...data.announcements];
-          save({ ...data, announcements });
+            ? data.announcements.map((item) => item.id === nextAnnouncement.id ? nextAnnouncement : item)
+            : [nextAnnouncement, ...data.announcements];
+
+          const saved = await save({ ...data, announcements });
+
+          if (!saved) {
+            const wasExistingEvent = Boolean(modal.item?.form?.eventId);
+
+            if (!wasExistingEvent && nextAnnouncement.form?.eventId) {
+              try {
+                await cancelApplicationEvent(nextAnnouncement.form.eventId);
+              } catch (error) {
+                flash?.(`공지 저장 실패 후 신규 Event 정리에도 실패했습니다: ${error?.message || "알 수 없는 오류"}`);
+                return;
+              }
+            }
+
+            flash?.("공지 저장에 실패했습니다. Event 상태를 확인해 주세요.");
+            return;
+          }
+
           close();
         }}
-        onDelete={modal.item ? () => {
-          save({ ...data, announcements: data.announcements.filter((item) => item.id !== modal.item.id) });
+        onDelete={modal.item ? async () => {
+          const eventId = modal.item.form?.eventId || null;
+
+          const nextData = {
+            ...data,
+            announcements: data.announcements.filter((item) => item.id !== modal.item.id),
+          };
+
+          const saved = await save(nextData);
+          if (!saved) {
+            flash?.("공지 삭제 저장에 실패했습니다.");
+            return;
+          }
+
+          if (eventId) {
+            try {
+              await cancelApplicationEvent(eventId);
+            } catch (error) {
+              const restored = await save(data);
+              flash?.(
+                restored
+                  ? `연결 대회 정리에 실패해 공지 삭제를 되돌렸습니다: ${error?.message || "알 수 없는 오류"}`
+                  : `연결 대회 정리와 공지 복구에 모두 실패했습니다: ${error?.message || "알 수 없는 오류"}`
+              );
+              return;
+            }
+          }
+
           close();
         } : null}
       />

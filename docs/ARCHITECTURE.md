@@ -715,6 +715,17 @@ Player
 - display_name은 동명이인 가능성을 고려해 전역 UNIQUE를 강제하지 않는다.
 - 필요 시 향후 PlayerAlias를 추가할 수 있다.
 
+### 신규 신청 시 Player 식별
+
+신규 `application`에서 참가자가 입력한 이름은 앞뒤 공백을 제거한 뒤 `Player.display_name`과 exact match한다.
+
+- 일치하는 Player가 0명 → `EventRegistration.player_id = NULL`로 신청 저장
+- 일치하는 Player가 1명 → 기존 Player 재사용
+- 동일 `display_name`의 Player가 2명 이상 → `EventRegistration.player_id = NULL`로 신청 저장
+- fuzzy match로 유사 이름의 다른 Player를 자동 선택하지 않는다.
+
+신청 단계에서는 신규 Player를 만들지 않는다. 실제 참가자가 확정된 기록 반영 단계에서만 NULL identity를 다시 exact match하고, 0명이면 신규 Player 생성, 1명이면 재사용, 2명 이상이면 자동 반영을 중단한다.
+
 ---
 
 ## 4. Season
@@ -751,11 +762,15 @@ number = 3
 
 정확한 날짜를 모르는 과거 시즌은 추측하지 않고 nullable로 둔다.
 
+공식 신규 Event는 정확히 하나인 `status = current` 시즌에 자동 연결한다. current 시즌이 0개이거나 2개 이상이면 임의 선택하지 않고 생성 오류로 처리한다. 이미 `season_id`가 있는 Event를 공지에서 수정할 때는 기존 연결을 보존한다.
+
 ---
 
 ## 5. Event
 
 Event는 특정 시즌에 실제로 한 번 열린 대회 하나를 뜻한다.
+
+신규 공식 Event의 `season_id`는 필수다. nullable은 시즌을 확정할 수 없는 과거 migration/수동 보정 호환을 위해서만 남긴다.
 
 ```text
 Event
@@ -841,7 +856,7 @@ record_completeness
 EventRegistration
 - id
 - event_id
-- player_id
+- player_id nullable
 - registration_name
 - registration_data
 - registration_source
@@ -1539,6 +1554,20 @@ competition_settings
 
 Bracket participant identity는 복사된 이름/party가 아니라 Entry ID를 기준으로 연결한다.
 
+현재 legacy Bracket 기록 반영의 안전 순서는 다음과 같다.
+
+```text
+1. 실제 참가자 전원의 identity를 사전 검증
+2. 필요한 Player 생성 및 EventRegistration 연결/manual 생성
+3. legacy 기록 결과 준비
+4. public.site_data / ypl_data_v4 저장
+5. 저장 성공 후에만 Event completed + record_applied_at 기록
+```
+
+브라우저 클라이언트의 normalized write와 `public.site_data` 저장은 하나의 PostgreSQL transaction으로 묶이지 않는다. 따라서 예측 가능한 동명이인/중복 충돌은 첫 write 전에 검사하고, legacy 저장 실패 시 Event를 완료 처리하지 않는다. 마지막 Event 완료 처리만 실패한 경우 같은 미리보기의 재시도는 동일 round ID를 다시 저장하므로 중복 회차를 만들지 않는다.
+
+Event 연결 팀전은 멤버별 Player/EventRegistration 및 EntryParticipant 확정 설계가 구현될 때까지 normalized 기록 반영을 차단한다. 수동 생성 팀전의 기존 legacy-only 경로는 유지한다.
+
 
 ## 18. 다음 단계
 
@@ -1553,3 +1582,117 @@ Bracket participant identity는 복사된 이름/party가 아니라 Entry ID를 
 
 운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
 <!-- YPL_NORMALIZED_MODEL_V1_END -->
+Runtime 전환 상태 — 2026-09-03
+
+현재 애플리케이션은 legacy와 normalized DB가 동시에 사용되는 과도기 구조다.
+
+현재 normalized runtime 사용 범위
+Player
+Season
+Event
+EventRegistration
+
+신규 신청은 EventRegistration에 저장하며 신청 단계에서는 신규 Player를 생성하지 않는다.
+
+참가자 이름은 trim 후 Player.display_name exact match만 수행한다.
+
+0명   → player_id NULL
+1명   → 기존 Player 연결
+2명+  → player_id NULL
+
+동명이인이나 유사 이름을 fuzzy match로 자동 확정하지 않는다.
+
+실제 참가자가 확정되는 기록 반영 단계에서 NULL identity를 다시 검사한다.
+
+0명   → 신규 Player 생성
+1명   → 기존 Player 재사용
+2명+  → 기록 반영 중단
+현재 legacy runtime 사용 범위
+
+다음 운영 데이터의 source of truth는 아직 public.site_data / ypl_data_v4다.
+
+Bracket 결과
+회차 기록
+Match/입상 기록
+누적 랭킹
+시즌 성적
+Records 표시 데이터
+
+따라서 현재 기록 반영 경로는 다음 hybrid 구조다.
+
+Event / EventRegistration / Player
+          normalized
+              │
+              ▼
+        participant identity
+              │
+              ▼
+Bracket / Round / Ranking / Records
+             legacy
+
+이는 최종 구조가 아니라 단계적 migration을 위한 임시 연결 구조다.
+
+목표 runtime 흐름
+
+다음 순서로 legacy dependency를 제거한다.
+
+Application
+→ EventRegistration
+→ Entry
+→ EntryParticipant
+→ Bracket
+→ Match
+→ Result
+→ RankingAward
+→ Records
+
+개인전 end-to-end 전환을 먼저 완료하고 이후 동일한 구조로 팀전을 연결한다.
+
+Team Builder / RegistrationSubmission / TeamSnapshot 연결은 신청→기록 흐름이 안정된 뒤 추가한다.
+
+기록 반영 write ordering
+
+현재 hybrid 구조에서는 browser의 normalized write와 public.site_data 저장을 하나의 PostgreSQL transaction으로 묶을 수 없다.
+
+따라서 다음 순서를 사용한다.
+
+1. 참가자 identity 사전 검증
+2. 필요한 Player / Registration identity 변경
+3. legacy 기록 결과 생성
+4. ypl_data_v4 저장
+5. 저장 성공 후 Event completed / record_applied_at 기록
+
+legacy 저장이 실패하면 해당 반영 과정에서 발생한 identity 변경도 가능한 범위에서 즉시 원복한다.
+
+원복 대상:
+
+이번 반영에서 생성한 manual EventRegistration
+이번 반영에서 새로 연결한 EventRegistration.player_id
+이번 반영에서 생성한 Player
+
+기록 반영 취소에서는 legacy 기록을 원복한 뒤 Event를 다시 running으로 열고 record_applied_at을 NULL로 되돌린다.
+
+Event 수정 / 삭제 일관성
+
+Event가 연결된 신청 공지를 수정할 때 기존 Event의 다음 상태를 보존한다.
+
+season_id
+기존 registration_settings
+기존 Event status — 명시적으로 변경하지 않는 한 유지
+
+공지 삭제는 연결 Event를 물리 삭제하지 않고 cancelled로 전환한다.
+
+팀전
+
+현재 normalized team participant identity는 구현되지 않았다.
+
+따라서 Event와 연결된 팀전 Bracket 생성 및 normalized 기록 반영은 명시적으로 차단한다.
+
+기존 legacy-only 팀전 경로는 유지한다.
+
+전환 원칙
+schema에 테이블이 존재하는 것과 runtime에서 사용하는 것은 구분한다.
+migration 검증 완료와 Production 적용 완료를 구분한다.
+Production ypl_data_v4는 normalized end-to-end 검증 전까지 유지한다.
+
+Production Supabase는 별도 migration 단계 전까지 변경하지 않는다.

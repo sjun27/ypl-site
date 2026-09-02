@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { loadSiteData, saveSiteData } from "./services/index.js";
+import { loadSiteData, saveSiteData, submitEventApplication } from "./services/index.js";
 import { AboutPage, BoardPage, BracketsPage, ChampionsPage, HomePage, NewsPage, RecordsPage, TeamBuilderPage, TitlesPage } from "./pages/index.js";
 import { SiteHeader } from "./components/index.js";
 import { AdminModeBar, AdminModalHost } from "./admin/index.js";
@@ -1542,12 +1542,35 @@ export default function App() {
   useEffect(()=>{let last=null,raf=0;const f=()=>{if(raf)return;raf=requestAnimationFrame(()=>{raf=0;const v=window.scrollY>20;if(v!==last){last=v;setScrolled(v);}});};f();window.addEventListener("scroll",f,{passive:true});return()=>{window.removeEventListener("scroll",f);if(raf)cancelAnimationFrame(raf);};},[]);
   const go=useCallback((v)=>{setView(v);setMenuOpen(false);window.scrollTo({top:0,behavior:"smooth"});},[]);
   const flash=useCallback((m)=>{setToast(m);setTimeout(()=>setToast(""),1800);},[]);
-  const save=useCallback(async(next)=>{setData(next);const ok=await saveSiteData(next);flash(ok?"저장됨 ✓":"메모리에만 반영됨");},[flash]);
-  const submitForm=useCallback(async(annId,answers)=>{
+  const save=useCallback(async(next)=>{setData(next);const ok=await saveSiteData(next);flash(ok?"저장됨 ✓":"메모리에만 반영됨");return ok;},[flash]);
+  const submitForm=useCallback(async(annId,payload)=>{
+    const announcement=(data.announcements||[]).find(a=>a.id===annId);
+    const form=announcement?.form||{};
+    const answers=payload?.answers&&typeof payload.answers==="object"?payload.answers:payload;
+
+    if(form.eventId){
+      try{
+        await submitEventApplication({
+          eventId:form.eventId,
+          registrationName:payload?.registrationName||"",
+          registrationData:{
+            answers:answers||{},
+            announcementId:annId,
+          },
+        });
+        flash("신청 완료 ✓");
+        return true;
+      }catch(error){
+        flash(error?.message||"신청 저장에 실패했습니다.");
+        return false;
+      }
+    }
+
+    // 기존 legacy 신청서는 기존 저장 방식을 유지한다.
     // 동시 제출로 인한 응답 유실 방지:
     // 최신 데이터를 다시 읽어 내 응답을 덧붙여 저장한 뒤, 저장 결과를 재확인.
     // 다른 사람의 저장에 덮여 내 응답이 사라졌으면 자동으로 다시 시도한다.
-    const resp={id:uid(),createdAt:new Date().toISOString(),answers};
+    const resp={id:uid(),createdAt:new Date().toISOString(),answers:answers||{}};
     const attach=(base)=>{
       const announcements=(base.announcements||[]).map(a=>{
         if(a.id!==annId) return a;
@@ -1601,7 +1624,7 @@ export default function App() {
         {view==="news"&&<NewsPage data={data} admin={admin} setModal={setModal} save={save} submitForm={submitForm} refresh={refresh}/>}
         {view==="board"&&<BoardPage data={data} admin={admin} save={save} flash={flash}/>}
         {view==="records"&&<RecordsPage data={data} admin={admin} setModal={setModal} save={save}/>}
-        {view==="bracket"&&<BracketsPage data={data} admin={admin} save={save} flash={flash}/>}
+        {view==="bracket"&&<BracketsPage data={data} admin={admin} save={save} flash={flash} refresh={refresh}/>}
         {view==="builder"&&<TeamBuilderPage/>}
         {view==="titles"&&<TitlesPage data={data} admin={admin} setModal={setModal}/>}
         {view==="champions"&&<ChampionsPage data={data} admin={admin} setModal={setModal} normTeam={normTeam}/>}

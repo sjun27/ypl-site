@@ -1207,3 +1207,151 @@ YPL 시즌 3 이후 랭킹 반영 여부는 Event의 `competition_settings.ranki
 - 루키 리그: 미반영
 
 Result와 RankingAward는 분리하여, 랭킹 비반영 대회도 공식 성적 Result는 그대로 보존한다.
+
+## 2026-09-03 신청 → Event → 대진표 → 기록 연결 1차
+
+`feature/records-system`에서 신규 신청부터 기록 반영까지 normalized DB를 실제 legacy 운영 흐름에 연결하는 1차 작업을 진행했다.
+
+Production Supabase는 변경하지 않았으며 모든 normalized write/E2E는 `YPL_DB_Test`에서 수행했다.
+
+### 신청 → Event
+
+- 신청 공지에서 normalized Event 생성·연결
+- 신규 공식 Event는 정확히 하나인 current Season에 자동 연결
+- 기존 Event 수정 시 기존 `season_id`, `registration_settings`, status 보존
+- Event에 대회 종류 / division / battle format / competition format 저장
+- Regulation / Cup Rule 설정 연결
+- 공지 삭제 시 Event를 물리 삭제하지 않고 `cancelled` 처리
+- current Season을 하나만 허용하는 partial unique index 추가
+
+### EventRegistration / Player identity
+
+신청 완료 시 EventRegistration을 생성한다.
+
+```text
+display_name exact match 0명   → player_id NULL
+display_name exact match 1명   → 기존 Player 연결
+display_name exact match 2명+  → player_id NULL
+```
+
+신청 단계에서는 신규 Player를 만들지 않는다.
+
+- 동일 Event의 동일 `registration_name` 중복 신청 차단
+- 관리자 응답 보기 / CSV를 EventRegistration 기반으로 연결
+- 기록 반영 단계에서 NULL identity를 다시 exact match
+- 0명이면 신규 Player 생성
+- 1명이면 기존 Player 재사용
+- 2명 이상이면 자동 반영 중단
+- Registration이 없는 실제 참가자는 manual EventRegistration 생성
+
+### Event → 대진표
+
+개인전 Event를 기존 대진표 생성 흐름과 연결했다.
+
+```text
+Event 선택
+→ EventRegistration 조회
+→ 신청자 기본 참가
+→ 불참자 제외
+→ 수동 참가자 추가
+→ Bracket 생성
+```
+
+Bracket에는 Event ID와 참가자의 Registration / Player identity를 보존한다.
+
+normalized 팀전 participant/Entry 구조는 아직 구현되지 않아 Event 연결 팀전은 차단하며, 기존 legacy-only 팀전은 유지한다.
+
+### 기록 반영
+
+Event가 연결된 개인전 기록 반영 시 Event / Season을 source of truth로 사용한다.
+
+```text
+Master → 누적 랭킹 / 시즌 성적 반영
+Light  → 누적 랭킹 / 시즌 성적 반영
+Rookie → 누적 랭킹 / 시즌 성적 제외
+```
+
+기록 반영 성공 후:
+
+```text
+status = completed
+record_applied_at = 반영 시각
+```
+
+완료된 Event는 대진표 Event picker에서 제외된다.
+
+### 기록 반영 취소 / rollback
+
+각 participant의 이번 반영 identity 변경을 `recordMeta.identityChanges`에 저장한다.
+
+- `playerWasCreated`
+- `registrationWasCreated`
+- `registrationPlayerWasLinked`
+
+반영 취소 시:
+
+- legacy 회차 / 랭킹 / 시즌 성적 원복
+- Bracket active 복구
+- Event `running` 복구
+- `record_applied_at = NULL`
+- 신규 manual Registration 삭제
+- 이번 반영에서 연결한 `player_id` 해제
+- 이번 반영에서 생성한 Player 정리
+- legacy participant에 임시 저장된 stale playerId 제거
+
+legacy 저장 실패 시 Event를 완료 처리하지 않으며, 먼저 발생한 Player / Registration identity 변경도 즉시 rollback한다.
+
+### Test E2E
+
+개인전 기준 다음 흐름을 Test 환경에서 검증했다.
+
+```text
+Application
+→ EventRegistration
+→ Bracket
+→ Player identity resolution
+→ legacy record apply
+→ Event completed
+→ record revert
+→ identity cleanup
+→ Event running
+→ reapply
+```
+
+Master / Rookie / Light 정책을 각각 확인했다.
+
+테스트 fixture는 검증 후 Test DB에서 정리했다.
+
+### 현재 전환 경계
+
+현재 normalized runtime에서 직접 사용하는 주요 엔티티:
+
+```text
+Player
+Season
+Event
+EventRegistration
+```
+
+다음 기록 데이터는 아직 legacy `ypl_data_v4`가 source of truth다.
+
+- Match
+- Result
+- RankingAward
+- 시즌 성적
+- Records
+
+다음 단계는:
+
+```text
+EventRegistration
+→ Entry / EntryParticipant
+→ Match
+→ Result
+→ RankingAward
+→ Records
+```
+
+순으로 신청부터 기록까지 normalized end-to-end 흐름을 완성하는 것이다.
+
+Team Builder → TeamSnapshot → RegistrationSubmission 연결은 그 이후 진행한다.

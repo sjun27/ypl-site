@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
+import { completeApplicationEvent, getEventRecordContext, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, resolveEventParticipantsForRecord, revertEventRecordApplication } from "../services/index.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -325,15 +326,100 @@ function BracketWizard({ onClose, onCreate }){
   const [adv,setAdv]=useState("2");
   const [names,setNames]=useState(Array(8).fill(""));
   const [teams,setTeams]=useState(Array(8).fill(null).map(()=>({name:"",members:""})));
+  const [events,setEvents]=useState([]);
+  const [eventId,setEventId]=useState("");
+  const [manualMode,setManualMode]=useState(false);
+  const [eventRegs,setEventRegs]=useState([]);
+  const [eventBusy,setEventBusy]=useState(false);
+  const [eventError,setEventError]=useState("");
+  const [selectedRegistrationIds,setSelectedRegistrationIds]=useState([]);
+  const [addedParticipants,setAddedParticipants]=useState([]);
+
+  useEffect(()=>{
+    let cancelled=false;
+    listSubmissionEvents()
+      .then(rows=>{ if(!cancelled) setEvents(rows||[]); })
+      .catch(error=>{ if(!cancelled) setEventError(error?.message||"대회 목록을 불러오지 못했습니다."); });
+    return ()=>{ cancelled=true; };
+  },[]);
+  const selectLinkedEvent=async(id)=>{
+    setEventId(id);
+    setEventError("");
+    setEventRegs([]);
+    if(!id) return;
+
+    const event=events.find(x=>x.id===id);
+    if(!event) return;
+
+    setName(event.name||"");
+    setMode(event.is_team_event?"team":"single");
+
+    if(event.competition_format==="round_robin"){
+      setFormat("group");
+      setDbl(false);
+    }else{
+      setFormat("elim");
+      setDbl(event.competition_format==="double_elimination");
+    }
+
+    setEventBusy(true);
+    try{
+      const regs=await listEventRegistrations(id);
+      setEventRegs(regs);
+      setSelectedRegistrationIds((regs||[]).map(r=>r.id));
+      setAddedParticipants([]);
+
+      if(!event.is_team_event){
+        const participantNames=(regs||[]).map(r=>r.registration_name||"").filter(Boolean);
+        const n=Math.max(2,participantNames.length);
+        setCountStr(String(n));
+        setNames(Array.from({length:n},(_,i)=>participantNames[i]||""));
+      }
+    }catch(error){
+      setEventError(error?.message||"신청자 목록을 불러오지 못했습니다.");
+    }finally{
+      setEventBusy(false);
+    }
+  };
+
   const setCnt=(v)=>{ const s=String(v).replace(/[^0-9]/g,"").slice(0,2); setCountStr(s); const n=parseInt(s)||0;
     if(n>=1&&n<=64){ setNames(p=>{const a=Array(n).fill("");for(let i=0;i<n;i++)a[i]=p[i]||"";return a;});
       setTeams(p=>{const a=[];for(let i=0;i<n;i++)a.push(p[i]||{name:"",members:""});return a;}); } };
   const gN=Math.max(2,parseInt(groups)||2), aN=Math.max(1,parseInt(adv)||1);
   const buildParticipants=()=>{
-    if(mode==="team") return teams.map(t=>({id:uid(),name:(t.name||"").trim(),members:(t.members||"").split(/[,\n]/).map(s=>s.trim()).filter(Boolean)})).filter(t=>t.name);
-    return names.map(n=>({id:uid(),name:(n||"").trim()})).filter(p=>p.name);
+    if(mode==="team") return teams.map(t=>({
+      id:uid(),
+      name:(t.name||"").trim(),
+      members:(t.members||"").split(/[,\n]/).map(s=>s.trim()).filter(Boolean)
+    })).filter(t=>t.name);
+
+    if(eventId){
+      const registered=eventRegs
+        .filter(r=>selectedRegistrationIds.includes(r.id))
+        .map(r=>({
+          id:uid(),
+          name:(r.registration_name||"").trim(),
+          registrationId:r.id,
+          playerId:r.player_id||null
+        }))
+        .filter(p=>p.name);
+
+      const added=addedParticipants
+        .map(n=>({id:uid(),name:(n||"").trim()}))
+        .filter(p=>p.name);
+
+      return [...registered,...added];
+    }
+
+    return names
+      .map(n=>({id:uid(),name:(n||"").trim()}))
+      .filter(p=>p.name);
   };
   const go=()=>{
+    if(eventId&&mode==="team"){
+      alert("연결된 팀전 Event의 참가자 identity 연동은 아직 지원하지 않습니다. 팀전 normalized 연동 구현 후 사용할 수 있습니다.");
+      return;
+    }
     const parts=buildParticipants();
     if(parts.length<2){ alert("참가자(팀)를 2개 이상 입력해주세요."); return; }
     if(format==="group"&&parts.length<gN*2){ alert("그룹 수에 비해 참가자가 너무 적습니다."); return; }
@@ -344,40 +430,200 @@ function BracketWizard({ onClose, onCreate }){
     else graph=useDbl?buildDouble(parts.map(p=>p.id)):buildSingle(parts.map(p=>p.id));
     onCreate({ id:uid(), name:name.trim()||"새 대회", createdAt:new Date().toISOString().slice(0,10),
       mode, double:useDbl, format, groupCfg:format==="group"?{groups:gN,adv:aN}:null,
-      participants:parts, graph, groups:grp, knockout:null, status:"active", applied:null });
+      eventId:eventId||null, participants:parts, graph, groups:grp, knockout:null, status:"active", applied:null });
   };
   return (<Modal title="새 대회 만들기" onClose={onClose}>
     <div className="swap" key={step}>
     {step===1&&<>
-      <div className="field"><label>대회명</label><input value={name} onChange={e=>setName(e.target.value)} placeholder="예: 37회 파이컵"/></div>
-      <div className="field"><label>경기 방식</label>
-        <div className="bk-seg"><button type="button" className={mode==="single"?"on":""} onClick={()=>setMode("single")}>개인전</button><button type="button" className={mode==="team"?"on":""} onClick={()=>setMode("team")}>팀전</button></div></div>
-      <div className="field"><label>대진 형식</label>
-        <div className="bk-seg"><button type="button" className={format==="elim"?"on":""} onClick={()=>setFormat("elim")}>토너먼트</button><button type="button" className={format==="group"?"on":""} onClick={()=>setFormat("group")}>조별예선 + 본선</button></div></div>
-      {format==="elim"&&<label className="bk-check"><input type="checkbox" checked={dbl} onChange={e=>setDbl(e.target.checked)}/><span>더블 엘리미네이션 <i>(패자부활전)</i></span></label>}
-      {format==="group"&&<div className="bk-grow2">
-        <div className="field"><label>그룹 수</label><input type="text" inputMode="numeric" value={groups} onChange={e=>setGroups(e.target.value.replace(/[^0-9]/g,"").slice(0,2))} placeholder="예: 4"/></div>
-        <div className="field"><label>그룹별 본선 진출</label><input type="text" inputMode="numeric" value={adv} onChange={e=>setAdv(e.target.value.replace(/[^0-9]/g,"").slice(0,2))} placeholder="예: 2"/></div></div>}
-      <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={()=>setStep(2)}>다음 →</button></div>
-    </>}
-    {step===2&&<>
-      <div className="field"><label>{mode==="team"?"팀 수":"참가자 수"}</label>
-        <div className="bk-count"><button type="button" onClick={()=>setCnt(Math.max(2,count-1))}>−</button><input type="text" inputMode="numeric" value={countStr} onChange={e=>setCnt(e.target.value)}/><button type="button" onClick={()=>setCnt(Math.min(64,count+1))}>＋</button></div>
-        <div className="bk-hint">{(()=>{ if(format==="group") return `${gN}개 그룹, 그룹당 약 ${Math.ceil(Math.max(count,1)/gN)}명, 상위 ${aN}명 본선`; const sz=nextPow2(Math.max(count,2)); return `${sz}강 대진, 부전승 ${sz-count}개 자동 추가`; })()}</div>
+      <div className="field">
+        <label>신청 대회 선택</label>
+        <Dropdown
+          value={manualMode?"__manual__":eventId}
+          onChange={v=>{
+            if(v==="__manual__"){
+              setManualMode(true);
+              setEventId("");
+              setEventRegs([]);
+              setEventError("");
+              return;
+            }
+            setManualMode(false);
+            selectLinkedEvent(v);
+          }}
+          placeholder={eventBusy?"불러오는 중...":"대회를 선택하세요"}
+          options={[
+            ...events.map(ev=>({value:ev.id,label:ev.name})),
+            {value:"__manual__",label:"연결하지 않고 새로 만들기"}
+          ]}
+        />
+        {eventError&&<div className="bk-hint" style={{color:"var(--loss)"}}>{eventError}</div>}
+        {eventId&&!eventBusy&&
+          <div className="bk-hint">
+            신청자 {eventRegs.length}명 · 공지에 설정된 대회 정보와 참가자 명단을 사용합니다.
+          </div>
+        }
       </div>
-      <div className="bk-fill">
-        {mode==="team"
-          ? teams.map((t,i)=>(<div className="bk-team-card" key={i} style={{animationDelay:(i*28)+"ms"}}>
-              <span className="bk-pin-no gold">{i+1}</span>
-              <input className="bk-tc-name" value={t.name} onChange={e=>setTeams(teams.map((x,j)=>j===i?{...x,name:e.target.value}:x))} placeholder={`팀 ${i+1} 이름`}/>
-              <input className="bk-tc-mem" value={t.members} onChange={e=>setTeams(teams.map((x,j)=>j===i?{...x,members:e.target.value}:x))} placeholder="팀원 (쉼표로 구분)"/>
-            </div>))
-          : names.map((n,i)=>(<div className="bk-pin" key={i} style={{animationDelay:(i*22)+"ms"}}>
-              <span className="bk-pin-no">{i+1}</span>
-              <input value={n} onChange={e=>setNames(names.map((x,j)=>j===i?e.target.value:x))} placeholder={`참가자 ${i+1}`}/>
-            </div>))}
+
+      {manualMode&&<>
+        <div className="field">
+          <label>대회명</label>
+          <input value={name} onChange={e=>setName(e.target.value)} placeholder="예: 37회 파이컵"/>
+        </div>
+
+        <div className="field">
+          <label>경기 방식</label>
+          <div className="bk-seg">
+            <button type="button" className={mode==="single"?"on":""} onClick={()=>setMode("single")}>개인전</button>
+            <button type="button" className={mode==="team"?"on":""} onClick={()=>setMode("team")}>팀전</button>
+          </div>
+        </div>
+
+        <div className="field">
+          <label>대진 형식</label>
+          <div className="bk-seg">
+            <button type="button" className={format==="elim"?"on":""} onClick={()=>setFormat("elim")}>토너먼트</button>
+            <button type="button" className={format==="group"?"on":""} onClick={()=>setFormat("group")}>조별예선 + 본선</button>
+          </div>
+        </div>
+
+        {format==="elim"&&
+          <label className="bk-check">
+            <input type="checkbox" checked={dbl} onChange={e=>setDbl(e.target.checked)}/>
+            <span>더블 엘리미네이션 <i>(패자부활전)</i></span>
+          </label>
+        }
+
+        {format==="group"&&
+          <div className="bk-grow2">
+            <div className="field">
+              <label>그룹 수</label>
+              <input type="text" inputMode="numeric" value={groups} onChange={e=>setGroups(e.target.value.replace(/[^0-9]/g,"").slice(0,2))} placeholder="예: 4"/>
+            </div>
+            <div className="field">
+              <label>그룹별 본선 진출</label>
+              <input type="text" inputMode="numeric" value={adv} onChange={e=>setAdv(e.target.value.replace(/[^0-9]/g,"").slice(0,2))} placeholder="예: 2"/>
+            </div>
+          </div>
+        }
+      </>}
+
+      <div className="modal-actions">
+        <button className="btn btn-ghost" onClick={onClose}>취소</button>
+        <button
+          className="btn btn-primary"
+          onClick={()=>setStep(2)}
+          disabled={!manualMode&&!eventId}
+        >
+          다음 →
+        </button>
       </div>
-      <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setStep(1)}>← 이전</button><button className="btn btn-primary" onClick={go}>대진표 생성 🎲</button></div>
+    </>}    {step===2&&<>
+      {eventId&&mode!=="team" ? <>
+        <div className="field">
+          <label>참가자 확정</label>
+          <div className="bk-hint">
+            신청자 중 실제 참가자를 선택합니다. 참가 확정 {selectedRegistrationIds.length + addedParticipants.filter(n=>n.trim()).length}명 / 신청 {eventRegs.length}명
+          </div>
+        </div>
+
+        <div className="bk-fill">
+          {eventRegs.map((reg,i)=>{
+            const checked=selectedRegistrationIds.includes(reg.id);
+            return (
+              <label className="bk-pin" key={reg.id} style={{animationDelay:(i*22)+"ms",cursor:"pointer"}}>
+                <span className="bk-pin-no">{i+1}</span>
+                <input
+                  type="checkbox"
+                  checked={checked}
+                  onChange={()=>{
+                    setSelectedRegistrationIds(prev=>
+                      checked ? prev.filter(id=>id!==reg.id) : [...prev,reg.id]
+                    );
+                  }}
+                  style={{width:"auto"}}
+                />
+                <span style={{flex:1,fontWeight:700}}>{reg.registration_name}</span>
+                {!checked&&<span className="bk-hint" style={{margin:0}}>불참</span>}
+              </label>
+            );
+          })}
+
+          {addedParticipants.map((name,i)=>(
+            <div className="bk-pin" key={`added-${i}`}>
+              <span className="bk-pin-no gold">+</span>
+              <input
+                value={name}
+                onChange={e=>setAddedParticipants(prev=>prev.map((x,j)=>j===i?e.target.value:x))}
+                placeholder="추가 참가자 이름"
+              />
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm"
+                onClick={()=>setAddedParticipants(prev=>prev.filter((_,j)=>j!==i))}
+              >
+                삭제
+              </button>
+            </div>
+          ))}
+        </div>
+
+        <div className="row-actions" style={{justifyContent:"space-between",marginTop:10}}>
+          <div>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={()=>setSelectedRegistrationIds(eventRegs.map(r=>r.id))}
+            >
+              전체 선택
+            </button>
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={()=>setSelectedRegistrationIds([])}
+            >
+              전체 해제
+            </button>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={()=>setAddedParticipants(prev=>[...prev,""])}
+          >
+            + 참가자 추가
+          </button>
+        </div>
+      </> : <>
+        <div className="field"><label>{mode==="team"?"팀 수":"참가자 수"}</label>
+          <div className="bk-count">
+            <button type="button" onClick={()=>setCnt(Math.max(2,count-1))}>−</button>
+            <input type="text" inputMode="numeric" value={countStr} onChange={e=>setCnt(e.target.value)}/>
+            <button type="button" onClick={()=>setCnt(Math.min(64,count+1))}>＋</button>
+          </div>
+          <div className="bk-hint">{(()=>{
+            if(format==="group") return `${gN}개 그룹, 그룹당 약 ${Math.ceil(Math.max(count,1)/gN)}명, 상위 ${aN}명 본선`;
+            const sz=nextPow2(Math.max(count,2));
+            return `${sz}강 대진, 부전승 ${sz-count}개 자동 추가`;
+          })()}</div>
+        </div>
+
+        <div className="bk-fill">
+          {mode==="team"
+            ? teams.map((t,i)=>(<div className="bk-team-card" key={i} style={{animationDelay:(i*28)+"ms"}}>
+                <span className="bk-pin-no gold">{i+1}</span>
+                <input className="bk-tc-name" value={t.name} onChange={e=>setTeams(teams.map((x,j)=>j===i?{...x,name:e.target.value}:x))} placeholder={`팀 ${i+1} 이름`}/>
+                <input className="bk-tc-mem" value={t.members} onChange={e=>setTeams(teams.map((x,j)=>j===i?{...x,members:e.target.value}:x))} placeholder="팀원 (쉼표로 구분)"/>
+              </div>))
+            : names.map((n,i)=>(<div className="bk-pin" key={i} style={{animationDelay:(i*22)+"ms"}}>
+                <span className="bk-pin-no">{i+1}</span>
+                <input value={n} onChange={e=>setNames(names.map((x,j)=>j===i?e.target.value:x))} placeholder={`참가자 ${i+1}`}/>
+              </div>))}
+        </div>
+      </>}
+
+      <div className="modal-actions">
+        <button className="btn btn-ghost" onClick={()=>setStep(1)}>← 이전</button>
+        <button className="btn btn-primary" onClick={go}>대진표 생성 🎲</button>
+      </div>
     </>}
     </div>
   </Modal>);
@@ -530,12 +776,35 @@ function BracketBoard({ b, data, admin, save, flash, onApply }){
     flash("본선 대진 생성 ✓");
   };
   const res = b.format==="group" ? (b.knockout?elimResult(b.knockout):null) : elimResult(b.graph);
-  const undoApplied=()=>{
+  const undoApplied=async()=>{
     if(!b.applied)return;
-    if(!confirm("이 대진표의 기록 반영을 취소할까요? 회차·랭킹·시즌 성적이 함께 원복됩니다."))return;
+    if(!confirm("이 대진표의 기록 반영을 취소할까요? 회차·랭킹·시즌 성적과 연결된 Event 기록 상태가 함께 원복됩니다."))return;
+
     const result=revertBracketRecord(data,b.id);
-    if(!result.changed){alert(result.reason||"자동 원복할 수 없는 기록입니다.");return;}
-    save(result.data); flash("기록 반영 취소 ✓");
+    if(!result.changed){
+      alert(result.reason||"자동 원복할 수 없는 기록입니다.");
+      return;
+    }
+
+    const saved=await save(result.data);
+    if(!saved){
+      flash("legacy 기록 원복 저장에 실패했습니다.");
+      return;
+    }
+
+    if(b.eventId){
+      try{
+        await revertEventRecordApplication(
+          b.eventId,
+          b.applied?.recordMeta?.identityChanges||[]
+        );
+      }catch(error){
+        flash(`legacy 기록은 원복됐지만 Event/Player 원복에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+        return;
+      }
+    }
+
+    flash("기록 반영 취소 ✓");
   };
   return (<div className="bk-board swap">
     {editAdmin&&<div className="bk-tools"><button className="btn btn-ghost btn-sm" onClick={()=>setParty(true)}>📋 파티 엔트리 기록</button></div>}
@@ -572,7 +841,7 @@ function BracketBoard({ b, data, admin, save, flash, onApply }){
 }
 
 /* ===== 기록 반영 모달 ===== */
-function BracketApply({ b, res, data, onClose, save, flash }){
+function BracketApply({ b, res, data, onClose, save, flash, refresh }){
   const partOf=(pid)=>(b.participants||[]).find(x=>x.id===pid);
   const nameOf=(pid)=>{ const p=partOf(pid); return p?p.name:pid; };
   const team=b.mode==="team";
@@ -588,6 +857,62 @@ function BracketApply({ b, res, data, onClose, save, flash }){
   const [rankKey,setRankKey]=useState((data.rankings||[])[0]?.key||"");
   const [ptWin,setPtWin]=useState("60"); const [ptRu,setPtRu]=useState("40"); const [ptSf,setPtSf]=useState("20");
   const [override,setOverride]=useState({});
+  const linked=Boolean(b.eventId);
+  const [linkedContext,setLinkedContext]=useState(null);
+  const [linkedContextError,setLinkedContextError]=useState("");
+  const [linkedContextBusy,setLinkedContextBusy]=useState(linked);
+  const [identityPreview,setIdentityPreview]=useState([]);
+  const [identityPreviewError,setIdentityPreviewError]=useState("");
+  const [identityPreviewBusy,setIdentityPreviewBusy]=useState(linked);
+  useEffect(()=>{
+    if(!b.eventId) return;
+    let cancelled=false;
+    setLinkedContextBusy(true);
+    setLinkedContextError("");
+    getEventRecordContext(b.eventId)
+      .then(context=>{
+        if(cancelled) return;
+        setLinkedContext(context);
+        setSeason(context.season.name);
+        setChamp(context.event.event_type==="champions");
+        const rankingEnabled=typeof context.event.competition_settings?.rankingEnabled==="boolean"
+          ? context.event.competition_settings.rankingEnabled
+          : context.event.is_team_event||context.event.division!=="rookie";
+        setBumpRank(rankingEnabled);
+        setBumpSeason(rankingEnabled&&context.event.event_type!=="champions");
+        const preferredKey=context.event.division==="rookie"
+          ? "rookie"
+          : context.event.event_type==="light"
+            ? "pylite"
+            : context.event.division==="master"||context.event.is_team_event
+              ? "master"
+              : "pycup";
+        if(tours.some(t=>t.key===preferredKey)) setTkey(preferredKey);
+      })
+      .catch(error=>{ if(!cancelled) setLinkedContextError(error?.message||"연결 대회의 시즌을 확인하지 못했습니다."); })
+      .finally(()=>{ if(!cancelled) setLinkedContextBusy(false); });
+    return ()=>{ cancelled=true; };
+  },[b.eventId]);
+  useEffect(()=>{
+    if(!b.eventId || team) return;
+    let cancelled=false;
+    setIdentityPreviewBusy(true);
+    setIdentityPreviewError("");
+
+    inspectEventParticipantIdentities(b.eventId,b.participants||[])
+      .then(rows=>{
+        if(!cancelled) setIdentityPreview(rows||[]);
+      })
+      .catch(error=>{
+        if(!cancelled) setIdentityPreviewError(error?.message||"참가자 Player 상태를 확인하지 못했습니다.");
+      })
+      .finally(()=>{
+        if(!cancelled) setIdentityPreviewBusy(false);
+      });
+
+    return ()=>{ cancelled=true; };
+  },[b.eventId,b.participants,team]);
+
   const pN=(s)=>{ const v=parseFloat(s); return isNaN(v)?0:v; };
   const ptWinN=pN(ptWin), ptRuN=pN(ptRu), ptSfN=pN(ptSf);
   const r1=(n)=>Math.round(n*10)/10;
@@ -595,7 +920,14 @@ function BracketApply({ b, res, data, onClose, save, flash }){
   const memListOf=(pid)=>partOf(pid)?.members||[];
   const curT=tours.find(x=>x.key===tkey);
   const [preview,setPreview]=useState(null);
-  const excluded=!!curT&&(["rookie","pylite"].includes(curT.key)||/루키|라이트/.test(curT.label||""));
+  const manualExcluded=!!curT&&(curT.key==="rookie"||/루키/.test(curT.label||""));
+  const linkedRankingEnabled=linkedContext
+    ? (typeof linkedContext.event.competition_settings?.rankingEnabled==="boolean"
+        ? linkedContext.event.competition_settings.rankingEnabled
+        : linkedContext.event.is_team_event||linkedContext.event.division!=="rookie")
+    : null;
+  const excluded=linked ? linkedRankingEnabled===false : manualExcluded;
+  const recordSeason=linked ? (linkedContext?.season?.name||"") : season;
   const autoNext=String((curT?.rounds?.reduce((mx,r)=>Math.max(mx,parseInt(r.round)||0),0)||0)+1);
   const placements=[]; if(res.champ)placements.push({pid:res.champ,pts:ptWinN,label:"우승"});
   if(res.ru)placements.push({pid:res.ru,pts:ptRuN,label:"준우승"});
@@ -616,84 +948,425 @@ function BracketApply({ b, res, data, onClose, save, flash }){
     const champName=nameOf(res.champ), ruName=res.ru?nameOf(res.ru):"", sfNames=res.sf.map(nameOf);
     const roundNum=roundStr.trim()||autoNext;
     const roundId=uid();
-    const round={ id:roundId, date:date.trim(), round:roundNum, win:champName, ru:ruName, sf:sfNames, rule:rule.trim(), team, ...(champ?{champ:true}:{}), ...(season?{season}:{}) };
+    const round={ id:roundId, date:date.trim(), round:roundNum, win:champName, ru:ruName, sf:sfNames, rule:rule.trim(), team, ...(champ?{champ:true}:{}), ...(recordSeason?{season:recordSeason}:{}) };
     if(team){ round.winMembers=memListOf(res.champ); round.ruMembers=res.ru?memListOf(res.ru):[]; round.sfMembers=res.sf.map(memListOf); }
     let nd={...data, tournaments:tours.map(x=>x.key===tkey?{...x,rounds:[...(x.rounds||[]),round]}:x)};
     const deltas=computeDeltas();
     const bumpRows=(rows)=>{ let rs=[...(rows||[])]; Object.entries(deltas).forEach(([name,d])=>{ if(!name)return; const i=rs.findIndex(r=>r.name===name);
       if(i<0)rs=[...rs,{name,win:d.win,ru:d.ru,top4:d.top4,points:d.points}];
       else rs=rs.map((r,j)=>j===i?{...r,win:(r.win||0)+d.win,ru:(r.ru||0)+d.ru,top4:(r.top4||0)+d.top4,points:(r.points||0)+d.points}:r); }); return rs; };
-    const willRank=bumpRank&&rankKey&&!excluded, willSeason=bumpSeason&&season&&!champ&&!excluded;
-    const seasonRows=(data.seasons||[]).find(s=>s.name===season)?.rows||[];
+    const willRank=bumpRank&&rankKey&&!excluded, willSeason=bumpSeason&&recordSeason&&!champ&&!excluded;
+    const seasonRows=(data.seasons||[]).find(s=>s.name===recordSeason)?.rows||[];
     const rankWasNew={}, seasonWasNew={};
     Object.keys(deltas).forEach(name=>{ rankWasNew[name]=!rankRows.some(r=>r.name===name); seasonWasNew[name]=!seasonRows.some(r=>r.name===name); });
-    const recordMeta={source:"bracket",bracketId:b.id,rankKey,season,rankEnabled:bumpRank&&!excluded,seasonEnabled:bumpSeason&&!excluded,willRank,willSeason,deltas,rankWasNew,seasonWasNew,pointConfig:{win:ptWinN,ru:ptRuN,sf:ptSfN}};
+    const recordMeta={source:"bracket",bracketId:b.id,rankKey,season:recordSeason,seasonId:linkedContext?.season?.id||null,eventId:b.eventId||null,rankEnabled:bumpRank&&!excluded,seasonEnabled:bumpSeason&&!excluded,willRank,willSeason,deltas,rankWasNew,seasonWasNew,pointConfig:{win:ptWinN,ru:ptRuN,sf:ptSfN}};
     nd={...nd,tournaments:nd.tournaments.map(x=>x.key!==tkey?x:{...x,rounds:(x.rounds||[]).map(r=>r.id===roundId?{...r,recordMeta}:r)})};
     if(willRank){ nd={...nd, rankings:nd.rankings.map(era=>era.key!==rankKey?era:{...era,rows:bumpRows(era.rows)})}; }
-    if(willSeason){ nd={...nd, seasons:(nd.seasons||[]).map(s=>s.name!==season?s:{...s,rows:bumpRows(s.rows)})}; }
-    nd={...nd, brackets:nd.brackets.map(x=>x.id===b.id?{...x,status:"done",applied:{tournamentKey:tkey,date,season,roundId,recordMeta}}:x)};
+    if(willSeason){ nd={...nd, seasons:(nd.seasons||[]).map(s=>s.name!==recordSeason?s:{...s,rows:bumpRows(s.rows)})}; }
+    nd={...nd, brackets:nd.brackets.map(x=>x.id===b.id?{...x,status:"done",applied:{tournamentKey:tkey,date,season:recordSeason,roundId,recordMeta}}:x)};
     return { nd, deltas, roundNum, willRank, willSeason };
   };
-  const prepare=()=>{ if(!curT){alert("회차를 추가할 대회를 선택하세요.");return;} setPreview(buildResult()); };
-  const commit=()=>{ if(!preview)return; save(preview.nd); flash("기록에 반영됨 ✓"); onClose(); };
+  const prepare=()=>{
+    if(!curT){alert("회차를 추가할 대회를 선택하세요.");return;}
+    if(linkedContextBusy){alert("연결 대회의 시즌 정보를 불러오는 중입니다.");return;}
+    if(linkedContextError){alert(linkedContextError);return;}
+    if(!recordSeason){alert("기록을 반영할 시즌을 선택하세요.");return;}
+    setPreview(buildResult());
+  };
+  const commit=async()=>{
+    if(!preview) return;
 
+    let nextData=preview.nd;
+    let identityChanges=[];
+
+    if(b.eventId){
+      if(team){
+        flash("팀전 참가자 Player 확정은 아직 연결되지 않았습니다.");
+        return;
+      }
+
+      try{
+        const resolvedParticipants=await resolveEventParticipantsForRecord(
+          b.eventId,
+          b.participants||[]
+        );
+
+        identityChanges=resolvedParticipants.map(resolved=>({
+          participantId:resolved.id,
+          name:resolved.name,
+          registrationId:resolved.registrationId,
+          playerId:resolved.playerId,
+          playerWasCreated:!!resolved.playerWasCreated,
+          registrationWasCreated:!!resolved.registrationWasCreated,
+          registrationPlayerWasLinked:!!resolved.registrationPlayerWasLinked,
+        }));
+
+        const appliedRoundId=(nextData.brackets||[])
+          .find(x=>x.id===b.id)
+          ?.applied?.roundId||null;
+
+        nextData={
+          ...nextData,
+
+          brackets:(nextData.brackets||[]).map(x=>{
+            if(x.id!==b.id) return x;
+
+            return {
+              ...x,
+              participants:(x.participants||[]).map(p=>{
+                const resolved=resolvedParticipants.find(r=>r.id===p.id);
+                return resolved
+                  ? {
+                      ...p,
+                      registrationId:resolved.registrationId,
+                      playerId:resolved.playerId
+                    }
+                  : p;
+              }),
+              applied:x.applied
+                ? {
+                    ...x.applied,
+                    recordMeta:{
+                      ...(x.applied.recordMeta||{}),
+                      identityChanges
+                    }
+                  }
+                : x.applied
+            };
+          }),
+
+          tournaments:(nextData.tournaments||[]).map(tour=>({
+            ...tour,
+            rounds:(tour.rounds||[]).map(round=>
+              round.id===appliedRoundId
+                ? {
+                    ...round,
+                    recordMeta:{
+                      ...(round.recordMeta||{}),
+                      identityChanges
+                    }
+                  }
+                : round
+            )
+          }))
+        };
+
+      }catch(error){
+        flash(`참가자 확정 실패: ${error?.message||"알 수 없는 오류"}`);
+        return;
+      }
+    }
+
+    const saved=await save(nextData);
+    if(!saved){
+      if(b.eventId&&identityChanges.length){
+        try{
+          await revertEventRecordApplication(b.eventId,identityChanges,{reopenEvent:false});
+        }catch(error){
+          await refresh?.();
+          flash(`legacy 저장 실패 후 Player/Registration 원복에도 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+          return;
+        }
+      }
+
+      await refresh?.();
+      flash("legacy 기록 저장에 실패해 Player/Registration 변경도 원복했습니다.");
+      return;
+    }
+
+    if(b.eventId){
+      try{
+        await completeApplicationEvent(b.eventId);
+      }catch(error){
+        flash(`legacy 기록은 저장됐지만 Event 완료 처리에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+        return;
+      }
+    }
+
+    flash("기록에 반영됨 ✓");
+    onClose();
+  };
   if(preview){
     const changes=Object.entries(preview.deltas).map(([name,d])=>{ const cur=rankRows.find(r=>r.name===name); return {name,isNew:!cur,curPts:cur?.points||0,d}; });
     return (<Modal title="반영 전 확인" hint="아래 내용으로 기록에 반영합니다. 포인트 변동을 확인한 뒤 진행하세요." onClose={()=>setPreview(null)}>
       <div className="swap" key="pre">
       <div className="bk-applybox">
         <div className="bk-ab-meta">{team?"팀전":"개인전"}{champ?" 챔피언스 시리즈":""}</div>
-        <div>{curT.label} <b>{preview.roundNum}회</b>{season?`, ${season}`:""}{rule.trim()?`, ${rule.trim()}`:""}</div>
+        <div>{curT.label} <b>{preview.roundNum}회</b>{recordSeason?`, ${recordSeason}`:""}{rule.trim()?`, ${rule.trim()}`:""}</div>
         <div>🏆 <b>{nameOf(res.champ)}</b>{res.ru?<>, 🥈 {nameOf(res.ru)}</>:null}{res.sf.length?<>, 🎖️ {res.sf.map(nameOf).join(", ")}</>:null}</div>
       </div>
+      {linked&&!team&&
+  <div className="field">
+    <label>참가자 Player 확인</label>
+    {identityPreviewBusy
+      ? <div className="bk-hint">Player 정보를 확인하는 중입니다.</div>
+      : identityPreviewError
+        ? <div className="bk-hint" style={{color:"var(--loss)"}}>{identityPreviewError}</div>
+        : <div className="bk-chg">
+            {identityPreview.map(row=>(
+              <div className="bk-chg-row" key={row.participantId}>
+                <span className={"bk-exist "+(row.status==="existing"?"old":"new")}>
+                  {row.status==="existing"
+                    ? "기존 Player"
+                    : row.status==="new"
+                      ? "신규 Player"
+                      : "확인 필요"}
+                </span>
+                <b>{row.name}</b>
+                <span className="bk-hint" style={{marginLeft:"auto"}}>
+                  {row.status==="existing"
+                    ? "기존 identity 사용"
+                    : row.status==="new"
+                      ? "기록 반영 시 Player 생성"
+                      : "동일 이름 Player가 여러 명 존재"}
+                  {row.willCreateRegistration ? " · 참가 등록 생성 예정" : ""}
+                </span>
+              </div>
+            ))}
+          </div>
+    }
+  </div>
+}
       {preview.willRank ? <div className="field"><label>누적 랭킹 「{rankEra?.label}」 포인트 변동</label>
         <div className="bk-chg">{changes.map(c=><div className="bk-chg-row" key={c.name}>
-          <span className={"bk-exist "+(c.isNew?"new":"old")}>{c.isNew?"신규":"기존"}</span><b>{c.name}</b>
+          <span className={"bk-exist "+(c.isNew?"new":"old")}>{c.isNew?"랭킹 신규":"랭킹 기존"}</span><b>{c.name}</b>
           <span className="bk-chg-pts">{c.curPts}<i>→</i>{r1(c.curPts+c.d.points)}</span>
           {c.d.points?<span className="bk-chg-d">+{r1(c.d.points)}</span>:null}
           {(c.d.win||c.d.ru||c.d.top4)?<span className="bk-chg-cnt">{c.d.win?`승+${c.d.win} `:""}{c.d.ru?`준+${c.d.ru} `:""}{c.d.top4?`4강+${c.d.top4}`:""}</span>:null}
         </div>)}</div>
       </div> : <div className="bk-hint">{excluded?`${curT.label}은(는) 누적 랭킹과 시즌별 성적에 반영되지 않고 회차 기록에만 추가됩니다.`:"누적 랭킹 반영이 꺼져 있어 회차 기록에만 추가됩니다."}</div>}
-      {preview.willSeason&&<div className="bk-hint">시즌별 성적 「{season}」에도 동일한 점수와 성적이 반영됩니다.</div>}
-      <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setPreview(null)}>← 뒤로</button><button className="btn btn-primary" onClick={commit}>이대로 반영</button></div>
+      {preview.willSeason&&<div className="bk-hint">시즌별 성적 「{recordSeason}」에도 동일한 점수와 성적이 반영됩니다.</div>}
+      <div className="modal-actions">
+  <button className="btn btn-ghost" onClick={()=>setPreview(null)}>← 뒤로</button>
+  <button
+    className="btn btn-primary"
+    onClick={commit}
+    disabled={
+      linked&&!team&&(
+        identityPreviewBusy||
+        !!identityPreviewError||
+        identityPreview.some(row=>row.status==="ambiguous")
+      )
+    }
+  >
+    이대로 반영
+  </button>
+</div>
       </div>
     </Modal>);
   }
-  return (<Modal title="기록에 반영" hint="대진표 결과를 회차 형식 그대로 추가하고, 선택 시 랭킹과 시즌 점수까지 반영합니다." onClose={onClose}>
+  return (<Modal
+    title="기록에 반영"
+    hint={linked
+      ? "연결된 Event의 대회 정보와 정책을 기준으로 기록을 반영합니다."
+      : "수동 대회 정보를 설정해 기록에 반영합니다."}
+    onClose={onClose}
+  >
     <div className="swap" key="form">
-    <div className="bk-applybox">
-      <div className="bk-ab-meta">{team?"팀전":"개인전"}</div>
-      <div>🏆 우승 <b>{nameOf(res.champ)}</b> {!team&&badgeFor(nameOf(res.champ))}</div>{res.ru&&<div>🥈 준우승 <b>{nameOf(res.ru)}</b> {!team&&badgeFor(nameOf(res.ru))}</div>}{res.sf.length>0&&<div>🎖️ 4강 <b>{res.sf.map(nameOf).join(", ")}</b></div>}
-    </div>
-    <div className="field"><label>형식</label>
-      <div className="ed-seg"><button type="button" className={!champ?"on":""} onClick={()=>setChamp(false)}>일반 (파이컵)</button><button type="button" className={champ?"on":""} onClick={()=>setChamp(true)}>챔피언스 시리즈</button></div>
-    </div>
-    <div className="bk-grow2">
-      <div className="field"><label>추가할 대회(회차 묶음)</label><Dropdown value={tkey} onChange={setTkey} placeholder="대회 선택" options={tours.map(t=>({value:t.key,label:t.label}))}/></div>
-      <div className="field"><label>시즌</label><Dropdown value={season} onChange={setSeason} options={[{value:"",label:"(시즌 미지정)"},...seasons.map(s=>({value:s.name,label:s.name}))]}/></div>
-    </div>
-    <div className="bk-grow2">
-      <div className="field"><label>회차 번호</label><input value={roundStr} onChange={e=>setRoundStr(e.target.value)}/></div>
-      <div className="field"><label>날짜 표기</label><input value={date} onChange={e=>setDate(e.target.value)} placeholder="2026.07"/></div>
-    </div>
-    <div className="field"><label>대회 룰 (선택)</label><input value={rule} onChange={e=>setRule(e.target.value)} placeholder="예: 모노타입 / 랜덤 배틀 / 6세대 63"/></div>
-    <div className="field"><label>등수별 점수{team?" (총점 — 팀원 수로 균등 분배)":""}</label>
-      <div className="bk-pts">
-        <div className="bk-pt"><span>우승</span><input value={ptWin} onChange={setPt(setPtWin)}/></div>
-        <div className="bk-pt"><span>준우승</span><input value={ptRu} onChange={setPt(setPtRu)}/></div>
-        <div className="bk-pt"><span>4강</span><input value={ptSf} onChange={setPt(setPtSf)}/></div>
+      <div className="bk-applybox">
+        <div className="bk-ab-meta">
+          {team?"팀전":"개인전"}
+          {linked&&linkedContext?.event?.division
+            ? ` · ${linkedContext.event.division==="master"?"Master":linkedContext.event.division==="rookie"?"Rookie":linkedContext.event.division}`
+            : ""}
+        </div>
+        <div>🏆 우승 <b>{nameOf(res.champ)}</b></div>
+        {res.ru&&<div>🥈 준우승 <b>{nameOf(res.ru)}</b></div>}
+        {res.sf.length>0&&<div>🎖️ 4강 <b>{res.sf.map(nameOf).join(", ")}</b></div>}
       </div>
-    </div>
-    {team&&alloc.length>0&&<div className="field"><label>팀원별 점수 배분 (개별 수정 가능)</label>
-      <div className="bk-alloc">{alloc.map(a=><div className="bk-alloc-row" key={a.key}><span className={"bk-alloc-tag "+(a.label==="우승"?"w":a.label==="준우승"?"r":"s")}>{a.label}</span><b>{a.member}</b>{badgeFor(a.member)}<span className="bk-alloc-team">{a.team}</span><input value={override[a.key]??""} placeholder={String(a.base)} onChange={e=>setOverride({...override,[a.key]:e.target.value.replace(/[^0-9.]/g,"")})}/></div>)}</div>
-    </div>}
-    <label className="bk-check"><input type="checkbox" checked={bumpRank&&!excluded} onChange={e=>setBumpRank(e.target.checked)} disabled={excluded}/><span>누적 랭킹 반영 {excluded?"— 이 대회는 제외":(team?"(점수 배분)":"(승/준/4강 + 점수)")}</span></label>
-    {bumpRank&&!excluded&&<div className="field"><label>반영할 누적 랭킹</label><Dropdown value={rankKey} onChange={setRankKey} placeholder="랭킹 선택" options={(data.rankings||[]).map(r=>({value:r.key,label:r.label}))}/></div>}
-    <label className="bk-check"><input type="checkbox" checked={bumpSeason&&!champ&&!excluded} onChange={e=>setBumpSeason(e.target.checked)} disabled={!season||champ||excluded}/><span>시즌별 성적 반영 {excluded?"— 이 대회는 제외":champ?"— 챔피언스 시리즈는 제외":(season?`(${season})`:"— 시즌을 먼저 선택")}</span></label>
-    {excluded&&<div className="bk-hint">{curT.label}은(는) 정규 집계에서 제외되어 누적 랭킹과 시즌별 성적 어디에도 반영되지 않습니다. (회차 기록에만 추가)</div>}
-    {champ&&!excluded&&<div className="bk-hint">챔피언스 시리즈는 시즌을 마무리하는 대회로, 누적 랭킹에는 반영되지만 시즌별 성적에는 반영되지 않습니다.</div>}
-    <div className="bk-hint">{team?"팀전은 각 등수 점수를 팀원 수로 나눠 배분합니다(승/준/4강 횟수는 개인 랭킹에 더하지 않음).":"승/준/4강 횟수와 점수가 함께 누적됩니다."}</div>
-    <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={prepare}>반영하기 →</button></div>
+
+      {linked ? <>
+        {linkedContextBusy&&
+          <div className="bk-hint">연결된 대회 정보를 불러오는 중입니다.</div>
+        }
+
+        {linkedContextError&&
+          <div className="bk-hint" style={{color:"var(--loss)"}}>{linkedContextError}</div>
+        }
+
+        {!linkedContextBusy&&!linkedContextError&&<>
+          <div className="bk-grow2">
+            <div className="field">
+              <label>기록 분류</label>
+              <div className="bk-hint">
+                {curT?.label||"분류 확인 필요"} · 연결 Event 기준
+              </div>
+            </div>
+
+            <div className="field">
+              <label>시즌</label>
+              <div className="bk-hint">
+                {recordSeason||"시즌 정보 없음"} · 연결 Event 기준
+              </div>
+            </div>
+          </div>
+
+          <div className="bk-grow2">
+            <div className="field">
+              <label>회차 번호</label>
+              <input
+                value={roundStr}
+                onChange={e=>setRoundStr(e.target.value)}
+                placeholder={autoNext}
+              />
+            </div>
+
+            <div className="field">
+              <label>날짜 표기</label>
+              <input
+                value={date}
+                onChange={e=>setDate(e.target.value)}
+                placeholder="2026.09"
+              />
+            </div>
+          </div>
+
+          <div className="field">
+            <label>반영 내용</label>
+            <div className="bk-applybox">
+              <div>✓ {curT?.label||"회차"} 기록</div>
+              <div>
+                {excluded
+                  ? "— 누적 랭킹 미반영"
+                  : `✓ 누적 랭킹${rankEra?.label?` · ${rankEra.label}`:""}`}
+              </div>
+              <div>
+                {excluded||champ
+                  ? "— 시즌별 성적 미반영"
+                  : `✓ 시즌별 성적 · ${recordSeason}`}
+              </div>
+            </div>
+          </div>
+
+          {!excluded&&
+            <div className="field">
+              <label>등수별 점수</label>
+              <div className="bk-hint">
+                우승 {ptWinN} · 준우승 {ptRuN} · 4강 {ptSfN}
+              </div>
+            </div>
+          }
+        </>}
+      </> : <>
+        <div className="field">
+          <label>형식</label>
+          <div className="ed-seg">
+            <button type="button" className={!champ?"on":""} onClick={()=>setChamp(false)}>일반 (파이컵)</button>
+            <button type="button" className={champ?"on":""} onClick={()=>setChamp(true)}>챔피언스 시리즈</button>
+          </div>
+        </div>
+
+        <div className="bk-grow2">
+          <div className="field">
+            <label>추가할 대회(회차 묶음)</label>
+            <Dropdown
+              value={tkey}
+              onChange={setTkey}
+              placeholder="대회 선택"
+              options={tours.map(t=>({value:t.key,label:t.label}))}
+            />
+          </div>
+
+          <div className="field">
+            <label>시즌</label>
+            <Dropdown
+              value={season}
+              onChange={setSeason}
+              options={seasons.map(s=>({value:s.name,label:s.name}))}
+            />
+          </div>
+        </div>
+
+        <div className="bk-grow2">
+          <div className="field">
+            <label>회차 번호</label>
+            <input value={roundStr} onChange={e=>setRoundStr(e.target.value)}/>
+          </div>
+
+          <div className="field">
+            <label>날짜 표기</label>
+            <input value={date} onChange={e=>setDate(e.target.value)} placeholder="2026.07"/>
+          </div>
+        </div>
+
+        <div className="field">
+          <label>대회 룰 (선택)</label>
+          <input value={rule} onChange={e=>setRule(e.target.value)} placeholder="예: 모노타입 / 랜덤 배틀 / 6세대 63"/>
+        </div>
+
+        <div className="field">
+          <label>등수별 점수{team?" (총점 — 팀원 수로 균등 분배)":""}</label>
+          <div className="bk-pts">
+            <div className="bk-pt"><span>우승</span><input value={ptWin} onChange={setPt(setPtWin)}/></div>
+            <div className="bk-pt"><span>준우승</span><input value={ptRu} onChange={setPt(setPtRu)}/></div>
+            <div className="bk-pt"><span>4강</span><input value={ptSf} onChange={setPt(setPtSf)}/></div>
+          </div>
+        </div>
+
+        {team&&alloc.length>0&&
+          <div className="field">
+            <label>팀원별 점수 배분 (개별 수정 가능)</label>
+            <div className="bk-alloc">
+              {alloc.map(a=>
+                <div className="bk-alloc-row" key={a.key}>
+                  <span className={"bk-alloc-tag "+(a.label==="우승"?"w":a.label==="준우승"?"r":"s")}>{a.label}</span>
+                  <b>{a.member}</b>
+                  {badgeFor(a.member)}
+                  <span className="bk-alloc-team">{a.team}</span>
+                  <input
+                    value={override[a.key]??""}
+                    placeholder={String(a.base)}
+                    onChange={e=>setOverride({...override,[a.key]:e.target.value.replace(/[^0-9.]/g,"")})}
+                  />
+                </div>
+              )}
+            </div>
+          </div>
+        }
+
+        <label className="bk-check">
+          <input
+            type="checkbox"
+            checked={bumpRank&&!excluded}
+            onChange={e=>setBumpRank(e.target.checked)}
+            disabled={excluded}
+          />
+          <span>
+            누적 랭킹 반영 {excluded?"— 이 대회는 제외":(team?"(점수 배분)":"(승/준/4강 + 점수)")}
+          </span>
+        </label>
+
+        {bumpRank&&!excluded&&
+          <div className="field">
+            <label>반영할 누적 랭킹</label>
+            <Dropdown
+              value={rankKey}
+              onChange={setRankKey}
+              placeholder="랭킹 선택"
+              options={(data.rankings||[]).map(r=>({value:r.key,label:r.label}))}
+            />
+          </div>
+        }
+
+        <label className="bk-check">
+          <input
+            type="checkbox"
+            checked={bumpSeason&&!champ&&!excluded}
+            onChange={e=>setBumpSeason(e.target.checked)}
+            disabled={!recordSeason||champ||excluded}
+          />
+          <span>
+            시즌별 성적 반영 {excluded?"— 이 대회는 제외":champ?"— 챔피언스 시리즈는 제외":(recordSeason?`(${recordSeason})`:"— 시즌을 먼저 선택")}
+          </span>
+        </label>
+      </>}
+
+      <div className="modal-actions">
+        <button className="btn btn-ghost" onClick={onClose}>취소</button>
+        <button className="btn btn-primary" onClick={prepare} disabled={linked&&linkedContextBusy}>
+          반영하기 →
+        </button>
+      </div>
     </div>
   </Modal>);
 }
@@ -749,7 +1422,7 @@ function BracketDraw({ b, onDone }){
 }
 
 /* ===== 대진표 메인 ===== */
-export default function BracketsPage({ data, admin, save, flash }){
+export default function BracketsPage({ data, admin, save, flash, refresh }){
   const list=data.brackets||[];
   const [openId,setOpenId]=useState(null);
   const [wizard,setWizard]=useState(false);
@@ -777,6 +1450,6 @@ export default function BracketsPage({ data, admin, save, flash }){
       {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} onApply={(b,res)=>setApply({b,res})}/>}
     </div>}
     {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create}/>}
-    {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} onClose={()=>setApply(null)}/>}
+    {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} refresh={refresh} onClose={()=>setApply(null)}/>}
   </section>);
 }

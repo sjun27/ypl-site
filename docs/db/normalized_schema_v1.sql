@@ -57,6 +57,11 @@ create table if not exists seasons (
 create index if not exists idx_seasons_sort_order
     on seasons (sort_order);
 
+-- Application code also validates this invariant and reports 0/multiple rows.
+create unique index if not exists uq_seasons_one_current
+    on seasons ((status))
+    where status = 'current';
+
 
 -- =========================================================
 -- 3. Events
@@ -64,6 +69,8 @@ create index if not exists idx_seasons_sort_order
 
 create table if not exists events (
     id uuid primary key default gen_random_uuid(),
+    -- Required for newly created official Events. Nullable remains for
+    -- incomplete historical/manual migration rows.
     season_id uuid references seasons(id) on delete restrict,
 
     name text not null,
@@ -158,7 +165,9 @@ create index if not exists idx_events_type_format
 create table if not exists event_registrations (
     id uuid primary key default gen_random_uuid(),
     event_id uuid not null references events(id) on delete restrict,
-    player_id uuid not null references players(id) on delete restrict,
+    -- Application does not create Player rows. Exact single matches may be
+    -- linked here; new/ambiguous identities remain NULL until record apply.
+    player_id uuid references players(id) on delete restrict,
 
     registration_name text not null,
     registration_data jsonb not null default '{}'::jsonb,
@@ -181,6 +190,8 @@ create table if not exists event_registrations (
     created_at timestamptz not null default now(),
     updated_at timestamptz not null default now(),
 
+    -- PostgreSQL permits multiple NULL values, while still preventing one
+    -- resolved Player from being registered twice for the same Event.
     unique (event_id, player_id),
     unique (id, event_id, player_id)
 );

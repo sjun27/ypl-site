@@ -168,10 +168,34 @@ export function revertBracketRecord(data, bracketId) {
     ...tour,
     rounds: (tour.rounds || []).filter((round) => round.id !== roundId),
   });
-  next.brackets = next.brackets.map((item) => item.id !== bracketId ? item : {
-    ...item,
-    status: "active",
-    applied: null,
+  const identityChanges = Array.isArray(meta?.identityChanges) ? meta.identityChanges : [];
+
+  next.brackets = next.brackets.map((item) => {
+    if (item.id !== bracketId) return item;
+
+    const participants = (item.participants || []).map((participant) => {
+      const change = identityChanges.find((entry) => entry.participantId === participant.id);
+      if (!change) return participant;
+
+      if (change.registrationWasCreated) {
+        const { playerId, registrationId, ...rest } = participant;
+        return rest;
+      }
+
+      if (change.registrationPlayerWasLinked) {
+        const { playerId, ...rest } = participant;
+        return rest;
+      }
+
+      return participant;
+    });
+
+    return {
+      ...item,
+      participants,
+      status: "active",
+      applied: null,
+    };
   });
   return { data: next, changed: true };
 }

@@ -10,7 +10,7 @@ const SUPA_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPA_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 // 환경변수가 둘 다 있을 때만 Supabase 클라이언트를 만듭니다.
-const supa = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
+export const supa = SUPA_URL && SUPA_KEY ? createClient(SUPA_URL, SUPA_KEY) : null;
 
 export const STORAGE_MODE = (typeof window !== "undefined" && window.storage)
   ? "artifact"

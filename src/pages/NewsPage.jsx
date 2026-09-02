@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Dropdown, ListSearch, Modal, Pager, Reveal } from "../components/index.js";
+import { listEventApplications } from "../services/index.js";
 
 function fmtDT(iso){ try{ const d=new Date(iso); const p=(n)=>String(n).padStart(2,"0"); return `${d.getFullYear()}.${p(d.getMonth()+1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }catch{ return ""; } }
 
@@ -7,6 +8,21 @@ const PAGE_SIZE=10;
 export default function NewsPage({ data, admin, setModal, save, submitForm, refresh }) {
   const [q,setQ]=useState(""); const [page,setPage]=useState(1);
   const [fill,setFill]=useState(null); const [respId,setRespId]=useState(null);
+  const [eventResponses,setEventResponses]=useState({});
+  useEffect(()=>{
+    if(!admin) return;
+    const targets=(data.announcements||[]).filter(a=>a.form?.enabled&&a.form?.eventId);
+    if(!targets.length) return;
+    let cancelled=false;
+    Promise.all(targets.map(async a=>{
+      try{ return [a.id,await listEventApplications(a.form.eventId)]; }
+      catch(error){ console.error(error); return [a.id,[]]; }
+    })).then(rows=>{
+      if(cancelled) return;
+      setEventResponses(Object.fromEntries(rows));
+    });
+    return ()=>{cancelled=true;};
+  },[admin,data.announcements]);
   const [open,setOpen]=useState(()=>new Set());
   const [seen,setSeen]=useState("");
   const hasPublic=(data.announcements||[]).some(a=>a.form&&a.form.enabled&&(a.form.fields||[]).some(f=>f.public));
@@ -54,7 +70,7 @@ export default function NewsPage({ data, admin, setModal, save, submitForm, refr
           </div>}
           {hasForm&&<div className="ann-formbtns">
             <button className="ann-apply" onClick={e=>{e.stopPropagation();setFill(a.id);}}>📝 {a.form.buttonLabel||"참가 신청하기"}</button>
-            {admin&&<button className="ann-resp" onClick={e=>{e.stopPropagation();setRespId(a.id);}}>응답 보기 <span className="rc">{(a.form.responses||[]).length}</span></button>}
+            {admin&&<button className="ann-resp" onClick={e=>{e.stopPropagation();setRespId(a.id);}}>응답 보기 <span className="rc">{a.form.eventId?(eventResponses[a.id]||[]).length:(a.form.responses||[]).length}</span></button>}
           </div>}
           {hasForm&&(a.form.fields||[]).some(f=>f.public)&&<PublicResponses ann={a} onRefresh={doRefresh} updatedAt={seen}/>}
           {isOpen&&<div className="nb-body swap"><p>{a.body}</p>{admin&&<div className="edit-row"><button className="btn btn-ghost btn-sm" onClick={()=>setModal({type:"ann",item:a})}>수정</button></div>}</div>}
@@ -62,7 +78,7 @@ export default function NewsPage({ data, admin, setModal, save, submitForm, refr
     </Reveal>
     <Pager page={cur} pages={pages} onGo={setPage}/>
     {fillAnn&&<FormFillModal ann={fillAnn} onClose={()=>setFill(null)} onSubmit={(answers)=>submitForm(fillAnn.id,answers)}/>}
-    {respAnn&&<FormResponsesModal ann={respAnn} onClose={()=>setRespId(null)} onDeleteResp={delResp}/>}
+    {respAnn&&<FormResponsesModal ann={respAnn} responsesOverride={respAnn.form?.eventId?(eventResponses[respAnn.id]||[]):null} onClose={()=>setRespId(null)} onDeleteResp={respAnn.form?.eventId?null:delResp}/>}
   </section>);
 }
 
@@ -106,12 +122,13 @@ function PublicResponses({ ann, compact, onRefresh, updatedAt }){
 /* ===== 신청서 폼 — 참가자 작성 / 관리자 응답 보기 ===== */
 function FormFillModal({ ann, onClose, onSubmit }){
   const form=ann.form||{}; const fields=form.fields||[];
-  const [ans,setAns]=useState({}); const [done,setDone]=useState(false); const [busy,setBusy]=useState(false);
+  const [ans,setAns]=useState({}); const [registrationName,setRegistrationName]=useState(""); const [done,setDone]=useState(false); const [busy,setBusy]=useState(false);
   const set=(id,v)=>setAns(a=>({...a,[id]:v}));
   const toggleMulti=(id,opt)=>setAns(a=>{ const cur=Array.isArray(a[id])?a[id]:[]; return {...a,[id]:cur.includes(opt)?cur.filter(x=>x!==opt):[...cur,opt]}; });
   const submit=async()=>{
+    if(form.eventId&&!registrationName.trim()){ alert("참가자 이름을 입력해 주세요."); return; }
     for(const f of fields){ if(f.required){ const v=ans[f.id]; const empty=Array.isArray(v)?v.length===0:!String(v||"").trim(); if(empty){ alert(`'${f.label||"질문"}'은(는) 필수 응답입니다.`); return; } } }
-    setBusy(true); const ok=await onSubmit(ans); setBusy(false);
+    setBusy(true); const ok=await onSubmit({registrationName:registrationName.trim(),answers:ans}); setBusy(false);
     if(ok===false){ alert("신청 저장을 확인하지 못했습니다. 잠시 후 다시 제출해주세요."); return; }
     setDone(true);
   };
@@ -119,7 +136,8 @@ function FormFillModal({ ann, onClose, onSubmit }){
   return (<Modal title={ann.title} hint="아래 신청서를 작성한 뒤 제출해주세요." onClose={onClose}>
     <div className="swap" key="fill">
       {(fields||[]).some(f=>f.public)&&<PublicResponses ann={ann} compact/>}
-      {fields.length===0&&<p style={{color:"var(--muted)",fontSize:14}}>등록된 질문이 없습니다.</p>}
+      {form.eventId&&<div className="ff-q"><label className="ff-q-label">참가자 이름<span className="req">*</span></label><input type="text" value={registrationName} onChange={e=>setRegistrationName(e.target.value)} placeholder="신청자 본인의 이름을 입력하세요" autoComplete="name"/></div>}
+      {fields.length===0&&!form.eventId&&<p style={{color:"var(--muted)",fontSize:14}}>등록된 질문이 없습니다.</p>}
       {fields.map((f,i)=>(<div className="ff-q" key={f.id}>
         <label className="ff-q-label">{f.label||`질문 ${i+1}`}{f.required&&<span className="req">*</span>}</label>
         {f.type==="short"&&<input type="text" value={ans[f.id]||""} onChange={e=>set(f.id,e.target.value)} placeholder="답변을 입력하세요"/>}
@@ -132,13 +150,13 @@ function FormFillModal({ ann, onClose, onSubmit }){
     </div>
   </Modal>);
 }
-function FormResponsesModal({ ann, onClose, onDeleteResp }){
-  const form=ann.form||{}; const fields=form.fields||[]; const resp=[...(form.responses||[])].sort((a,b)=>(a.createdAt<b.createdAt?-1:1));
+function FormResponsesModal({ ann, onClose, onDeleteResp, responsesOverride }){
+  const form=ann.form||{}; const fields=form.fields||[]; const normalized=Array.isArray(responsesOverride); const resp=[...(normalized?responsesOverride:(form.responses||[]))].sort((a,b)=>(a.createdAt<b.createdAt?-1:1));
   const cell=(v)=>Array.isArray(v)?v.join(", "):(v==null?"":String(v));
   const csv=()=>{
     const esc=(s)=>{ s=String(s==null?"":s); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s; };
-    const header=["번호","제출시각",...fields.map(f=>f.label||"질문")];
-    const rows=resp.map((r,i)=>[i+1,fmtDT(r.createdAt),...fields.map(f=>cell(r.answers&&r.answers[f.id]))]);
+    const header=["번호","제출시각",...(normalized?["참가자 이름"]:[]),...fields.map(f=>f.label||"질문")];
+    const rows=resp.map((r,i)=>[i+1,fmtDT(r.createdAt),...(normalized?[r.registrationName||""]:[]),...fields.map(f=>cell(r.answers&&r.answers[f.id]))]);
     const text="\ufeff"+[header,...rows].map(row=>row.map(esc).join(",")).join("\r\n");
     const blob=new Blob([text],{type:"text/csv;charset=utf-8;"}); const url=URL.createObjectURL(blob);
     const a=document.createElement("a"); a.href=url; a.download=`${String(ann.title||"응답").replace(/[\\/:*?"<>|]/g,"_")}_응답.csv`; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(url),1500);
@@ -147,11 +165,11 @@ function FormResponsesModal({ ann, onClose, onDeleteResp }){
     <div className="fr-bar"><span className="fr-tot">총 {resp.length}건</span>{resp.length>0&&<button className="btn btn-ghost btn-sm" onClick={csv}>⬇ CSV(엑셀) 다운로드</button>}</div>
     {resp.length===0?<div className="fr-empty">아직 접수된 신청이 없습니다.</div>:
       <div className="fr-scroll"><table className="fr-tbl">
-        <thead><tr><th>#</th><th>제출시각</th>{fields.map(f=>(<th key={f.id}>{f.label||"질문"}</th>))}<th></th></tr></thead>
+        <thead><tr><th>#</th><th>제출시각</th>{normalized&&<th>참가자 이름</th>}{fields.map(f=>(<th key={f.id}>{f.label||"질문"}</th>))}<th></th></tr></thead>
         <tbody>{resp.map((r,i)=>(<tr key={r.id}>
           <td className="fr-idx">{i+1}</td><td className="fr-dt">{fmtDT(r.createdAt)}</td>
-          {fields.map(f=>(<td key={f.id}>{cell(r.answers&&r.answers[f.id])}</td>))}
-          <td><button className="fr-del" onClick={()=>{if(confirm("이 응답을 삭제할까요?"))onDeleteResp(r.id);}} title="삭제">🗑</button></td>
+          {normalized&&<td>{r.registrationName||""}</td>}{fields.map(f=>(<td key={f.id}>{cell(r.answers&&r.answers[f.id])}</td>))}
+          <td>{onDeleteResp&&<button className="fr-del" onClick={()=>{if(confirm("이 응답을 삭제할까요?"))onDeleteResp(r.id);}} title="삭제">🗑</button>}</td>
         </tr>))}</tbody>
       </table></div>}
     <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>닫기</button></div>
