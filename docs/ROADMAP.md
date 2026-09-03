@@ -36,6 +36,9 @@ Player
 Season
 Event
 EventRegistration
+Entry
+EntryParticipant
+Match (개인전 runtime mirror)
         │
         ▼
 현재 연결 경계
@@ -43,7 +46,7 @@ EventRegistration
         ▼
 legacy ypl_data_v4
 Bracket
-Round / Match
+Round / Result
 Ranking
 Season Record
 Records
@@ -88,15 +91,27 @@ Event 선택
 → 신청자 기본 참가
 → 불참자 제외
 → 필요 시 수동 참가자 추가
+→ 전체 identity preflight
+→ Player / Registration 확정
+→ Entry / EntryParticipant 생성
+→ 실제 성립 경기 normalized Match 생성
 → Bracket 생성
-→ Event ID / Registration ID 보존
+→ Event running
+→ Event / Registration / Player / Entry ID 보존
 
-현재 Bracket participant는 전환 단계 구조로 Registration/Player identity를 함께 보존한다.
+현재 Bracket participant는 legacy graph용 participant ID를 유지하면서
+`registrationId / playerId / entryId / entryParticipantId`를 함께 보존한다.
+
+Event 연결 개인전의 실제 경기는 legacy Bracket JSON과 normalized `matches`에 이중 저장한다.
+BYE, 한쪽 참가자가 아직 결정되지 않은 경기, 비활성 reset final은 normalized Match에서 제외한다.
+승자 선택·취소·변경과 Group 본선 생성은 `source = legacy_bracket_runtime` 범위에서 동기화한다.
+
+Event 연결 개인전은 Event당 Bracket 하나만 허용한다.
+
+기록 반영 전 Bracket 삭제 시 해당 Bracket의 참가 확정 metadata를 기준으로
+Entry / EntryParticipant와 이번 확정에서 만든 identity 변경을 원복한다.
 
 아직 미구현
-normalized Entry 생성
-normalized EntryParticipant 생성
-Bracket participant를 Entry ID 기준으로 연결
 팀전 Event의 멤버별 Registration/Player identity 확정
 
 Event 연결 팀전은 위 구조가 완성될 때까지 차단한다.
@@ -109,16 +124,13 @@ Event 연결 팀전은 위 구조가 완성될 때까지 차단한다.
 
 normalized에서 처리
 연결 Event 확인
-실제 참가자 Registration 확인
-Player exact match
-기존 Player 재사용
-신규 Player 생성
-EventRegistration.player_id 확정
+Bracket 생성 시 확정된 Entry / EntryParticipant / Registration / Player 검증
+Event 연결 개인전의 실제 Match snapshot 동기화
+전환 이전 Bracket은 기존 record-apply identity 확정 fallback 사용
 Event completed
 record_applied_at 기록
 아직 legacy에서 처리
 대회 회차
-Match
 Result 성격의 입상 기록
 누적 랭킹
 시즌별 성적
@@ -140,9 +152,9 @@ legacy 회차 제거
 Bracket active 복구
 Event running 복구
 record_applied_at = NULL
-기록 반영 중 생성한 manual Registration 제거
-기록 반영 중 설정한 Registration.player_id 해제
-기록 반영 과정에서 생성한 Player 정리
+Bracket 생성 시 확정한 Entry / EntryParticipant / Registration / Player 유지
+normalized Match 유지
+전환 이전 Bracket에서 기록 반영이 만든 identity만 기존 방식으로 원복
 
 apply → revert → reapply 흐름을 Test 환경에서 검증했다.
 
@@ -240,13 +252,13 @@ Player
 Season
 Event
 EventRegistration
+Entry
+EntryParticipant
+Match (Event-linked 개인전 runtime mirror)
 schema / migration 검증은 되었으나 운영 runtime source of truth가 아닌 엔티티
 RegistrationSubmission
 TeamSnapshot
 TeamSnapshotMember
-Entry
-EntryParticipant
-Match
 Result
 RankingAward
 RankingBaseline
@@ -272,22 +284,25 @@ P0. 신청 → 기록 normalized end-to-end 완성
 → Result
 → RankingAward
 → Records
-1단계 — Entry 연결
+1단계 — Entry 연결 — 코드 구현 완료 / Test DB E2E 대기
 EventRegistration에서 실제 참가자 확정
 개인전 Entry 생성
 EntryParticipant 생성
 Bracket participant를 Entry ID 기준으로 연결
 불참자 제외
 수동 참가자 처리
-2단계 — normalized 결과 저장
-Bracket 결과 → Match 생성
+2단계 A — normalized Match — 코드 구현 완료 / Test DB E2E 대기
+Bracket 생성·결과 변경 → Match snapshot 동기화
+record apply 직전 final sync
+record revert에서는 실제 경기 Match 유지
+2단계 B — normalized Result / RankingAward
 최종 성적 → Result 생성
 실제 지급 포인트 → RankingAward 생성
 Rookie rankingEnabled=false 정책 적용
 Light / Master 랭킹 반영
 중복 반영 방지
 3단계 — 반영 취소 / 재반영
-normalized Match / Result / RankingAward 원복
+normalized Match 유지, Result / RankingAward 원복
 Event lifecycle 원복
 Entry identity 보존 정책 확정
 재반영 시 중복 데이터 생성 방지
@@ -474,22 +489,30 @@ feature/records-system
 ✓ 신청 공지 → Event
 ✓ 신청 → EventRegistration
 ✓ 개인전 Event → Bracket
-✓ 기록 반영 시 Player identity 확정
+✓ Bracket 생성 시 Player / Registration identity 확정
+✓ 개인전 Entry / EntryParticipant 생성
+✓ participant.entryId 연결
+✓ Bracket 삭제 시 참가 확정 rollback
+✓ Event당 연결 Bracket 중복 생성 차단
 ✓ Master / Light / Rookie 기록 정책
 ✓ Event completed / record_applied_at lifecycle
 ✓ 기록 반영 취소 및 identity 원복
 ✓ legacy 저장 실패 시 identity rollback
 ✓ Test apply / revert / reapply E2E
+✓ P0-4 Bracket 결과 → normalized Match runtime sync
+✓ Single / Double / Group / Group→Knockout snapshot
+✓ winner toggle/change, downstream cascade, reset activation/deactivation sync
+✓ Bracket 삭제 전 runtime Match FK 선행 정리
+✓ record apply 직전 final Match sync / revert 시 Match 유지
 
 바로 다음
-1. EventRegistration → Entry / EntryParticipant
-2. Bracket participant → Entry identity
-3. Bracket 결과 → normalized Match
-4. normalized Result
-5. normalized RankingAward
-6. normalized 반영 취소 / 재반영
-7. Records normalized read 전환
-8. 팀전 normalized 연결
+1. P0-1~P0-3 Test Supabase E2E 및 rollback/중복 생성 회귀
+2. P0-4 Test Supabase Match write E2E
+3. P0-5 normalized Result
+4. normalized RankingAward
+5. normalized 반영 취소 / 재반영
+6. Records normalized read 전환
+7. 팀전 normalized 연결
 
 그 이후
 9. Team Builder → TeamSnapshot → 공식 Submission

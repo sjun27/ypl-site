@@ -4,7 +4,7 @@
 >
 > 현재 할 일과 우선순위는 `docs/ROADMAP.md`, 실제 변경 이력은 `docs/PATCH_NOTES_2026-08-26.md`를 봅니다.
 
-마지막 업데이트: 2026-08-31
+마지막 업데이트: 2026-09-03
 
 ---
 
@@ -724,7 +724,7 @@ Player
 - 동일 `display_name`의 Player가 2명 이상 → `EventRegistration.player_id = NULL`로 신청 저장
 - fuzzy match로 유사 이름의 다른 Player를 자동 선택하지 않는다.
 
-신청 단계에서는 신규 Player를 만들지 않는다. 실제 참가자가 확정된 기록 반영 단계에서만 NULL identity를 다시 exact match하고, 0명이면 신규 Player 생성, 1명이면 재사용, 2명 이상이면 자동 반영을 중단한다.
+신청 단계에서는 신규 Player를 만들지 않는다. 실제 참가자가 확정되는 Event 연결 개인전 Bracket 생성 단계에서 NULL identity를 다시 exact match하고, 0명이면 신규 Player 생성, 1명이면 재사용, 2명 이상이면 자동 확정을 중단한다. 전환 이전 Bracket은 기록 반영 단계의 기존 fallback을 유지한다.
 
 ---
 
@@ -1498,9 +1498,23 @@ competition_settings
 기존 Event 선택
 → 신청자 전원 기본 체크
 → 불참자만 체크 해제
-→ 대진표 생성
+→ 수동 참가자 추가
+→ 전체 참가자의 Registration / Player identity read-only preflight
+→ 필요한 Player / manual Registration 생성 및 NULL player_id 연결
 → 선택된 Registration에서 Entry / EntryParticipant 생성
+→ legacy 대진표 저장
+→ Event running
 ```
+
+개인전은 `1 Player = 1 Registration = 1 Entry = 1 EntryParticipant`로 확정한다.
+Event당 연결 Bracket은 하나만 허용하며, legacy-only Bracket과 팀전에는 이 제한을 확장하지 않는다.
+
+Bracket participant의 기존 `id`는 legacy graph `pid` 호환을 위해 유지하고,
+normalized 연결은 `registrationId / playerId / entryId / entryParticipantId`로 함께 저장한다.
+
+참가 확정 metadata는 `recordMeta.identityChanges`와 분리해 Bracket의
+`participantConfirmation`이 소유한다. 기록 반영 전 Bracket 삭제 시에만 이 metadata로
+EntryParticipant → Entry → manual Registration → Registration.player_id → 신규 Player 순서로 원복한다.
 
 파티 미제출은 참가를 막지 않는다.
 
@@ -1552,13 +1566,13 @@ competition_settings
 
 공개 Records에는 final_submission_id가 가리키는 최종 Snapshot만 표시하고 이전 revision은 운영 이력으로 보존한다.
 
-Bracket participant identity는 복사된 이름/party가 아니라 Entry ID를 기준으로 연결한다.
+Bracket participant의 normalized identity는 Entry ID를 기준으로 연결한다. 전환 중에는 legacy graph의 participant ID를 함께 유지한다.
 
 현재 legacy Bracket 기록 반영의 안전 순서는 다음과 같다.
 
 ```text
-1. 실제 참가자 전원의 identity를 사전 검증
-2. 필요한 Player 생성 및 EventRegistration 연결/manual 생성
+1. Entry-linked Bracket은 기존 Entry / EntryParticipant identity 검증
+2. 전환 이전 Bracket만 Player / Registration identity fallback 수행
 3. legacy 기록 결과 준비
 4. public.site_data / ypl_data_v4 저장
 5. 저장 성공 후에만 Event completed + record_applied_at 기록
@@ -1594,6 +1608,9 @@ Player
 Season
 Event
 EventRegistration
+Entry
+EntryParticipant
+Match (개인전 runtime)
 ```
 
 신규 신청은 EventRegistration에 저장하며 신청 단계에서는 신규 Player를 생성하지 않는다.
@@ -1608,13 +1625,17 @@ EventRegistration
 
 동명이인이나 유사 이름을 fuzzy match로 자동 확정하지 않는다.
 
-실제 참가자가 확정되는 기록 반영 단계에서 NULL identity를 다시 검사한다.
+실제 참가자가 확정되는 Event 연결 개인전 Bracket 생성 단계에서 NULL identity를 다시 검사한다.
 
 ```text
 0명   → 신규 Player 생성
 1명   → 기존 Player 재사용
-2명+  → 기록 반영 중단
+2명+  → 참가 확정 중단
 ```
+
+모든 참가자의 ambiguity, 중복 Registration/Player, 다른 Registration의 Player claim,
+기존 Entry 존재 여부를 write 전에 검사한다. preflight가 전부 성공한 뒤에만
+Player → Registration → Entry → EntryParticipant를 쓰며 중간 실패는 FK 역순으로 보상 원복한다.
 
 ### 현재 legacy runtime 사용 범위
 
@@ -1623,24 +1644,27 @@ EventRegistration
 ```text
 Bracket 결과
 회차 기록
-Match/입상 기록
+Result 성격의 입상 기록
 누적 랭킹
 시즌 성적
 Records 표시 데이터
 ```
 
+Bracket 자체와 화면 렌더링의 source of truth는 계속 legacy JSON이다. 다만 Event-linked
+개인전에서 실제로 양쪽 Entry가 성립한 경기는 normalized `matches`에도 함께 저장한다.
+
 따라서 현재 기록 반영 경로는 다음 hybrid 구조다.
 
 ```text
-Event / EventRegistration / Player
-          normalized
-              │
-              ▼
-        participant identity
-              │
-              ▼
-Bracket / Round / Ranking / Records
-             legacy
+Event / EventRegistration / Player / Entry / EntryParticipant / Match
+                       normalized
+                           │
+                           ▼
+              Bracket participant.entryId
+                           │
+                           ▼
+            Bracket / Round / Result / Ranking / Records
+                          legacy
 ```
 
 이는 최종 구조가 아니라 단계적 migration을 위한 임시 연결 구조다.
@@ -1665,29 +1689,70 @@ Application
 
 Team Builder / RegistrationSubmission / TeamSnapshot 연결은 신청→기록 흐름이 안정된 뒤 추가한다.
 
-### 기록 반영 write ordering
+### Bracket 생성과 기록 반영 write ordering
 
 현재 hybrid 구조에서는 browser의 normalized write와 `public.site_data` 저장을 하나의 PostgreSQL transaction으로 묶을 수 없다.
 
-따라서 다음 순서를 사용한다.
+Bracket 생성은 다음 순서를 사용한다.
 
 ```text
-1. 참가자 identity 사전 검증
-2. 필요한 Player / Registration identity 변경
-3. legacy 기록 결과 생성
-4. ypl_data_v4 저장
-5. 저장 성공 후 Event completed / record_applied_at 기록
+1. 모든 참가자 read-only preflight
+2. Player / Registration / Entry / EntryParticipant 생성·연결
+3. 현재 Bracket에서 성립한 normalized Match 동기화
+4. participantConfirmation metadata를 포함한 ypl_data_v4 저장
+5. 저장 성공 후 Event running
 ```
 
-legacy 저장이 실패하면 해당 반영 과정에서 발생한 identity 변경도 가능한 범위에서 즉시 원복한다.
+3단계 이후 legacy 저장이 실패하면 runtime Match를 먼저 삭제한 뒤 해당 참가 확정 변경을 원복한다.
 
 원복 대상:
 
-- 이번 반영에서 생성한 manual EventRegistration
-- 이번 반영에서 새로 연결한 `EventRegistration.player_id`
-- 이번 반영에서 생성한 Player
+- EntryParticipant
+- Entry
+- 이번 참가 확정에서 생성한 manual EventRegistration
+- 이번 참가 확정에서 새로 연결한 `EventRegistration.player_id`
+- 이번 참가 확정에서 생성한 Player
 
-기록 반영 취소에서는 legacy 기록을 원복한 뒤 Event를 다시 `running`으로 열고 `record_applied_at`을 NULL로 되돌린다.
+Event running 저장이 실패하면 먼저 legacy Bracket 제거를 저장한 뒤 runtime Match를 삭제하고 normalized 참가 확정을 원복한다.
+legacy 제거 저장도 실패하면 Bracket, runtime Match, normalized identity를 유지해 사용자가 Bracket 삭제로 복구할 수 있게 한다.
+
+기록 반영은 Entry-linked Bracket에서 Player/Registration을 다시 생성하지 않고 현재 DB 연결만 검증한다.
+legacy 기록을 저장하기 직전에 final Match sync를 다시 수행하며, 실패하면 기록 반영을 중단한다.
+전환 이전 `entryId` 없는 Bracket은 기존 fallback을 사용한다.
+
+기록 반영 취소에서는 legacy 기록을 원복한 뒤 Event를 다시 `running`으로 열고 `record_applied_at`을 NULL로 되돌린다. 이때 Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
+
+기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. FK 순서에 따라 runtime Match를 먼저 삭제하고 normalized 참가 확정을 원복한 다음 legacy Bracket 삭제를 저장한다. 이후 `participantConfirmation.previousEventStatus`가 `open`이면 Event를 `open`으로 복구한다. 이전부터 `running`이었던 Event는 `running`을 유지한다.
+
+### P0-4 normalized Match runtime sync
+
+`normalizedCompetitionService.js`가 Event 단위 Match 동기화를 담당한다.
+
+```text
+legacy participant pid
+→ bracket.participants[].id
+→ participant.entryId
+→ matches.entry_a_id / entry_b_id / winner_entry_id
+```
+
+- `match_kind = bracket`
+- `source = legacy_bracket_runtime`
+- `source_node_key = legacy match node id`
+- 개인전이므로 `player_a_id / player_b_id / winner_player_id = NULL`
+- 승자 확정은 `resolution = played`, 미확정은 `unknown`
+- 같은 승자를 유지하면 기존 `played_at`을 보존하고, 승자 변경은 새 시각, 취소는 NULL
+
+Single elimination, Double elimination의 winner/loser/GF/reset, Group, Group→Knockout을
+동일 snapshot 계산기로 처리한다. reset final은 GF에서 패자조 진출자가 승리했을 때만 활성화한다.
+
+동기화는 partial unique index를 PostgREST upsert conflict target으로 가정하지 않는다.
+Event와 runtime source의 기존 row를 먼저 읽고 `source_node_key`로 비교해 UPDATE/INSERT/DELETE한다.
+다른 source의 historical Match는 조회·수정·삭제하지 않는다. 빠른 연속 UI 입력은 화면 guard와
+Event 단위 service queue로 직렬화한다.
+
+결과 변경은 normalized sync 후 legacy save 순서다. legacy save가 실패하면 이전 Bracket snapshot을
+best-effort로 재동기화하고 서버 데이터를 다시 읽는다. Entry identity가 없는 전환 이전 Bracket과
+Event 없는 legacy-only Bracket은 Match sync를 건너뛰며 기존 기록 흐름을 유지한다.
 
 ### Event 수정 / 삭제 일관성
 

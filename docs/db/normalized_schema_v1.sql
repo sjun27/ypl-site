@@ -166,7 +166,8 @@ create table if not exists event_registrations (
     id uuid primary key default gen_random_uuid(),
     event_id uuid not null references events(id) on delete restrict,
     -- Application does not create Player rows. Exact single matches may be
-    -- linked here; new/ambiguous identities remain NULL until record apply.
+    -- linked here; new/ambiguous identities remain NULL until actual
+    -- participation is confirmed by an Event-linked Bracket.
     player_id uuid references players(id) on delete restrict,
 
     registration_name text not null,

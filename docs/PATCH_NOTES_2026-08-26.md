@@ -1331,11 +1331,13 @@ Player
 Season
 Event
 EventRegistration
+Entry
+EntryParticipant
+Match (Event-linked 개인전 runtime)
 ```
 
 다음 기록 데이터는 아직 legacy `ypl_data_v4`가 source of truth다.
 
-- Match
 - Result
 - RankingAward
 - 시즌 성적
@@ -1355,3 +1357,99 @@ EventRegistration
 순으로 신청부터 기록까지 normalized end-to-end 흐름을 완성하는 것이다.
 
 Team Builder → TeamSnapshot → RegistrationSubmission 연결은 그 이후 진행한다.
+
+## 2026-09-03 P0-1~P0-3 참가 확정 / Entry lifecycle
+
+Event 연결 개인전 Bracket 생성 시 실제 참가 identity를 normalized DB에 확정하도록 연결했다.
+
+```text
+전체 참가자 read-only preflight
+→ Player 확정/생성
+→ EventRegistration.player_id 연결 또는 manual Registration 생성
+→ 개인 Entry 생성
+→ EntryParticipant 생성
+→ participant.entryId 저장
+→ legacy Bracket 저장
+→ Event running
+```
+
+주요 안전장치:
+
+- 신청 단계의 Player 미생성 및 exact-single-match 정책 유지
+- 동명이인 Player, 중복 Registration/Player claim, 동일 신규 이름, 기존 Entry를 첫 write 전에 차단
+- 생성 UUID를 client에서 먼저 고정해 write 응답 유실 때도 rollback 대상 보존
+- 중간 실패 시 EntryParticipant → Entry → manual Registration → Registration.player_id → 신규 Player 순서로 보상 원복
+- 같은 Event에 연결된 기존 Bracket이 있으면 신규 생성 차단
+- legacy Bracket 저장 실패 시 normalized 참가 확정 전량 원복
+- Event running 변경 실패 시 legacy Bracket 제거 저장 후 normalized 참가 확정 원복 시도
+- 기록 반영 전 Bracket 삭제 시 `participantConfirmation`으로 참가 확정 원복 및 이전 Event 상태 복구
+- 기록 반영 취소는 Entry / EntryParticipant / Player / Registration identity 유지
+- Entry-linked Bracket의 record apply는 기존 identity를 검증만 하며 다시 생성하지 않음
+- 전환 이전 `entryId` 없는 Bracket은 기존 record-apply fallback 유지
+- 기존 fallback도 write 중 실패 시 보상 원복하도록 보강
+
+legacy graph의 `pid`는 기존 participant ID를 계속 사용한다. participant에는 별도로
+`registrationId / playerId / entryId / entryParticipantId`를 저장한다.
+
+검증:
+
+- Vite production build 성공 (110 modules)
+- `git diff --check` 성공
+- Test Supabase 실제 write E2E는 아직 수행하지 않았으며 별도 검증 단계로 남김
+
+## 2026-09-03 P0-4 normalized Match runtime sync
+
+기존 Bracket UI/UX와 `ypl_data_v4` 저장을 유지하면서 Event-linked 개인전의 실제 경기를
+normalized `matches`에도 동기화하도록 연결했다.
+
+```text
+legacy bracket JSON
++ normalized matches(source = legacy_bracket_runtime)
+```
+
+### snapshot 범위
+
+- Single elimination `graph.rounds`
+- Double elimination winner bracket / loser bracket / grand final
+- GF에서 패자조 진출자가 이긴 경우에만 reset final
+- Group `groups[].matches`
+- Group→Knockout `knockout`
+- BYE와 한쪽 participant가 미정인 미래 경기는 제외
+
+legacy participant pid는 `bracket.participants[].id`를 거쳐 `entryId`로 resolve한다.
+개인전 Match는 Entry FK만 사용하고 Player FK는 NULL로 유지한다.
+
+### idempotent sync와 승자 lifecycle
+
+Event + runtime source의 기존 Match를 조회한 뒤 `source_node_key`로 직접 비교한다.
+
+- 기존 node: 필요한 필드만 UPDATE
+- 신규 node: INSERT
+- snapshot에서 사라진 runtime node: DELETE
+- historical/migration 등 다른 source: 변경하지 않음
+- 동일 winner: 기존 `played_at` 유지
+- winner 변경: 새 `played_at`
+- winner 취소: `winner_entry_id / played_at = NULL`, `resolution = unknown`
+- downstream pairing 변경: 같은 source node row를 새 Entry pairing으로 갱신
+
+빠른 연속 결과 입력은 화면 guard와 Event 단위 service queue로 직렬화한다.
+Double elimination의 GF 결과가 바뀌면 legacy reset winner도 함께 clear해 비활성 reset 결과가
+재활성화 때 되살아나지 않도록 보강했다.
+
+### 저장·삭제·기록 반영 순서
+
+- 결과 입력: normalized sync → legacy save
+- legacy save 실패: 이전 Bracket snapshot best-effort resync → 서버 refresh
+- Bracket 생성: participant confirmation → initial Match sync → legacy save → Event running
+- Bracket 삭제: runtime Match 삭제 → EntryParticipant/Entry/identity rollback → legacy 삭제 → Event 상태 복구
+- 기록 반영: legacy 저장 직전 final Match sync, 실패 시 반영 중단
+- 기록 반영 취소/재반영: Match 유지 및 동일 row 재사용
+
+Event 없는 legacy-only Bracket, Entry identity가 없는 전환 이전 Bracket, 팀전은 Match sync를
+건너뛰어 기존 동작을 유지한다. P0-5 Result와 팀전 Match는 이번 범위에 포함하지 않았다.
+
+검증:
+
+- pure helper test 6개 성공
+- Vite production build 성공 (111 modules)
+- Supabase 실제 write E2E는 수행하지 않음

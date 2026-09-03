@@ -1,4 +1,9 @@
 import { supa as client } from "../storage.js";
+import {
+  LEGACY_BRACKET_RUNTIME_SOURCE,
+  buildBracketMatchSyncPlan,
+  buildEventBracketMatchSnapshot,
+} from "./bracketMatchSnapshot.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -18,6 +23,160 @@ export const NORMALIZED_DATA_SCHEMA = DATA_SCHEMA;
 
 export function normalizedDbAvailable() {
   return Boolean(client);
+}
+
+const eventMatchMutationQueues = new Map();
+
+function queueEventMatchMutation(eventId, operation) {
+  const previous = eventMatchMutationQueues.get(eventId) || Promise.resolve();
+  const current = previous.catch(() => null).then(operation);
+  eventMatchMutationQueues.set(eventId, current);
+  const clear = () => {
+    if (eventMatchMutationQueues.get(eventId) === current) {
+      eventMatchMutationQueues.delete(eventId);
+    }
+  };
+  current.then(clear, clear);
+  return current;
+}
+
+function bracketMatchIdentityState(eventId, bracket) {
+  if (!eventId) return { eligible: false, reason: "event_unlinked" };
+  if (!bracket || (bracket.eventId && bracket.eventId !== eventId)) {
+    throw new Error("normalized Match 대상 Event와 대진표 연결이 일치하지 않습니다.");
+  }
+  if (bracket.mode === "team") return { eligible: false, reason: "team_event" };
+
+  const participants = (bracket.participants || [])
+    .filter(participant => !Array.isArray(participant?.members));
+  if (!participants.length) return { eligible: false, reason: "legacy_bracket" };
+
+  const entryLinkedCount = participants.filter(participant => participant?.entryId).length;
+  if (!entryLinkedCount) return { eligible: false, reason: "legacy_bracket" };
+  if (entryLinkedCount !== participants.length) {
+    throw new Error("일부 참가자에게만 Entry identity가 있어 normalized Match를 동기화할 수 없습니다.");
+  }
+
+  const entryIds = participants.map(participant => participant.entryId);
+  if (new Set(entryIds).size !== entryIds.length) {
+    throw new Error("동일한 Entry identity가 대진표 참가자 두 명 이상에게 연결되어 있습니다.");
+  }
+
+  return { eligible: true, participants };
+}
+
+async function syncEventBracketMatchesNow(eventId, bracket) {
+  const identityState = bracketMatchIdentityState(eventId, bracket);
+  if (!identityState.eligible) {
+    return { skipped: true, reason: identityState.reason, inserted: 0, updated: 0, deleted: 0 };
+  }
+
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("normalized Match를 연결할 Event를 찾을 수 없습니다.");
+  if (event.is_team_event) {
+    throw new Error("팀전 Event의 normalized Match 동기화는 아직 지원하지 않습니다.");
+  }
+
+  const desiredRows = buildEventBracketMatchSnapshot(bracket);
+  const { data: existingRows, error: selectError } = await db()
+    .from("matches")
+    .select(`
+      id,
+      source_node_key,
+      match_kind,
+      round_number,
+      stage_label,
+      sequence_no,
+      entry_a_id,
+      entry_b_id,
+      player_a_id,
+      player_b_id,
+      winner_entry_id,
+      winner_player_id,
+      resolution,
+      played_at
+    `)
+    .eq("event_id", eventId)
+    .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE);
+
+  if (selectError) fail(selectError, "기존 normalized Match를 확인하지 못했습니다.");
+
+  const now = new Date().toISOString();
+  const plan = buildBracketMatchSyncPlan(existingRows || [], desiredRows, now);
+
+  for (const update of plan.updates) {
+    const { data, error } = await db()
+      .from("matches")
+      .update({ ...update.payload, updated_at: now })
+      .eq("id", update.id)
+      .eq("event_id", eventId)
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .select("id")
+      .maybeSingle();
+
+    if (error) fail(error, `normalized Match '${update.payload.source_node_key}'를 수정하지 못했습니다.`);
+    if (!data) throw new Error(`normalized Match '${update.payload.source_node_key}'가 동기화 중 변경되었습니다.`);
+  }
+
+  if (plan.inserts.length) {
+    const { data, error } = await db()
+      .from("matches")
+      .insert(plan.inserts.map(row => ({
+        ...row,
+        event_id: eventId,
+        source: LEGACY_BRACKET_RUNTIME_SOURCE,
+        updated_at: now,
+      })))
+      .select("id");
+
+    if (error) fail(error, "신규 normalized Match를 생성하지 못했습니다.");
+    if ((data || []).length !== plan.inserts.length) {
+      throw new Error("일부 신규 normalized Match가 저장되지 않았습니다.");
+    }
+  }
+
+  if (plan.deleteIds.length) {
+    const { data, error } = await db()
+      .from("matches")
+      .delete()
+      .eq("event_id", eventId)
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .in("id", plan.deleteIds)
+      .select("id");
+
+    if (error) fail(error, "더 이상 성립하지 않는 normalized Match를 정리하지 못했습니다.");
+    if ((data || []).length !== plan.deleteIds.length) {
+      throw new Error("일부 stale normalized Match가 삭제되지 않았습니다.");
+    }
+  }
+
+  return {
+    skipped: false,
+    inserted: plan.inserts.length,
+    updated: plan.updates.length,
+    deleted: plan.deleteIds.length,
+  };
+}
+
+export async function syncEventBracketMatches(eventId, bracket) {
+  if (!eventId) return { skipped: true, reason: "event_unlinked", inserted: 0, updated: 0, deleted: 0 };
+  return queueEventMatchMutation(eventId, () => syncEventBracketMatchesNow(eventId, bracket));
+}
+
+export async function deleteEventBracketMatches(eventId) {
+  if (!eventId) return { deleted: 0 };
+
+  return queueEventMatchMutation(eventId, async () => {
+    const { data, error } = await db()
+      .from("matches")
+      .delete()
+      .eq("event_id", eventId)
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .select("id");
+
+    if (error) fail(error, "Event의 runtime normalized Match를 정리하지 못했습니다.");
+    return { deleted: (data || []).length };
+  });
 }
 
 export async function getEvent(eventId) {
@@ -386,11 +545,19 @@ export async function completeApplicationEvent(eventId) {
   return data;
 }
 
-async function createRecordPlayer(displayName) {
+function newDatabaseId() {
+  if (!globalThis.crypto?.randomUUID) {
+    throw new Error("이 브라우저에서는 안전한 UUID 생성을 지원하지 않습니다.");
+  }
+  return globalThis.crypto.randomUUID();
+}
+
+async function createRecordPlayer(displayName, playerId = newDatabaseId()) {
   const name = String(displayName || "").trim();
   const { data: created, error: createError } = await db()
     .from("players")
     .insert({
+      id: playerId,
       display_name: name,
       status: "active",
     })
@@ -401,24 +568,40 @@ async function createRecordPlayer(displayName) {
   return created;
 }
 
-export async function resolveEventParticipantsForRecord(eventId, participants = []) {
-  if (!eventId) return [];
-
-  const actualParticipants = (participants || [])
-    .filter(p => !Array.isArray(p.members))
-    .map(p => ({
-      ...p,
-      name: String(p.name || "").trim(),
+function actualIndividualParticipants(participants = [], emptyMessage) {
+  const actual = (participants || [])
+    .filter(participant => !Array.isArray(participant?.members))
+    .map(participant => ({
+      ...participant,
+      name: String(participant?.name || "").trim(),
     }))
-    .filter(p => p.name);
+    .filter(participant => participant.name);
 
-  if (!actualParticipants.length) throw new Error("기록에 반영할 실제 참가자가 없습니다.");
+  if (!actual.length) throw new Error(emptyMessage);
+
+  const participantIds = new Set();
+  for (const participant of actual) {
+    if (!participant.id) throw new Error(`'${participant.name}' 참가자의 대진표 ID가 없습니다.`);
+    if (participantIds.has(participant.id)) {
+      throw new Error(`'${participant.name}' 참가자가 대진표에 중복되어 있습니다.`);
+    }
+    participantIds.add(participant.id);
+  }
+
+  return actual;
+}
+
+async function preflightEventParticipantIdentities(eventId, participants, { requireEmptyEntries = false } = {}) {
+  const actualParticipants = actualIndividualParticipants(
+    participants,
+    "확정할 실제 참가자가 없습니다."
+  );
 
   const event = await getEvent(eventId);
   if (!event) throw new Error("연결된 대회를 찾을 수 없습니다.");
-  if (event.is_team_event) throw new Error("팀전 Event의 Player 확정은 아직 지원하지 않습니다.");
+  if (event.is_team_event) throw new Error("팀전 Event의 참가자 확정은 아직 지원하지 않습니다.");
   if (!["open", "running"].includes(event.status) || event.record_applied_at) {
-    throw new Error("현재 기록을 반영할 수 없는 대회입니다.");
+    throw new Error("현재 참가자를 확정할 수 없는 대회입니다.");
   }
 
   const { data: registrations, error: registrationError } = await db()
@@ -428,20 +611,42 @@ export async function resolveEventParticipantsForRecord(eventId, participants = 
 
   if (registrationError) fail(registrationError, "대회 참가 신청 정보를 확인하지 못했습니다.");
 
-  const registrationById = new Map((registrations || []).map(row => [row.id, row]));
+  if (requireEmptyEntries) {
+    const { data: existingEntries, error: entryError } = await db()
+      .from("entries")
+      .select("id")
+      .eq("event_id", eventId)
+      .limit(1);
+
+    if (entryError) fail(entryError, "기존 참가 확정 정보를 확인하지 못했습니다.");
+    if (existingEntries?.length) {
+      throw new Error("이 Event에는 이미 확정된 Entry가 있습니다. Event당 대진표는 하나만 생성할 수 있습니다.");
+    }
+  }
+
+  const registrationRows = registrations || [];
+  const registrationById = new Map(registrationRows.map(row => [row.id, row]));
+  const claimedRegistrationIds = new Set();
   const plans = actualParticipants.map(participant => {
     let registration = null;
 
     if (participant.registrationId) {
       registration = registrationById.get(participant.registrationId) || null;
-      if (!registration) throw new Error(`${participant.name}의 참가 신청 연결을 찾을 수 없습니다.`);
+      if (!registration) {
+        throw new Error(`${participant.name}의 참가 신청이 이 Event에 속하지 않거나 존재하지 않습니다.`);
+      }
     } else {
-      const matches = (registrations || []).filter(row => row.registration_name === participant.name);
+      const matches = registrationRows.filter(row => row.registration_name === participant.name);
       if (matches.length > 1) {
-        throw new Error(`'${participant.name}' 이름의 참가 신청이 중복되어 있습니다. 기록 반영 전에 확인이 필요합니다.`);
+        throw new Error(`'${participant.name}' 이름의 참가 신청이 중복되어 있습니다. 참가 확정 전에 확인이 필요합니다.`);
       }
       registration = matches[0] || null;
     }
+
+    if (registration && claimedRegistrationIds.has(registration.id)) {
+      throw new Error(`'${participant.name}' 참가 신청이 대진표에 중복되어 있습니다.`);
+    }
+    if (registration) claimedRegistrationIds.add(registration.id);
 
     return {
       participant,
@@ -458,6 +663,7 @@ export async function resolveEventParticipantsForRecord(eventId, participants = 
       .from("players")
       .select("id, display_name")
       .in("display_name", namesToResolve);
+
     if (error) fail(error, "참가자 Player 정보를 확인하지 못했습니다.");
     players = data || [];
   }
@@ -466,7 +672,7 @@ export async function resolveEventParticipantsForRecord(eventId, participants = 
     if (plan.playerId) continue;
     const matches = players.filter(player => player.display_name === plan.identityName);
     if (matches.length > 1) {
-      throw new Error(`'${plan.identityName}' 이름의 Player가 2명 이상 존재합니다. 기록 반영 전에 관리자가 직접 확인해야 합니다.`);
+      throw new Error(`'${plan.identityName}' 이름의 Player가 2명 이상 존재합니다. 관리자가 직접 확인해야 합니다.`);
     }
     plan.playerId = matches[0]?.id || null;
   }
@@ -480,7 +686,7 @@ export async function resolveEventParticipantsForRecord(eventId, participants = 
     claimedIdentity.set(key, plan);
 
     if (plan.playerId) {
-      const conflictingRegistration = (registrations || []).find(row =>
+      const conflictingRegistration = registrationRows.find(row =>
         row.player_id === plan.playerId && row.id !== plan.registration?.id
       );
       if (conflictingRegistration) {
@@ -489,79 +695,441 @@ export async function resolveEventParticipantsForRecord(eventId, participants = 
     }
   }
 
-  const resolved = [];
-  for (const plan of plans) {
-    const { participant, registration, identityName } = plan;
-    const playerWasCreated = !plan.playerId;
-    const player = plan.playerId ? { id: plan.playerId } : await createRecordPlayer(identityName);
+  return { event, actualParticipants, plans };
+}
 
-    if (registration?.player_id) {
-      resolved.push({
-        ...participant,
-        registrationId: registration.id,
-        playerId: registration.player_id,
-        playerWasCreated: false,
-        registrationWasCreated: false,
-        registrationPlayerWasLinked: false,
-      });
-      continue;
+function rollbackFailure(originalError, rollbackErrors) {
+  const rollbackSummary = rollbackErrors.map(error => error.message).join(" / ");
+  const combined = new Error(
+    `${originalError?.message || "참가자 확정에 실패했습니다."} (자동 원복 실패: ${rollbackSummary})`
+  );
+  combined.code = "YPL_PARTICIPANT_CONFIRMATION_ROLLBACK_FAILED";
+  combined.cause = originalError;
+  combined.rollbackErrors = rollbackErrors;
+  return combined;
+}
+
+export async function rollbackEventParticipantConfirmation(
+  eventId,
+  identityChanges = [],
+  { requireUnappliedEvent = false } = {}
+) {
+  if (!eventId) return null;
+
+  if (requireUnappliedEvent) {
+    const event = await getEvent(eventId);
+    if (!event) throw new Error("참가 확정을 원복할 Event를 찾을 수 없습니다.");
+    if (event.record_applied_at || event.status === "completed") {
+      throw new Error("기록이 반영된 Event의 참가 확정은 Bracket 삭제로 원복할 수 없습니다.");
     }
-
-    if (registration) {
-      const { data: updated, error } = await db()
-        .from("event_registrations")
-        .update({
-          player_id: player.id,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", registration.id)
-        .eq("event_id", eventId)
-        .is("player_id", null)
-        .select("id, player_id")
-        .single();
-
-      if (error) fail(error, `${identityName}의 Player 연결을 저장하지 못했습니다.`);
-
-      resolved.push({
-        ...participant,
-        registrationId: updated.id,
-        playerId: updated.player_id,
-        playerWasCreated,
-        registrationWasCreated: false,
-        registrationPlayerWasLinked: true,
-      });
-      continue;
-    }
-
-    const now = new Date().toISOString();
-    const { data: createdRegistration, error } = await db()
-      .from("event_registrations")
-      .insert({
-        event_id: eventId,
-        player_id: player.id,
-        registration_name: identityName,
-        registration_data: {},
-        registration_source: "manual",
-        registered_at: now,
-        updated_at: now,
-      })
-      .select("id, player_id")
-      .single();
-
-    if (error) fail(error, `${identityName}의 참가자 등록을 생성하지 못했습니다.`);
-
-    resolved.push({
-      ...participant,
-      registrationId: createdRegistration.id,
-      playerId: createdRegistration.player_id,
-      playerWasCreated,
-      registrationWasCreated: true,
-      registrationPlayerWasLinked: false,
-    });
   }
 
+  const changes = Array.isArray(identityChanges) ? [...identityChanges].reverse() : [];
+  const rollbackErrors = [];
+  const remember = (error, fallback) => {
+    if (!error) return;
+    const next = new Error(error.message || fallback);
+    next.code = error.code || "YPL_DB_ERROR";
+    rollbackErrors.push(next);
+  };
+
+  for (const change of changes) {
+    if (!change?.entryParticipantId) continue;
+    const { error } = await db()
+      .from("entry_participants")
+      .delete()
+      .eq("id", change.entryParticipantId)
+      .eq("event_id", eventId);
+    remember(error, `${change.name || "참가자"}의 EntryParticipant를 정리하지 못했습니다.`);
+  }
+
+  for (const change of changes) {
+    if (!change?.entryWasCreated || !change.entryId) continue;
+    const { error } = await db()
+      .from("entries")
+      .delete()
+      .eq("id", change.entryId)
+      .eq("event_id", eventId);
+    remember(error, `${change.name || "참가자"}의 Entry를 정리하지 못했습니다.`);
+  }
+
+  for (const change of changes) {
+    if (!change?.registrationId) continue;
+
+    if (change.registrationWasCreated) {
+      const { error } = await db()
+        .from("event_registrations")
+        .delete()
+        .eq("id", change.registrationId)
+        .eq("event_id", eventId);
+      remember(error, `${change.name || "참가자"}의 신규 참가 등록을 정리하지 못했습니다.`);
+      continue;
+    }
+
+    if (change.registrationPlayerWasLinked && change.playerId) {
+      const { error } = await db()
+        .from("event_registrations")
+        .update({
+          player_id: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", change.registrationId)
+        .eq("event_id", eventId)
+        .eq("player_id", change.playerId);
+      remember(error, `${change.name || "참가자"}의 Player 연결을 정리하지 못했습니다.`);
+    }
+  }
+
+  const createdPlayerIds = [...new Set(
+    changes
+      .filter(change => change?.playerWasCreated && change?.playerId)
+      .map(change => change.playerId)
+  )];
+
+  for (const playerId of createdPlayerIds) {
+    const { error } = await db()
+      .from("players")
+      .delete()
+      .eq("id", playerId);
+
+    if (error && String(error.code || "") !== "23503") {
+      remember(error, "참가 확정 과정에서 생성된 Player를 정리하지 못했습니다.");
+    }
+  }
+
+  if (rollbackErrors.length) {
+    const error = new Error(rollbackErrors.map(row => row.message).join(" / "));
+    error.code = "YPL_PARTICIPANT_CONFIRMATION_ROLLBACK_FAILED";
+    error.rollbackErrors = rollbackErrors;
+    throw error;
+  }
+
+  return null;
+}
+
+async function writeEventParticipantIdentities(eventId, plans, { createEntries = false } = {}) {
+  const resolved = [];
+
+  try {
+    for (const plan of plans) {
+      const { participant, registration, identityName } = plan;
+      const playerWasCreated = !plan.playerId;
+      const playerId = plan.playerId || newDatabaseId();
+      const resolvedParticipant = {
+        ...participant,
+        registrationId: registration?.id || null,
+        playerId,
+        playerWasCreated,
+        registrationWasCreated: false,
+        registrationPlayerWasLinked: false,
+        entryId: null,
+        entryWasCreated: false,
+        entryParticipantId: null,
+      };
+      // 생성 ID를 client에서 먼저 정해 응답이 유실되어도 rollback 대상을 안다.
+      resolved.push(resolvedParticipant);
+
+      if (playerWasCreated) await createRecordPlayer(identityName, playerId);
+
+      if (registration?.player_id) {
+        Object.assign(resolvedParticipant, {
+          playerId: registration.player_id,
+          playerWasCreated: false,
+        });
+      } else if (registration) {
+        resolvedParticipant.registrationPlayerWasLinked = true;
+        const { data: updated, error } = await db()
+          .from("event_registrations")
+          .update({
+            player_id: playerId,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", registration.id)
+          .eq("event_id", eventId)
+          .is("player_id", null)
+          .select("id, player_id")
+          .single();
+
+        if (error) fail(error, `${identityName}의 Player 연결을 저장하지 못했습니다.`);
+        Object.assign(resolvedParticipant, {
+          registrationId: updated.id,
+          playerId: updated.player_id,
+        });
+      } else {
+        const now = new Date().toISOString();
+        const registrationId = newDatabaseId();
+        Object.assign(resolvedParticipant, {
+          registrationId,
+          registrationWasCreated: true,
+        });
+        const { data: createdRegistration, error } = await db()
+          .from("event_registrations")
+          .insert({
+            id: registrationId,
+            event_id: eventId,
+            player_id: playerId,
+            registration_name: identityName,
+            registration_data: {},
+            registration_source: "manual",
+            registered_at: now,
+            updated_at: now,
+          })
+          .select("id, player_id")
+          .single();
+
+        if (error) fail(error, `${identityName}의 참가자 등록을 생성하지 못했습니다.`);
+        Object.assign(resolvedParticipant, {
+          registrationId: createdRegistration.id,
+          playerId: createdRegistration.player_id,
+        });
+      }
+
+      if (createEntries) {
+        const entryId = newDatabaseId();
+        Object.assign(resolvedParticipant, { entryId, entryWasCreated: true });
+        const { data: entry, error: entryError } = await db()
+          .from("entries")
+          .insert({
+            id: entryId,
+            event_id: eventId,
+            entry_type: "individual",
+            display_name: identityName,
+            status: "active",
+          })
+          .select("id")
+          .single();
+
+        if (entryError) fail(entryError, `${identityName}의 Entry를 생성하지 못했습니다.`);
+        resolvedParticipant.entryId = entry.id;
+
+        const entryParticipantId = newDatabaseId();
+        resolvedParticipant.entryParticipantId = entryParticipantId;
+        const { data: entryParticipant, error: participantError } = await db()
+          .from("entry_participants")
+          .insert({
+            id: entryParticipantId,
+            event_id: eventId,
+            entry_id: entry.id,
+            registration_id: resolvedParticipant.registrationId,
+            player_id: resolvedParticipant.playerId,
+            member_order: 1,
+          })
+          .select("id")
+          .single();
+
+        if (participantError) fail(participantError, `${identityName}의 EntryParticipant를 생성하지 못했습니다.`);
+        resolvedParticipant.entryParticipantId = entryParticipant.id;
+      }
+    }
+  } catch (error) {
+    try {
+      await rollbackEventParticipantConfirmation(eventId, resolved);
+    } catch (rollbackError) {
+      throw rollbackFailure(error, rollbackError.rollbackErrors || [rollbackError]);
+    }
+    throw error;
+  }
+
+  return resolved;
+}
+
+export async function confirmEventParticipantsForBracket(eventId, participants = []) {
+  if (!eventId) throw new Error("연결된 Event가 없습니다.");
+
+  const { event, actualParticipants, plans } = await preflightEventParticipantIdentities(
+    eventId,
+    participants,
+    { requireEmptyEntries: true }
+  );
+  const resolved = await writeEventParticipantIdentities(eventId, plans, { createEntries: true });
+
+  if (
+    resolved.length !== actualParticipants.length ||
+    resolved.some(row => !row.playerId || !row.registrationId || !row.entryId || !row.entryParticipantId)
+  ) {
+    const error = new Error("모든 실제 참가자의 Player/Registration/Entry identity를 확정하지 못했습니다.");
+    try {
+      await rollbackEventParticipantConfirmation(eventId, resolved);
+    } catch (rollbackError) {
+      throw rollbackFailure(error, rollbackError.rollbackErrors || [rollbackError]);
+    }
+    throw error;
+  }
+
+  return {
+    eventId,
+    previousEventStatus: event.status,
+    confirmedAt: new Date().toISOString(),
+    participants: resolved,
+    identityChanges: resolved.map(row => ({
+      participantId: row.id,
+      name: row.name,
+      registrationId: row.registrationId,
+      playerId: row.playerId,
+      entryId: row.entryId,
+      entryParticipantId: row.entryParticipantId,
+      playerWasCreated: !!row.playerWasCreated,
+      registrationWasCreated: !!row.registrationWasCreated,
+      registrationPlayerWasLinked: !!row.registrationPlayerWasLinked,
+      entryWasCreated: !!row.entryWasCreated,
+    })),
+  };
+}
+
+export async function validateEventParticipantEntries(eventId, participants = []) {
+  if (!eventId) throw new Error("연결된 Event가 없습니다.");
+
+  const actualParticipants = actualIndividualParticipants(
+    participants,
+    "기록에 반영할 실제 참가자가 없습니다."
+  );
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("연결된 대회를 찾을 수 없습니다.");
+  if (event.is_team_event) throw new Error("팀전 Event의 Entry identity 검증은 아직 지원하지 않습니다.");
+  if (!["open", "running"].includes(event.status) || event.record_applied_at) {
+    throw new Error("현재 기록을 반영할 수 없는 대회입니다.");
+  }
+
+  if (actualParticipants.some(row => !row.registrationId || !row.playerId || !row.entryId)) {
+    throw new Error("일부 참가자에게 Entry identity가 없습니다. 전환 이전 대진표는 기존 identity 확정 경로를 사용해야 합니다.");
+  }
+
+  for (const [label, values] of [
+    ["Registration", actualParticipants.map(row => row.registrationId)],
+    ["Player", actualParticipants.map(row => row.playerId)],
+    ["Entry", actualParticipants.map(row => row.entryId)],
+  ]) {
+    if (new Set(values).size !== values.length) {
+      throw new Error(`동일한 ${label} identity가 대진표 참가자 두 명 이상에게 연결되어 있습니다.`);
+    }
+  }
+
+  const registrationIds = actualParticipants.map(row => row.registrationId);
+  const entryIds = actualParticipants.map(row => row.entryId);
+  const [{ data: registrations, error: registrationError }, { data: entries, error: entryError }, { data: entryParticipants, error: participantError }] = await Promise.all([
+    db()
+      .from("event_registrations")
+      .select("id, event_id, player_id, registration_name")
+      .eq("event_id", eventId)
+      .in("id", registrationIds),
+    db()
+      .from("entries")
+      .select("id, event_id, entry_type, status")
+      .eq("event_id", eventId)
+      .in("id", entryIds),
+    db()
+      .from("entry_participants")
+      .select("id, event_id, entry_id, registration_id, player_id, member_order")
+      .eq("event_id", eventId)
+      .in("entry_id", entryIds),
+  ]);
+
+  if (registrationError) fail(registrationError, "참가자의 Registration identity를 확인하지 못했습니다.");
+  if (entryError) fail(entryError, "참가자의 Entry identity를 확인하지 못했습니다.");
+  if (participantError) fail(participantError, "참가자의 EntryParticipant identity를 확인하지 못했습니다.");
+
+  const registrationById = new Map((registrations || []).map(row => [row.id, row]));
+  const entryById = new Map((entries || []).map(row => [row.id, row]));
+  const participantByEntryId = new Map((entryParticipants || []).map(row => [row.entry_id, row]));
+
+  return actualParticipants.map(participant => {
+    const registration = registrationById.get(participant.registrationId);
+    const entry = entryById.get(participant.entryId);
+    const entryParticipant = participantByEntryId.get(participant.entryId);
+
+    if (!registration || registration.player_id !== participant.playerId) {
+      throw new Error(`'${participant.name}' 참가자의 Registration/Player 연결이 현재 DB와 일치하지 않습니다.`);
+    }
+    if (!entry || entry.entry_type !== "individual" || entry.status !== "active") {
+      throw new Error(`'${participant.name}' 참가자의 활성 개인 Entry를 찾을 수 없습니다.`);
+    }
+    if (
+      !entryParticipant ||
+      entryParticipant.registration_id !== participant.registrationId ||
+      entryParticipant.player_id !== participant.playerId ||
+      entryParticipant.member_order !== 1
+    ) {
+      throw new Error(`'${participant.name}' 참가자의 EntryParticipant 연결이 현재 DB와 일치하지 않습니다.`);
+    }
+
+    return { ...participant, entryParticipantId: entryParticipant.id };
+  });
+}
+
+export async function markApplicationEventRunning(eventId, previousStatus = null) {
+  if (!eventId) return null;
+
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("진행 상태로 바꿀 Event를 찾을 수 없습니다.");
+  if (event.record_applied_at || !["open", "running"].includes(event.status)) {
+    throw new Error("현재 진행 상태로 바꿀 수 없는 Event입니다.");
+  }
+  if (previousStatus && event.status !== previousStatus) {
+    throw new Error("Bracket 생성 중 Event 상태가 변경되었습니다. 다시 확인해 주세요.");
+  }
+  if (event.status === "running") return event;
+
+  const { data, error } = await db()
+    .from("events")
+    .update({
+      status: "running",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", eventId)
+    .eq("status", event.status)
+    .is("record_applied_at", null)
+    .select("id, status, record_applied_at")
+    .maybeSingle();
+
+  if (error) fail(error, "Event 진행 상태를 저장하지 못했습니다.");
+  if (!data) throw new Error("Bracket 생성 중 Event 상태가 변경되었습니다. 다시 확인해 주세요.");
+  return data;
+}
+
+export async function restoreApplicationEventStatus(eventId, previousStatus) {
+  if (!eventId) return null;
+  if (!["open", "running"].includes(previousStatus)) {
+    throw new Error("복구할 수 없는 Event 이전 상태입니다.");
+  }
+
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("상태를 복구할 Event를 찾을 수 없습니다.");
+  if (event.record_applied_at) throw new Error("기록이 반영된 Event의 상태는 Bracket 삭제로 복구할 수 없습니다.");
+  if (event.status === previousStatus) return event;
+  if (event.status !== "running") {
+    throw new Error("Bracket 생성 이후 Event 상태가 별도로 변경되어 자동 복구하지 않았습니다.");
+  }
+
+  const { data, error } = await db()
+    .from("events")
+    .update({
+      status: previousStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", eventId)
+    .eq("status", "running")
+    .is("record_applied_at", null)
+    .select("id, status, record_applied_at")
+    .maybeSingle();
+
+  if (error) fail(error, "Bracket 삭제 후 Event 상태를 복구하지 못했습니다.");
+  if (!data) throw new Error("Event 상태가 변경되어 Bracket 생성 전 상태로 복구하지 못했습니다.");
+  return data;
+}
+
+export async function resolveEventParticipantsForRecord(eventId, participants = []) {
+  if (!eventId) return [];
+  const { actualParticipants, plans } = await preflightEventParticipantIdentities(eventId, participants);
+  const resolved = await writeEventParticipantIdentities(eventId, plans);
+
   if (resolved.length !== actualParticipants.length || resolved.some(row => !row.playerId || !row.registrationId)) {
-    throw new Error("모든 실제 참가자의 Player/Registration identity를 확정하지 못했습니다.");
+    const error = new Error("모든 실제 참가자의 Player/Registration identity를 확정하지 못했습니다.");
+    try {
+      await rollbackEventParticipantConfirmation(eventId, resolved);
+    } catch (rollbackError) {
+      throw rollbackFailure(error, rollbackError.rollbackErrors || [rollbackError]);
+    }
+    throw error;
   }
 
   return resolved;
@@ -699,62 +1267,12 @@ export async function revertEventRecordApplication(eventId, identityChanges = []
   if (!eventId) return null;
 
   const changes = Array.isArray(identityChanges) ? identityChanges : [];
-
-  // 1. 이번 기록 반영에서 생성/연결한 Registration만 되돌린다.
-  for (const change of changes) {
-    const registrationId = change?.registrationId;
-    const playerId = change?.playerId;
-
-    if (!registrationId) continue;
-
-    if (change.registrationWasCreated) {
-      const { error } = await db()
-        .from("event_registrations")
-        .delete()
-        .eq("id", registrationId)
-        .eq("event_id", eventId);
-
-      if (error) fail(error, `${change.name || "참가자"}의 신규 참가 등록을 원복하지 못했습니다.`);
-      continue;
-    }
-
-    if (change.registrationPlayerWasLinked && playerId) {
-      const { error } = await db()
-        .from("event_registrations")
-        .update({
-          player_id: null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", registrationId)
-        .eq("event_id", eventId)
-        .eq("player_id", playerId);
-
-      if (error) fail(error, `${change.name || "참가자"}의 Player 연결을 원복하지 못했습니다.`);
-    }
-  }
-
-  // 2. 이번 반영에서 실제로 생성한 Player만 삭제를 시도한다.
-  //    다른 기록에서 이미 사용 중이면 FK(RESTRICT)가 보호하므로 그대로 유지한다.
-  const createdPlayerIds = [...new Set(
-    changes
-      .filter(change => change?.playerWasCreated && change?.playerId)
-      .map(change => change.playerId)
-  )];
-
-  for (const playerId of createdPlayerIds) {
-    const { error } = await db()
-      .from("players")
-      .delete()
-      .eq("id", playerId);
-
-    if (error && String(error.code || "") !== "23503") {
-      fail(error, "기록 반영 과정에서 생성된 Player를 정리하지 못했습니다.");
-    }
-  }
+  await rollbackEventParticipantConfirmation(eventId, changes);
 
   if (!reopenEvent) return null;
 
-  // 3. Event를 다시 기록 반영 가능한 상태로 연다.
+  // 기록 반영 취소는 참가 확정을 취소하지 않는다. 전환 이전 bracket의
+  // recordMeta에만 남은 identityChanges가 있을 때에만 위 rollback이 동작한다.
   const now = new Date().toISOString();
   const { data, error } = await db()
     .from("events")

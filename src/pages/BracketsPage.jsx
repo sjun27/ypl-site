@@ -1,7 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { completeApplicationEvent, getEventRecordContext, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, resolveEventParticipantsForRecord, revertEventRecordApplication } from "../services/index.js";
+import { completeApplicationEvent, confirmEventParticipantsForBracket, deleteEventBracketMatches, getEventRecordContext, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, validateEventParticipantEntries } from "../services/index.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -128,7 +128,7 @@ function withPick(b,matchId,side){
   const nb=JSON.parse(JSON.stringify(b));
   for(const g of [nb.graph,nb.knockout]){ if(!g)continue;
     const all=collectGraphMatches(g); const m=all.find(x=>x.id===matchId);
-    if(m){ m.winner=(m.winner===side?null:side); cascadeClear(all,m.id); return nb; }
+    if(m){ const previous=m.winner; m.winner=(m.winner===side?null:side); cascadeClear(all,m.id); if(g.gf?.id===m.id&&g.reset&&previous!==m.winner){g.reset.winner=null;g.reset.series=null;} return nb; }
   }
   if(nb.groups){ for(const gr of nb.groups){ const m=gr.matches.find(x=>x.id===matchId); if(m){ m.winner=(m.winner===side?null:side); return nb; } } }
   return nb;
@@ -138,7 +138,7 @@ function withSeries(b,matchId,series,winnerSide){
   const nb=JSON.parse(JSON.stringify(b));
   for(const g of [nb.graph,nb.knockout]){ if(!g)continue;
     const all=collectGraphMatches(g); const m=all.find(x=>x.id===matchId);
-    if(m){ m.series=series; m.winner=winnerSide; cascadeClear(all,m.id); return nb; }
+    if(m){ const previous=m.winner; m.series=series; m.winner=winnerSide; cascadeClear(all,m.id); if(g.gf?.id===m.id&&g.reset&&previous!==m.winner){g.reset.winner=null;g.reset.series=null;} return nb; }
   }
   if(nb.groups){ for(const gr of nb.groups){ const m=gr.matches.find(x=>x.id===matchId); if(m){ m.series=series; m.winner=winnerSide; return nb; } } }
   return nb;
@@ -334,6 +334,7 @@ function BracketWizard({ onClose, onCreate }){
   const [eventError,setEventError]=useState("");
   const [selectedRegistrationIds,setSelectedRegistrationIds]=useState([]);
   const [addedParticipants,setAddedParticipants]=useState([]);
+  const [creating,setCreating]=useState(false);
 
   useEffect(()=>{
     let cancelled=false;
@@ -415,7 +416,8 @@ function BracketWizard({ onClose, onCreate }){
       .map(n=>({id:uid(),name:(n||"").trim()}))
       .filter(p=>p.name);
   };
-  const go=()=>{
+  const go=async()=>{
+    if(creating)return;
     if(eventId&&mode==="team"){
       alert("연결된 팀전 Event의 참가자 identity 연동은 아직 지원하지 않습니다. 팀전 normalized 연동 구현 후 사용할 수 있습니다.");
       return;
@@ -428,9 +430,16 @@ function BracketWizard({ onClose, onCreate }){
     let graph=null,grp=null;
     if(format==="group"){ const G=buildGroups(parts.map(p=>p.id),gN,aN); grp=G.groups; }
     else graph=useDbl?buildDouble(parts.map(p=>p.id)):buildSingle(parts.map(p=>p.id));
-    onCreate({ id:uid(), name:name.trim()||"새 대회", createdAt:new Date().toISOString().slice(0,10),
-      mode, double:useDbl, format, groupCfg:format==="group"?{groups:gN,adv:aN}:null,
-      eventId:eventId||null, participants:parts, graph, groups:grp, knockout:null, status:"active", applied:null });
+    setCreating(true);
+    let created=false;
+    try{
+      created=await onCreate({ id:uid(), name:name.trim()||"새 대회", createdAt:new Date().toISOString().slice(0,10),
+        mode, double:useDbl, format, groupCfg:format==="group"?{groups:gN,adv:aN}:null,
+        eventId:eventId||null, participants:parts, graph, groups:grp, knockout:null, status:"active", applied:null });
+    }finally{
+      setCreating(false);
+    }
+    if(created)onClose();
   };
   return (<Modal title="새 대회 만들기" onClose={onClose}>
     <div className="swap" key={step}>
@@ -622,7 +631,7 @@ function BracketWizard({ onClose, onCreate }){
 
       <div className="modal-actions">
         <button className="btn btn-ghost" onClick={()=>setStep(1)}>← 이전</button>
-        <button className="btn btn-primary" onClick={go}>대진표 생성 🎲</button>
+        <button className="btn btn-primary" onClick={go} disabled={creating}>{creating?"생성 중…":"대진표 생성 🎲"}</button>
       </div>
     </>}
     </div>
@@ -755,25 +764,69 @@ function PartyEditor({ b, onClose, onSave }){
   </Modal>);
 }
 
-function BracketBoard({ b, data, admin, save, flash, onApply }){
+function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
   const nameOf=(pid)=>{ const p=(b.participants||[]).find(x=>x.id===pid); return p?p.name:pid; };
   const teamMode=b.mode==="team";
   const locked=!!b.applied;
-  const editAdmin=admin&&!locked;
+  const [matchMutationBusy,setMatchMutationBusy]=useState(false);
+  const matchMutationBusyRef=useRef(false);
+  const editAdmin=admin&&!locked&&!matchMutationBusy;
   const [series,setSeries]=useState(null);
   const [party,setParty]=useState(false);
   const savePartyFn=(parts)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,participants:parts}:x)}); setParty(false); flash("엔트리 저장 ✓"); };
   const hasParty=(b.participants||[]).some(p=>p.party||(p.memberParties&&Object.values(p.memberParties).some(Boolean)));
-  const pick=(matchId,side)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?withPick(x,matchId,side):x)}); };
+  const persistBracketMutation=async(nextBracket,successMessage="")=>{
+    if(locked||matchMutationBusyRef.current)return false;
+    matchMutationBusyRef.current=true;
+    setMatchMutationBusy(true);
+
+    try{
+      if(b.eventId&&!teamMode){
+        try{
+          await syncEventBracketMatches(b.eventId,nextBracket);
+        }catch(error){
+          let compensationError=null;
+          try{ await syncEventBracketMatches(b.eventId,b); }
+          catch(rollbackError){ compensationError=rollbackError; }
+          await refresh?.();
+          flash(compensationError
+            ? `Match 동기화와 이전 상태 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${compensationError?.message||"알 수 없는 오류"}`
+            : `Match 동기화 실패로 결과를 저장하지 않았습니다: ${error?.message||"알 수 없는 오류"}`);
+          return false;
+        }
+      }
+
+      const nextData={...data,brackets:data.brackets.map(x=>x.id===b.id?nextBracket:x)};
+      const saved=await save(nextData);
+      if(!saved){
+        let compensationError=null;
+        if(b.eventId&&!teamMode){
+          try{ await syncEventBracketMatches(b.eventId,b); }
+          catch(error){ compensationError=error; }
+        }
+        await refresh?.();
+        flash(compensationError
+          ? `legacy 저장과 normalized Match 원복에 실패했습니다: ${compensationError?.message||"알 수 없는 오류"}`
+          : "legacy 저장 실패로 Match 변경을 이전 상태로 원복했습니다.");
+        return false;
+      }
+
+      if(successMessage)flash(successMessage);
+      return true;
+    }finally{
+      matchMutationBusyRef.current=false;
+      setMatchMutationBusy(false);
+    }
+  };
+  const pick=(matchId,side)=>{ if(locked)return; void persistBracketMutation(withPick(b,matchId,side)); };
   const openTeam=(m,pa,pb)=>{ if(locked)return; const A=(b.participants||[]).find(p=>p.id===pa),B=(b.participants||[]).find(p=>p.id===pb); if(!A||!B)return; setSeries({m,A,B}); };
   const saveSeries=(sObj,winnerSide)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?withSeries(x,series.m.id,sObj,winnerSide):x)}); setSeries(null); };
-  const makeKnockout=()=>{
+  const makeKnockout=async()=>{
     if(locked)return;
     const adv=[];
     b.groups.forEach(gr=>{ const st=groupStandings(gr).slice(0,b.groupCfg.adv); st.forEach(s=>adv.push(s.name)); });
     const ko=b.double?buildDouble(adv):buildSingle(adv);
-    save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,knockout:ko}:x)});
-    flash("본선 대진 생성 ✓");
+    await persistBracketMutation({...b,knockout:ko},"본선 대진 생성 ✓");
   };
   const res = b.format==="group" ? (b.knockout?elimResult(b.knockout):null) : elimResult(b.graph);
   const undoApplied=async()=>{
@@ -986,20 +1039,44 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
       }
 
       try{
-        const resolvedParticipants=await resolveEventParticipantsForRecord(
-          b.eventId,
-          b.participants||[]
-        );
+        const participants=b.participants||[];
+        const entryLinkedCount=participants.filter(p=>p.entryId).length;
+        if(entryLinkedCount>0&&entryLinkedCount!==participants.length){
+          throw new Error("일부 참가자에게만 Entry identity가 있어 기록을 반영할 수 없습니다.");
+        }
 
-        identityChanges=resolvedParticipants.map(resolved=>({
-          participantId:resolved.id,
-          name:resolved.name,
-          registrationId:resolved.registrationId,
-          playerId:resolved.playerId,
-          playerWasCreated:!!resolved.playerWasCreated,
-          registrationWasCreated:!!resolved.registrationWasCreated,
-          registrationPlayerWasLinked:!!resolved.registrationPlayerWasLinked,
-        }));
+        const usesConfirmedEntries=participants.length>0&&entryLinkedCount===participants.length;
+        const resolvedParticipants=usesConfirmedEntries
+          ? await validateEventParticipantEntries(b.eventId,participants)
+          : await resolveEventParticipantsForRecord(b.eventId,participants);
+
+        if(usesConfirmedEntries){
+          try{
+            await syncEventBracketMatches(b.eventId,b);
+          }catch(error){
+            let recoveryError=null;
+            try{ await syncEventBracketMatches(b.eventId,b); }
+            catch(syncRecoveryError){ recoveryError=syncRecoveryError; }
+            flash(recoveryError
+              ? `최종 Match 동기화와 복구에 실패해 기록 반영을 중단했습니다: ${error?.message||"알 수 없는 오류"} / ${recoveryError?.message||"알 수 없는 오류"}`
+              : `최종 Match 동기화 실패로 기록 반영을 중단했습니다: ${error?.message||"알 수 없는 오류"}`);
+            return;
+          }
+        }
+
+        // 신규 Entry-linked bracket은 참가 확정 lifecycle을 그대로 사용한다.
+        // recordMeta는 전환 이전 bracket에서 record apply가 만든 identity만 소유한다.
+        identityChanges=usesConfirmedEntries
+          ? []
+          : resolvedParticipants.map(resolved=>({
+              participantId:resolved.id,
+              name:resolved.name,
+              registrationId:resolved.registrationId,
+              playerId:resolved.playerId,
+              playerWasCreated:!!resolved.playerWasCreated,
+              registrationWasCreated:!!resolved.registrationWasCreated,
+              registrationPlayerWasLinked:!!resolved.registrationPlayerWasLinked,
+            }));
 
         const appliedRoundId=(nextData.brackets||[])
           .find(x=>x.id===b.id)
@@ -1019,7 +1096,9 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
                   ? {
                       ...p,
                       registrationId:resolved.registrationId,
-                      playerId:resolved.playerId
+                      playerId:resolved.playerId,
+                      ...(resolved.entryId?{entryId:resolved.entryId}:{}),
+                      ...(resolved.entryParticipantId?{entryParticipantId:resolved.entryParticipantId}:{})
                     }
                   : p;
               }),
@@ -1429,8 +1508,189 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   const [apply,setApply]=useState(null);
   const [drawId,setDrawId]=useState(null);
   const open=list.find(b=>b.id===openId);
-  const create=(b)=>{ save({...data,brackets:[b,...list]}); setWizard(false); setOpenId(b.id); setDrawId(b.id); flash("대회 생성 ✓"); };
-  const del=(b)=>{ if(b.applied){alert("기록 반영 취소 후 대진표를 삭제할 수 있습니다.");return;} if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return; save({...data,brackets:list.filter(x=>x.id!==b.id)}); setOpenId(null); };
+  const create=async(b)=>{
+    if(b.eventId&&b.mode!=="team"&&list.some(existing=>existing.eventId===b.eventId)){
+      flash("이 Event에 연결된 대진표가 이미 있습니다.");
+      return false;
+    }
+
+    if(!b.eventId){
+      const saved=await save({...data,brackets:[b,...list]});
+      if(!saved){ await refresh?.(); return false; }
+      setOpenId(b.id); setDrawId(b.id); flash("대회 생성 ✓");
+      return true;
+    }
+
+    let confirmation;
+    try{
+      confirmation=await confirmEventParticipantsForBracket(b.eventId,b.participants||[]);
+    }catch(error){
+      flash(`참가 확정 실패: ${error?.message||"알 수 없는 오류"}`);
+      return false;
+    }
+
+    const confirmedBracket={
+      ...b,
+      participants:(b.participants||[]).map(participant=>{
+        const resolved=confirmation.participants.find(row=>row.id===participant.id);
+        return resolved?{
+          ...participant,
+          registrationId:resolved.registrationId,
+          playerId:resolved.playerId,
+          entryId:resolved.entryId,
+          entryParticipantId:resolved.entryParticipantId,
+        }:participant;
+      }),
+      participantConfirmation:{
+        eventId:b.eventId,
+        previousEventStatus:confirmation.previousEventStatus,
+        confirmedAt:confirmation.confirmedAt,
+        identityChanges:confirmation.identityChanges,
+      },
+    };
+
+    try{
+      await syncEventBracketMatches(b.eventId,confirmedBracket);
+    }catch(error){
+      let cleanupError=null;
+      let rollbackError=null;
+      try{ await deleteEventBracketMatches(b.eventId); }
+      catch(matchCleanupError){ cleanupError=matchCleanupError; }
+      if(!cleanupError){
+        try{ await rollbackEventParticipantConfirmation(b.eventId,confirmation.identityChanges); }
+        catch(identityRollbackError){ rollbackError=identityRollbackError; }
+      }
+      await refresh?.();
+      flash(cleanupError
+        ? `Match 생성 실패 후 runtime Match 정리에도 실패해 참가 확정을 유지했습니다: ${error?.message||"알 수 없는 오류"} / ${cleanupError?.message||"알 수 없는 오류"}`
+        : rollbackError
+          ? `Match 생성 실패 후 참가 확정 원복에도 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${rollbackError?.message||"알 수 없는 오류"}`
+          : `Match 생성 실패로 참가 확정을 원복했습니다: ${error?.message||"알 수 없는 오류"}`);
+      return false;
+    }
+
+    const nextData={...data,brackets:[confirmedBracket,...list]};
+    const saved=await save(nextData);
+    if(!saved){
+      let cleanupError=null;
+      try{ await deleteEventBracketMatches(b.eventId); }
+      catch(error){ cleanupError=error; }
+
+      if(cleanupError){
+        flash(`대진표 저장 실패 후 runtime Match 정리에 실패해 참가 확정을 유지했습니다: ${cleanupError?.message||"알 수 없는 오류"}`);
+      }else{
+        try{
+          await rollbackEventParticipantConfirmation(b.eventId,confirmation.identityChanges);
+          flash("대진표 저장 실패로 Match와 참가 확정 데이터를 원복했습니다.");
+        }catch(error){
+          flash(`대진표 저장 실패 후 참가 확정 원복에도 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+        }
+      }
+      await refresh?.();
+      return false;
+    }
+
+    try{
+      await markApplicationEventRunning(b.eventId,confirmation.previousEventStatus);
+    }catch(error){
+      const legacyRemoved=await save(data);
+      if(!legacyRemoved){
+        await refresh?.();
+        flash(`Event 진행 상태 저장과 legacy 대진표 원복에 실패했습니다. 대진표를 삭제해 복구해 주세요: ${error?.message||"알 수 없는 오류"}`);
+        return false;
+      }
+
+      let cleanupError=null;
+      try{ await deleteEventBracketMatches(b.eventId); }
+      catch(matchCleanupError){ cleanupError=matchCleanupError; }
+
+      if(cleanupError){
+        flash(`legacy 대진표는 원복했지만 runtime Match 정리에 실패해 참가 확정을 유지했습니다: ${cleanupError?.message||"알 수 없는 오류"}`);
+      }else{
+        try{
+          await rollbackEventParticipantConfirmation(b.eventId,confirmation.identityChanges);
+          flash(`Event 진행 상태 저장 실패로 대진표·Match·참가 확정을 원복했습니다: ${error?.message||"알 수 없는 오류"}`);
+        }catch(rollbackError){
+          flash(`legacy 대진표와 Match는 원복했지만 참가 확정 원복에 실패했습니다: ${rollbackError?.message||"알 수 없는 오류"}`);
+        }
+      }
+      return false;
+    }
+
+    setOpenId(b.id); setDrawId(b.id); flash("대회 생성 ✓");
+    return true;
+  };
+  const del=async(b)=>{
+    if(b.applied){alert("기록 반영 취소 후 대진표를 삭제할 수 있습니다.");return;}
+    if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return;
+
+    const confirmation=b.participantConfirmation;
+    let identityChanges=[];
+
+    if(b.eventId&&confirmation){
+      if(confirmation.eventId!==b.eventId){
+        flash("대진표의 참가 확정 metadata가 Event와 일치하지 않아 삭제를 중단했습니다.");
+        return;
+      }
+      identityChanges=Array.isArray(confirmation.identityChanges)?confirmation.identityChanges:[];
+      if(
+        identityChanges.length!==(b.participants||[]).length||
+        identityChanges.some(change=>!change?.participantId||!change?.registrationId||!change?.playerId||!change?.entryId||!change?.entryParticipantId)
+      ){
+        flash("대진표의 참가 확정 metadata가 불완전해 자동 삭제를 중단했습니다.");
+        return;
+      }
+    }
+
+    if(b.eventId&&b.mode!=="team"){
+      try{
+        await deleteEventBracketMatches(b.eventId);
+      }catch(error){
+        flash(`runtime Match 정리 실패로 대진표를 유지했습니다: ${error?.message||"알 수 없는 오류"}`);
+        return;
+      }
+    }
+
+    if(b.eventId&&confirmation){
+      try{
+        await rollbackEventParticipantConfirmation(
+          b.eventId,
+          identityChanges,
+          {requireUnappliedEvent:true}
+        );
+      }catch(error){
+        let matchRestoreError=null;
+        try{ await syncEventBracketMatches(b.eventId,b); }
+        catch(restoreError){ matchRestoreError=restoreError; }
+        flash(matchRestoreError
+          ? `참가 확정 원복과 runtime Match 복구에 실패해 대진표를 유지했습니다: ${error?.message||"알 수 없는 오류"} / ${matchRestoreError?.message||"알 수 없는 오류"}`
+          : `참가 확정 원복 실패로 대진표를 유지하고 runtime Match를 복구했습니다: ${error?.message||"알 수 없는 오류"}`);
+        return;
+      }
+    }
+
+    const saved=await save({...data,brackets:list.filter(x=>x.id!==b.id)});
+    if(!saved){
+      await refresh?.();
+      flash(confirmation
+        ? "참가 확정은 정리됐지만 legacy 대진표 삭제에 실패했습니다. 같은 대진표 삭제를 다시 시도해 주세요."
+        : "대진표 삭제 저장에 실패했습니다.");
+      return;
+    }
+
+    if(b.eventId&&confirmation?.previousEventStatus){
+      try{
+        await restoreApplicationEventStatus(b.eventId,confirmation.previousEventStatus);
+      }catch(error){
+        flash(`대진표는 삭제됐지만 Event 상태 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+        setOpenId(null);
+        return;
+      }
+    }
+
+    setOpenId(null);
+    flash("대진표 삭제 ✓");
+  };
   const statusTag=(b)=>{ const r=b.format==="group"?(b.knockout?elimResult(b.knockout):null):elimResult(b.graph); if(b.applied)return"기록 반영됨"; if(r&&r.done)return"종료"; return"진행 중"; };
   return (<section className="sec">
     <Reveal className="sec-head"><div className="kick">Bracket</div><h2>대진표</h2>
@@ -1447,7 +1707,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
     </div>}
     {open&&<div className="bk-open swap">
       <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" disabled={!!open.applied} title={open.applied?"기록 반영 취소 후 삭제할 수 있습니다.":""} onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
-      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} onApply={(b,res)=>setApply({b,res})}/>}
+      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} refresh={refresh} onApply={(b,res)=>setApply({b,res})}/>}
     </div>}
     {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create}/>}
     {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} refresh={refresh} onClose={()=>setApply(null)}/>}
