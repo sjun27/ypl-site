@@ -4,7 +4,7 @@
 >
 > 현재 할 일과 우선순위는 `docs/ROADMAP.md`, 실제 변경 이력은 `docs/PATCH_NOTES_2026-08-26.md`를 봅니다.
 
-마지막 업데이트: 2026-09-03
+마지막 업데이트: 2026-09-04
 
 ---
 
@@ -1611,6 +1611,7 @@ EventRegistration
 Entry
 EntryParticipant
 Match (개인전 runtime)
+Result (개인전 runtime final placement)
 ```
 
 신규 신청은 EventRegistration에 저장하며 신청 단계에서는 신규 Player를 생성하지 않는다.
@@ -1644,7 +1645,7 @@ Player → Registration → Entry → EntryParticipant를 쓰며 중간 실패�
 ```text
 Bracket 결과
 회차 기록
-Result 성격의 입상 기록
+회차 내부 Result 성격 입상 필드 (Records read source)
 누적 랭킹
 시즌 성적
 Records 표시 데이터
@@ -1656,14 +1657,14 @@ Bracket 자체와 화면 렌더링의 source of truth는 계속 legacy JSON이�
 따라서 현재 기록 반영 경로는 다음 hybrid 구조다.
 
 ```text
-Event / EventRegistration / Player / Entry / EntryParticipant / Match
+Event / EventRegistration / Player / Entry / EntryParticipant / Match / Result
                        normalized
                            │
                            ▼
               Bracket participant.entryId
                            │
                            ▼
-            Bracket / Round / Result / Ranking / Records
+           Bracket / Round placement / Ranking / Records
                           legacy
 ```
 
@@ -1717,12 +1718,12 @@ Event running 저장이 실패하면 먼저 legacy Bracket 제거를 저장한 �
 legacy 제거 저장도 실패하면 Bracket, runtime Match, normalized identity를 유지해 사용자가 Bracket 삭제로 복구할 수 있게 한다.
 
 기록 반영은 Entry-linked Bracket에서 Player/Registration을 다시 생성하지 않고 현재 DB 연결만 검증한다.
-legacy 기록을 저장하기 직전에 final Match sync를 다시 수행하며, 실패하면 기록 반영을 중단한다.
+legacy 기록을 저장하기 직전에 final Match sync와 final Result sync를 순서대로 수행하며, 실패하면 기록 반영을 중단한다.
 전환 이전 `entryId` 없는 Bracket은 기존 fallback을 사용한다.
 
-기록 반영 취소에서는 legacy 기록을 원복한 뒤 Event를 다시 `running`으로 열고 `record_applied_at`을 NULL로 되돌린다. 이때 Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
+기록 반영 취소에서는 runtime Result를 먼저 제거한 뒤 legacy 기록을 원복하고 Event를 다시 `running`으로 열어 `record_applied_at`을 NULL로 되돌린다. legacy 원복 저장이 실패하면 직전 runtime Result snapshot을 복구한다. Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
 
-기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. FK 순서에 따라 runtime Match를 먼저 삭제하고 normalized 참가 확정을 원복한 다음 legacy Bracket 삭제를 저장한다. 이후 `participantConfirmation.previousEventStatus`가 `open`이면 Event를 `open`으로 복구한다. 이전부터 `running`이었던 Event는 `running`을 유지한다.
+기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. Event에 Result가 0건인지 먼저 확인한 뒤 FK 순서에 따라 runtime Match를 삭제하고 normalized 참가 확정을 원복한 다음 legacy Bracket 삭제를 저장한다. 이후 `participantConfirmation.previousEventStatus`가 `open`이면 Event를 `open`으로 복구한다. 이전부터 `running`이었던 Event는 `running`을 유지한다.
 
 ### P0-4 normalized Match runtime sync
 
@@ -1753,6 +1754,39 @@ Event 단위 service queue로 직렬화한다.
 결과 변경은 normalized sync 후 legacy save 순서다. legacy save가 실패하면 이전 Bracket snapshot을
 best-effort로 재동기화하고 서버 데이터를 다시 읽는다. Entry identity가 없는 전환 이전 Bracket과
 Event 없는 legacy-only Bracket은 Match sync를 건너뛰며 기존 기록 흐름을 유지한다.
+
+### P0-5 normalized Result runtime sync
+
+기존 `elimResult`가 legacy 기록 반영에 전달하는 동일한 우승 / 준우승 / 4강 participant ID를
+별도 재계산 없이 `bracket.participants[].entryId`로 변환한다.
+
+```text
+elimResult
+→ participant.id
+→ participant.entryId
+→ results.entry_id
+```
+
+- `source = legacy_bracket_runtime`
+- 우승: `champion`, rank 1~1, `우승`
+- 준우승: `runner_up`, rank 2~2, `준우승`
+- 실제 4강 진출자: `semifinalist`, rank 3~4, `4강`
+- Master / Light / Rookie 모두 Result를 생성하며 랭킹 지급 여부는 RankingAward 단계에서 분리
+
+Event의 전체 Result를 읽어 Entry ID 기준으로 runtime snapshot을 비교한다. 기존 runtime row는
+필요한 필드만 UPDATE하고, 신규 입상자는 INSERT하며, 더 이상 입상자가 아닌 runtime row만 DELETE한다.
+같은 snapshot 재시도는 기존 Result ID를 유지한다. `legacy_tournament` 등 다른 source가 같은
+Event / Entry에 존재하면 덮어쓰지 않고 반영을 중단하며, cleanup도 runtime source만 대상으로 한다.
+
+write 순서는 `Entry validation → final Match sync → Result sync → legacy save → Event completed`다.
+legacy save 실패 시 Result를 동기화 직전 snapshot으로 best-effort 복구한다. 반영 취소는
+`Result 제거 → legacy revert save → Event running` 순서이며 legacy revert save 실패 시 제거한
+Result snapshot을 복구한다. Match와 Entry identity는 유지한다.
+
+Event 없는 legacy-only Bracket, `entryId`가 없는 전환 이전 Bracket, 팀전은 Result sync를 건너뛴다.
+RankingAward runtime은 P0-6 범위로 남긴다.
+
+Test DB 브라우저 E2E에서는 Double Elimination의 apply → revert → 결과 변경 → reapply 및 reset final 경로와 Single Elimination의 apply → revert 경로를 검증했다. 두 형식 모두 기록 반영 전에는 Result가 생성되지 않고, 반영 시 우승 1 / 준우승 1 / 4강 2의 runtime Result가 생성되며, 반영 취소 시 Result만 제거되고 Match / Entry / EntryParticipant는 유지되는 것을 확인했다.
 
 ### Event 수정 / 삭제 일관성
 

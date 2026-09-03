@@ -4,6 +4,11 @@ import {
   buildBracketMatchSyncPlan,
   buildEventBracketMatchSnapshot,
 } from "./bracketMatchSnapshot.js";
+import {
+  bracketResultIdentityState,
+  buildBracketResultSyncPlan,
+  buildEventBracketResultSnapshot,
+} from "./bracketResultSnapshot.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -26,6 +31,7 @@ export function normalizedDbAvailable() {
 }
 
 const eventMatchMutationQueues = new Map();
+const eventResultMutationQueues = new Map();
 
 function queueEventMatchMutation(eventId, operation) {
   const previous = eventMatchMutationQueues.get(eventId) || Promise.resolve();
@@ -34,6 +40,19 @@ function queueEventMatchMutation(eventId, operation) {
   const clear = () => {
     if (eventMatchMutationQueues.get(eventId) === current) {
       eventMatchMutationQueues.delete(eventId);
+    }
+  };
+  current.then(clear, clear);
+  return current;
+}
+
+function queueEventResultMutation(eventId, operation) {
+  const previous = eventResultMutationQueues.get(eventId) || Promise.resolve();
+  const current = previous.catch(() => null).then(operation);
+  eventResultMutationQueues.set(eventId, current);
+  const clear = () => {
+    if (eventResultMutationQueues.get(eventId) === current) {
+      eventResultMutationQueues.delete(eventId);
     }
   };
   current.then(clear, clear);
@@ -177,6 +196,210 @@ export async function deleteEventBracketMatches(eventId) {
     if (error) fail(error, "Event의 runtime normalized Match를 정리하지 못했습니다.");
     return { deleted: (data || []).length };
   });
+}
+
+async function readEventResults(eventId) {
+  const { data, error } = await db()
+    .from("results")
+    .select(`
+      id,
+      entry_id,
+      placement_code,
+      rank_min,
+      rank_max,
+      placement_label,
+      source,
+      created_at,
+      updated_at
+    `)
+    .eq("event_id", eventId);
+
+  if (error) fail(error, "Event의 기존 normalized Result를 확인하지 못했습니다.");
+  return data || [];
+}
+
+async function applyEventResultSyncPlan(eventId, plan, now) {
+  for (const update of plan.updates) {
+    const { data, error } = await db()
+      .from("results")
+      .update({
+        ...update.payload,
+        updated_at: update.payload.updated_at || now,
+      })
+      .eq("id", update.id)
+      .eq("event_id", eventId)
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .select("id")
+      .maybeSingle();
+
+    if (error) fail(error, `normalized Result '${update.payload.entry_id}'를 수정하지 못했습니다.`);
+    if (!data) throw new Error(`normalized Result '${update.payload.entry_id}'가 동기화 중 변경되었습니다.`);
+  }
+
+  if (plan.inserts.length) {
+    const { data, error } = await db()
+      .from("results")
+      .insert(plan.inserts.map(row => ({
+        ...row,
+        event_id: eventId,
+        source: LEGACY_BRACKET_RUNTIME_SOURCE,
+        updated_at: row.updated_at || now,
+      })))
+      .select("id");
+
+    if (error) fail(error, "신규 normalized Result를 생성하지 못했습니다.");
+    if ((data || []).length !== plan.inserts.length) {
+      throw new Error("일부 신규 normalized Result가 저장되지 않았습니다.");
+    }
+  }
+
+  if (plan.deleteIds.length) {
+    const { data, error } = await db()
+      .from("results")
+      .delete()
+      .eq("event_id", eventId)
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .in("id", plan.deleteIds)
+      .select("id");
+
+    if (error) fail(error, "더 이상 유효하지 않은 runtime normalized Result를 정리하지 못했습니다.");
+    if ((data || []).length !== plan.deleteIds.length) {
+      throw new Error("일부 stale normalized Result가 삭제되지 않았습니다.");
+    }
+  }
+
+  return {
+    inserted: plan.inserts.length,
+    updated: plan.updates.length,
+    deleted: plan.deleteIds.length,
+  };
+}
+
+async function replaceEventRuntimeResultsNow(eventId, desiredRows) {
+  const existingRows = await readEventResults(eventId);
+  const plan = buildBracketResultSyncPlan(existingRows, desiredRows);
+  return applyEventResultSyncPlan(eventId, plan, new Date().toISOString());
+}
+
+async function validateResultEntries(eventId, desiredRows) {
+  const entryIds = desiredRows.map(row => row.entry_id);
+  const { data, error } = await db()
+    .from("entries")
+    .select("id, event_id, entry_type, status")
+    .eq("event_id", eventId)
+    .in("id", entryIds);
+
+  if (error) fail(error, "입상자의 Entry identity를 확인하지 못했습니다.");
+
+  const entryById = new Map((data || []).map(row => [row.id, row]));
+  for (const entryId of entryIds) {
+    const entry = entryById.get(entryId);
+    if (!entry || entry.event_id !== eventId || entry.entry_type !== "individual" || entry.status !== "active") {
+      throw new Error(`입상자 Entry '${entryId}'가 현재 Event의 활성 개인 Entry와 일치하지 않습니다.`);
+    }
+  }
+}
+
+async function syncEventBracketResultsNow(eventId, bracket, result) {
+  if (!bracket || bracket.eventId !== eventId) {
+    throw new Error("normalized Result 대상 Event와 대진표 연결이 일치하지 않습니다.");
+  }
+
+  const snapshot = buildEventBracketResultSnapshot(bracket, result);
+  if (snapshot.skipped) {
+    return {
+      skipped: true,
+      reason: snapshot.reason,
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      previousRows: [],
+    };
+  }
+
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("normalized Result를 연결할 Event를 찾을 수 없습니다.");
+  if (event.is_team_event) {
+    throw new Error("팀전 Event의 normalized Result 동기화는 아직 지원하지 않습니다.");
+  }
+
+  await validateResultEntries(eventId, snapshot.rows);
+  const existingRows = await readEventResults(eventId);
+  const previousRows = existingRows.filter(row => row.source === LEGACY_BRACKET_RUNTIME_SOURCE);
+  const plan = buildBracketResultSyncPlan(existingRows, snapshot.rows);
+
+  try {
+    const counts = await applyEventResultSyncPlan(eventId, plan, new Date().toISOString());
+    return { skipped: false, ...counts, previousRows };
+  } catch (error) {
+    try {
+      await replaceEventRuntimeResultsNow(eventId, previousRows);
+    } catch (restoreError) {
+      const combined = new Error(
+        `${error?.message || "normalized Result 동기화에 실패했습니다."} (이전 Result snapshot 복구 실패: ${restoreError?.message || "알 수 없는 오류"})`
+      );
+      combined.code = "YPL_RESULT_ROLLBACK_FAILED";
+      combined.cause = error;
+      throw combined;
+    }
+    throw error;
+  }
+}
+
+export async function syncEventBracketResults(eventId, bracket, result) {
+  if (!eventId) {
+    return {
+      skipped: true,
+      reason: "event_unlinked",
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      previousRows: [],
+    };
+  }
+  return queueEventResultMutation(eventId, () => syncEventBracketResultsNow(eventId, bracket, result));
+}
+
+export async function deleteEventBracketResults(eventId, bracket) {
+  if (!eventId) return { skipped: true, reason: "event_unlinked", deleted: 0, previousRows: [] };
+  if (!bracket || bracket.eventId !== eventId) {
+    throw new Error("정리할 normalized Result의 Event와 대진표 연결이 일치하지 않습니다.");
+  }
+
+  const identityState = bracketResultIdentityState(bracket);
+  if (!identityState.eligible) {
+    return { skipped: true, reason: identityState.reason, deleted: 0, previousRows: [] };
+  }
+
+  return queueEventResultMutation(eventId, async () => {
+    const event = await getEvent(eventId);
+    if (!event) throw new Error("runtime normalized Result를 정리할 Event를 찾을 수 없습니다.");
+    if (event.is_team_event) {
+      throw new Error("팀전 Event의 normalized Result 정리는 아직 지원하지 않습니다.");
+    }
+
+    const existingRows = await readEventResults(eventId);
+    const previousRows = existingRows.filter(row => row.source === LEGACY_BRACKET_RUNTIME_SOURCE);
+    const plan = buildBracketResultSyncPlan(existingRows, []);
+    const counts = await applyEventResultSyncPlan(eventId, plan, new Date().toISOString());
+    return { skipped: false, ...counts, previousRows };
+  });
+}
+
+export async function restoreEventBracketResults(eventId, previousRows = []) {
+  if (!eventId) return { inserted: 0, updated: 0, deleted: 0 };
+  const snapshot = Array.isArray(previousRows) ? previousRows : [];
+  return queueEventResultMutation(eventId, () => replaceEventRuntimeResultsNow(eventId, snapshot));
+}
+
+export async function assertEventHasNoResults(eventId) {
+  if (!eventId) return null;
+  const rows = await readEventResults(eventId);
+  if (rows.length) {
+    const sources = [...new Set(rows.map(row => row.source || "unknown"))].join(", ");
+    throw new Error(`Event에 Result가 ${rows.length}건 남아 있습니다 (${sources}). 기록 반영 취소를 먼저 확인해 주세요.`);
+  }
+  return null;
 }
 
 export async function getEvent(eventId) {

@@ -5,7 +5,7 @@
 > - 과거 변경 이력: `docs/PATCH_NOTES_2026-08-26.md`
 > - 기술 구조·데이터 모델·운영 원칙: `docs/ARCHITECTURE.md`
 
-마지막 업데이트: 2026-09-03
+마지막 업데이트: 2026-09-04
 
 ---
 
@@ -39,6 +39,7 @@ EventRegistration
 Entry
 EntryParticipant
 Match (개인전 runtime mirror)
+Result (개인전 runtime final placement)
         │
         ▼
 현재 연결 경계
@@ -126,12 +127,13 @@ normalized에서 처리
 연결 Event 확인
 Bracket 생성 시 확정된 Entry / EntryParticipant / Registration / Player 검증
 Event 연결 개인전의 실제 Match snapshot 동기화
+Event 연결 개인전의 우승 / 준우승 / 실제 4강 Result 동기화
 전환 이전 Bracket은 기존 record-apply identity 확정 fallback 사용
 Event completed
 record_applied_at 기록
 아직 legacy에서 처리
 대회 회차
-Result 성격의 입상 기록
+대회 회차의 입상 필드 및 Records read
 누적 랭킹
 시즌별 성적
 Records 표시 데이터
@@ -154,9 +156,13 @@ Event running 복구
 record_applied_at = NULL
 Bracket 생성 시 확정한 Entry / EntryParticipant / Registration / Player 유지
 normalized Match 유지
+runtime Result 제거
 전환 이전 Bracket에서 기록 반영이 만든 identity만 기존 방식으로 원복
 
-apply → revert → reapply 흐름을 Test 환경에서 검증했다.
+P0-4까지의 apply → revert → reapply legacy/Match 흐름을 Test 환경에서 검증했다.
+P0-5 Result lifecycle은 Double Elimination과 Single Elimination 모두 브라우저 E2E까지 완료했다.
+Double Elimination은 apply → revert → 결과 변경 → reapply 및 reset final 경로를 검증했고,
+Single Elimination은 apply → revert 흐름을 검증했다.
 
 legacy 저장 실패 시에도 이번 반영 과정에서 발생한 Player / Registration identity 변경을 원복한다.
 
@@ -255,11 +261,11 @@ EventRegistration
 Entry
 EntryParticipant
 Match (Event-linked 개인전 runtime mirror)
+Result (Event-linked 개인전 runtime final placement)
 schema / migration 검증은 되었으나 운영 runtime source of truth가 아닌 엔티티
 RegistrationSubmission
 TeamSnapshot
 TeamSnapshotMember
-Result
 RankingAward
 RankingBaseline
 ChampionshipAdvancement
@@ -284,19 +290,24 @@ P0. 신청 → 기록 normalized end-to-end 완성
 → Result
 → RankingAward
 → Records
-1단계 — Entry 연결 — 코드 구현 완료 / Test DB E2E 대기
+1단계 — Entry 연결 — 구현 및 Test DB E2E 완료
 EventRegistration에서 실제 참가자 확정
 개인전 Entry 생성
 EntryParticipant 생성
 Bracket participant를 Entry ID 기준으로 연결
 불참자 제외
 수동 참가자 처리
-2단계 A — normalized Match — 코드 구현 완료 / Test DB E2E 대기
+2단계 A — normalized Match — 구현 및 Test DB E2E 완료
 Bracket 생성·결과 변경 → Match snapshot 동기화
 record apply 직전 final sync
 record revert에서는 실제 경기 Match 유지
-2단계 B — normalized Result / RankingAward
+2단계 B-1 — normalized Result — 구현 및 Test DB E2E 완료
 최종 성적 → Result 생성
+Entry ID 기반 idempotent sync
+historical Result 보호
+반영 취소 / 재반영 Result lifecycle
+
+2단계 B-2 — normalized RankingAward — 미구현
 실제 지급 포인트 → RankingAward 생성
 Rookie rankingEnabled=false 정책 적용
 Light / Master 랭킹 반영
@@ -504,15 +515,18 @@ feature/records-system
 ✓ winner toggle/change, downstream cascade, reset activation/deactivation sync
 ✓ Bracket 삭제 전 runtime Match FK 선행 정리
 ✓ record apply 직전 final Match sync / revert 시 Match 유지
+✓ P0-1~P0-4 실제 Test E2E
+✓ P0-5 Entry ID 기반 normalized Result snapshot / idempotent sync
+✓ Result apply / revert / reapply 보상 흐름
+✓ historical `legacy_tournament` Result 보호
+✓ Double Elimination Result apply → revert → 결과 변경 → reapply Test E2E
+✓ Single Elimination Result apply → revert Test E2E
 
 바로 다음
-1. P0-1~P0-3 Test Supabase E2E 및 rollback/중복 생성 회귀
-2. P0-4 Test Supabase Match write E2E
-3. P0-5 normalized Result
-4. normalized RankingAward
-5. normalized 반영 취소 / 재반영
-6. Records normalized read 전환
-7. 팀전 normalized 연결
+1. P0-6 normalized RankingAward
+2. P0-7 normalized 전체 반영 취소 / 재반영 회귀
+3. P0-8 Records normalized read 전환
+4. P1 팀전 normalized 연결
 
 그 이후
 9. Team Builder → TeamSnapshot → 공식 Submission

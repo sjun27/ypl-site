@@ -1453,3 +1453,52 @@ Event 없는 legacy-only Bracket, Entry identity가 없는 전환 이전 Bracket
 - pure helper test 6개 성공
 - Vite production build 성공 (111 modules)
 - Supabase 실제 write E2E는 수행하지 않음
+
+## 2026-09-04 P0-5 normalized Result runtime 연결
+
+Event-linked 개인전의 기록 반영에서 기존 `elimResult`가 계산한 최종 입상자를 동일한 source of truth로
+사용해 normalized `results`에 함께 저장하도록 연결했다.
+
+```text
+Entry identity validation
+→ final Match sync
+→ champion / runner_up / semifinalist Result sync
+→ legacy ypl_data_v4 record save
+→ Event completed
+```
+
+Result는 `participant.entryId`로만 연결하며 Player 이름 문자열을 identity로 사용하지 않는다.
+runtime source는 Match와 같은 `legacy_bracket_runtime`을 사용한다. Master / Light / Rookie 모두
+Result를 생성하고, Rookie의 랭킹 미반영은 다음 RankingAward 단계로 분리했다.
+
+동기화는 Event의 기존 Result 전체를 조회한 뒤 Entry ID 기준으로 비교한다.
+
+- 동일 runtime Result: 기존 row ID 유지
+- placement 변경: 필요한 필드 UPDATE
+- 새 입상자: INSERT
+- 더 이상 입상자가 아닌 runtime Result: DELETE
+- `legacy_tournament` 등 다른 source: 수정·삭제 금지
+- 같은 Event / Entry의 non-runtime Result 충돌: 기록 반영 중단
+
+Result write 도중 실패하면 동기화 직전 runtime snapshot으로 best-effort 복구한다. normalized Result
+동기화 후 legacy 저장이 실패한 경우에도 이전 snapshot을 복구하고 서버 데이터를 다시 읽는다.
+
+기록 반영 취소는 runtime Result를 먼저 제거하고 legacy 기록을 원복한다. legacy 원복 저장이 실패하면
+제거 전 Result snapshot을 복구한다. 정상 취소에서는 Match와 Entry / EntryParticipant / Player /
+Registration은 유지하고 Result만 제거한 뒤 Event를 `running`, `record_applied_at = NULL`로 되돌린다.
+
+Event 없는 legacy-only Bracket, Entry identity가 없는 전환 이전 Bracket, 팀전은 Result sync를
+건너뛴다. RankingAward runtime은 구현하지 않았다.
+
+기록 반영 취소 후 Bracket 삭제에서는 Event의 Result가 0건인지 먼저 확인한다. Result가 남아 있으면
+historical/runtime 구분 없이 임의 삭제하지 않고 Entry FK 정리 전에 명확한 오류로 삭제를 중단한다.
+
+검증:
+
+- 기존 Match helper 7개 + Result helper 10개, 총 17개 pure helper test 성공
+- Vite production build 성공 (112 modules)
+- Test DB `ypl_schema_validation.results`에 anon `SELECT / INSERT / UPDATE / DELETE` 권한 적용 및 재조회 확인
+- Double Elimination 브라우저 E2E 성공: 기록 반영 → Result 4건 생성 → 반영 취소 → Result 0건 → 결과 변경 및 reset final 활성화 → 재반영 → 변경된 Result 4건만 생성, 중복 Entry 0건
+- Single Elimination 브라우저 E2E 성공: 3개 Match 완료 → 기록 반영 → 우승 1 / 준우승 1 / 4강 2 Result 생성 → 반영 취소 → Result 0건, Match 3건 및 Entry identity 유지
+- historical `legacy_tournament` Result 비침범 및 Event별 non-runtime 충돌 없음 확인
+- P0-5 normalized Result 구현 및 Test DB E2E 완료

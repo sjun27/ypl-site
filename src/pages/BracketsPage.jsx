@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { completeApplicationEvent, confirmEventParticipantsForBracket, deleteEventBracketMatches, getEventRecordContext, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, validateEventParticipantEntries } from "../services/index.js";
+import { assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, deleteEventBracketMatches, deleteEventBracketResults, getEventRecordContext, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketResults, validateEventParticipantEntries } from "../services/index.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -833,15 +833,38 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
     if(!b.applied)return;
     if(!confirm("이 대진표의 기록 반영을 취소할까요? 회차·랭킹·시즌 성적과 연결된 Event 기록 상태가 함께 원복됩니다."))return;
 
-    const result=revertBracketRecord(data,b.id);
-    if(!result.changed){
-      alert(result.reason||"자동 원복할 수 없는 기록입니다.");
+    const reverted=revertBracketRecord(data,b.id);
+    if(!reverted.changed){
+      alert(reverted.reason||"자동 원복할 수 없는 기록입니다.");
       return;
     }
 
-    const saved=await save(result.data);
+    let previousResultRows=null;
+    if(b.eventId){
+      try{
+        const resultCleanup=await deleteEventBracketResults(b.eventId,b);
+        if(!resultCleanup.skipped) previousResultRows=resultCleanup.previousRows;
+      }catch(error){
+        flash(`runtime Result 정리 실패로 기록 반영 취소를 중단했습니다: ${error?.message||"알 수 없는 오류"}`);
+        return;
+      }
+    }
+
+    const saved=await save(reverted.data);
     if(!saved){
-      flash("legacy 기록 원복 저장에 실패했습니다.");
+      if(previousResultRows!==null){
+        try{
+          await restoreEventBracketResults(b.eventId,previousResultRows);
+        }catch(error){
+          await refresh?.();
+          flash(`legacy 기록 원복 저장과 normalized Result 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+          return;
+        }
+      }
+      await refresh?.();
+      flash(previousResultRows===null
+        ? "legacy 기록 원복 저장에 실패했습니다."
+        : "legacy 기록 원복 저장 실패로 normalized Result를 이전 상태로 복구했습니다.");
       return;
     }
 
@@ -1031,6 +1054,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
 
     let nextData=preview.nd;
     let identityChanges=[];
+    let previousResultRows=null;
 
     if(b.eventId){
       if(team){
@@ -1060,6 +1084,14 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
             flash(recoveryError
               ? `최종 Match 동기화와 복구에 실패해 기록 반영을 중단했습니다: ${error?.message||"알 수 없는 오류"} / ${recoveryError?.message||"알 수 없는 오류"}`
               : `최종 Match 동기화 실패로 기록 반영을 중단했습니다: ${error?.message||"알 수 없는 오류"}`);
+            return;
+          }
+
+          try{
+            const resultSync=await syncEventBracketResults(b.eventId,b,res);
+            if(!resultSync.skipped) previousResultRows=resultSync.previousRows;
+          }catch(error){
+            flash(`normalized Result 동기화 실패로 기록 반영을 중단했습니다: ${error?.message||"알 수 없는 오류"}`);
             return;
           }
         }
@@ -1131,25 +1163,40 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
         };
 
       }catch(error){
-        flash(`참가자 확정 실패: ${error?.message||"알 수 없는 오류"}`);
+        flash(`기록 반영 사전 검증 실패: ${error?.message||"알 수 없는 오류"}`);
         return;
       }
     }
 
     const saved=await save(nextData);
     if(!saved){
+      let resultRestoreError=null;
+      if(b.eventId&&previousResultRows!==null){
+        try{ await restoreEventBracketResults(b.eventId,previousResultRows); }
+        catch(error){ resultRestoreError=error; }
+      }
+
+      let identityRestoreError=null;
       if(b.eventId&&identityChanges.length){
         try{
           await revertEventRecordApplication(b.eventId,identityChanges,{reopenEvent:false});
         }catch(error){
-          await refresh?.();
-          flash(`legacy 저장 실패 후 Player/Registration 원복에도 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
-          return;
+          identityRestoreError=error;
         }
       }
 
       await refresh?.();
-      flash("legacy 기록 저장에 실패해 Player/Registration 변경도 원복했습니다.");
+      if(resultRestoreError||identityRestoreError){
+        const failures=[
+          resultRestoreError&&`Result: ${resultRestoreError.message||"알 수 없는 오류"}`,
+          identityRestoreError&&`Player/Registration: ${identityRestoreError.message||"알 수 없는 오류"}`,
+        ].filter(Boolean).join(" / ");
+        flash(`legacy 저장 실패 후 자동 원복에도 실패했습니다: ${failures}`);
+        return;
+      }
+      flash(previousResultRows===null
+        ? "legacy 기록 저장에 실패해 Player/Registration 변경도 원복했습니다."
+        : "legacy 기록 저장 실패로 normalized Result를 이전 snapshot으로 복구했습니다.");
       return;
     }
 
@@ -1638,6 +1685,15 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
         identityChanges.some(change=>!change?.participantId||!change?.registrationId||!change?.playerId||!change?.entryId||!change?.entryParticipantId)
       ){
         flash("대진표의 참가 확정 metadata가 불완전해 자동 삭제를 중단했습니다.");
+        return;
+      }
+    }
+
+    if(b.eventId&&confirmation){
+      try{
+        await assertEventHasNoResults(b.eventId);
+      }catch(error){
+        flash(`Result 확인 실패로 대진표를 유지했습니다: ${error?.message||"알 수 없는 오류"}`);
         return;
       }
     }
