@@ -128,6 +128,7 @@ normalized에서 처리
 Bracket 생성 시 확정된 Entry / EntryParticipant / Registration / Player 검증
 Event 연결 개인전의 실제 Match snapshot 동기화
 Event 연결 개인전의 우승 / 준우승 / 실제 4강 Result 동기화
+Event 연결 Master / Light 개인전의 실제 지급 RankingAward 동기화
 전환 이전 Bracket은 기존 record-apply identity 확정 fallback 사용
 Event completed
 record_applied_at 기록
@@ -157,6 +158,7 @@ record_applied_at = NULL
 Bracket 생성 시 확정한 Entry / EntryParticipant / Registration / Player 유지
 normalized Match 유지
 runtime Result 제거
+runtime placement RankingAward를 Result보다 먼저 제거
 전환 이전 Bracket에서 기록 반영이 만든 identity만 기존 방식으로 원복
 
 P0-4까지의 apply → revert → reapply legacy/Match 흐름을 Test 환경에서 검증했다.
@@ -262,11 +264,11 @@ Entry
 EntryParticipant
 Match (Event-linked 개인전 runtime mirror)
 Result (Event-linked 개인전 runtime final placement)
+RankingAward (Event-linked Master / Light runtime placement payout)
 schema / migration 검증은 되었으나 운영 runtime source of truth가 아닌 엔티티
 RegistrationSubmission
 TeamSnapshot
 TeamSnapshotMember
-RankingAward
 RankingBaseline
 ChampionshipAdvancement
 Title 관련 구조
@@ -307,11 +309,14 @@ Entry ID 기반 idempotent sync
 historical Result 보호
 반영 취소 / 재반영 Result lifecycle
 
-2단계 B-2 — normalized RankingAward — 미구현
+2단계 B-2 — normalized RankingAward — 구현 및 Test DB E2E 완료
 실제 지급 포인트 → RankingAward 생성
 Rookie rankingEnabled=false 정책 적용
 Light / Master 랭킹 반영
 중복 반영 방지
+Master 60 / 40 / 20, Light 30 / 20 / 10 canonical policy를 legacy와 공유
+Test DB placement unique index 적용
+Test DB anon CRUD GRANT 적용 및 재조회 확인
 3단계 — 반영 취소 / 재반영
 normalized Match 유지, Result / RankingAward 원복
 Event lifecycle 원복
@@ -521,12 +526,23 @@ feature/records-system
 ✓ historical `legacy_tournament` Result 보호
 ✓ Double Elimination Result apply → revert → 결과 변경 → reapply Test E2E
 ✓ Single Elimination Result apply → revert Test E2E
+✓ P0-6 Master 60 / 40 / 20, Light 30 / 20 / 10 canonical point policy
+✓ Rookie / rankingEnabled=false RankingAward 0건 정책
+✓ Result.entry_id → EntryParticipant.player_id 기반 placement Award snapshot
+✓ runtime placement Award idempotent sync / stale cleanup / 다른 source·ledger 보호
+✓ Award → Result FK 순서를 지킨 apply/revert compensation
+✓ Test DB `(result_id, player_id)` placement partial unique index
+✓ P0-6 pure helper test 및 production build
+✓ Test DB `ranking_awards` anon CRUD GRANT 적용 및 재조회 확인
+✓ Master RankingAward 60 / 40 / 20 apply → revert 브라우저 E2E
+✓ Light RankingAward 30 / 20 / 10 apply → revert 브라우저 E2E
+✓ Rookie Result 4건 / RankingAward 0건 apply → revert 브라우저 E2E
+✓ Master / Light legacy 랭킹·시즌 delta와 normalized Award 점수 일치 확인
 
 바로 다음
-1. P0-6 normalized RankingAward
-2. P0-7 normalized 전체 반영 취소 / 재반영 회귀
-3. P0-8 Records normalized read 전환
-4. P1 팀전 normalized 연결
+1. P0-7 normalized 전체 반영 취소 / 결과 변경 / 재반영 회귀
+2. P0-8 Records normalized read 전환
+3. P1 팀전 normalized 연결
 
 그 이후
 9. Team Builder → TeamSnapshot → 공식 Submission

@@ -696,6 +696,13 @@ create index if not exists idx_ranking_awards_result_id
 create index if not exists idx_ranking_awards_related_award_id
     on ranking_awards (related_award_id);
 
+-- One placement payout per Result/Player. A team Result may still award
+-- multiple Players, while adjustment/reversal ledger rows remain unrestricted.
+create unique index if not exists uq_ranking_awards_placement_result_player
+    on ranking_awards (result_id, player_id)
+    where award_kind = 'placement'
+      and result_id is not null;
+
 
 -- =========================================================
 -- 14. Title definitions

@@ -1223,6 +1223,20 @@ reversal
 실제 지급값을 저장한다.
 YPL 시즌 3 이후에는 Event별 랭킹 반영 여부를 `competition_settings.rankingEnabled`에 명시한다.
 
+Event-linked 정상 개인전의 canonical placement point policy:
+
+```text
+Master  우승 60 / 준우승 40 / 4강 20
+Light   우승 30 / 준우승 20 / 4강 10
+Rookie  RankingAward 없음
+```
+
+Master / Light의 `win_delta / runner_up_delta / top4_delta`는 각 입상에 1씩 기록한다.
+Light는 포인트만 Master의 절반이며 입상 횟수는 동일하게 센다. 정상 개인전 placement Award는
+`counts_series = true`, `counts_season = true`다. Rookie는 잘못 `rankingEnabled = true`로 저장되어도
+Award를 생성하지 않는다. 기존 Light Event의 `division`이 비어 있고 `event_type = light`인 경우도
+Light로 해석하며, 기존 `pokecup` Event의 division이 비어 있으면 기존 동작을 보존해 Master 정책을 사용한다.
+
 ```text
 마스터 리그       → true
 팀전              → true
@@ -1255,6 +1269,11 @@ placement +20
 adjustment +5
 reversal -20
 ```
+
+위 ledger capability와 Bracket의 operational rollback은 구분한다. P0-6의 기록 반영 취소는 아직
+최종화되지 않은 runtime 반영을 원복하는 작업이므로 `source = legacy_bracket_runtime`인 placement
+Award를 먼저 삭제한 뒤 runtime Result를 삭제한다. `adjustment` / `reversal` 및 다른 source Award는
+이 cleanup 대상이 아니며, 별도의 사후 보정 UI는 이번 단계에서 구현하지 않는다.
 
 ### RankingBaseline
 
@@ -1718,12 +1737,12 @@ Event running 저장이 실패하면 먼저 legacy Bracket 제거를 저장한 �
 legacy 제거 저장도 실패하면 Bracket, runtime Match, normalized identity를 유지해 사용자가 Bracket 삭제로 복구할 수 있게 한다.
 
 기록 반영은 Entry-linked Bracket에서 Player/Registration을 다시 생성하지 않고 현재 DB 연결만 검증한다.
-legacy 기록을 저장하기 직전에 final Match sync와 final Result sync를 순서대로 수행하며, 실패하면 기록 반영을 중단한다.
+legacy 기록을 저장하기 직전에 final Match sync, final Result sync, RankingAward sync를 순서대로 수행하며, 실패하면 기록 반영을 중단한다.
 전환 이전 `entryId` 없는 Bracket은 기존 fallback을 사용한다.
 
-기록 반영 취소에서는 runtime Result를 먼저 제거한 뒤 legacy 기록을 원복하고 Event를 다시 `running`으로 열어 `record_applied_at`을 NULL로 되돌린다. legacy 원복 저장이 실패하면 직전 runtime Result snapshot을 복구한다. Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
+기록 반영 취소에서는 runtime placement RankingAward를 먼저 제거하고 runtime Result를 제거한 뒤 legacy 기록을 원복하고 Event를 다시 `running`으로 열어 `record_applied_at`을 NULL로 되돌린다. legacy 원복 저장이 실패하면 FK 순서에 맞춰 직전 Result snapshot, RankingAward snapshot 순서로 복구한다. Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
 
-기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. Event에 Result가 0건인지 먼저 확인한 뒤 FK 순서에 따라 runtime Match를 삭제하고 normalized 참가 확정을 원복한 다음 legacy Bracket 삭제를 저장한다. 이후 `participantConfirmation.previousEventStatus`가 `open`이면 Event를 `open`으로 복구한다. 이전부터 `running`이었던 Event는 `running`을 유지한다.
+기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. Event에 RankingAward와 Result가 모두 0건인지 먼저 확인한 뒤 FK 순서에 따라 runtime Match를 삭제하고 normalized 참가 확정을 원복한 다음 legacy Bracket 삭제를 저장한다. 다른 source나 unknown Award/Result가 남아 있으면 임의 삭제하지 않고 중단한다. 이후 `participantConfirmation.previousEventStatus`가 `open`이면 Event를 `open`으로 복구한다. 이전부터 `running`이었던 Event는 `running`을 유지한다.
 
 ### P0-4 normalized Match runtime sync
 
@@ -1784,9 +1803,55 @@ legacy save 실패 시 Result를 동기화 직전 snapshot으로 best-effort 복
 Result snapshot을 복구한다. Match와 Entry identity는 유지한다.
 
 Event 없는 legacy-only Bracket, `entryId`가 없는 전환 이전 Bracket, 팀전은 Result sync를 건너뛴다.
-RankingAward runtime은 P0-6 범위로 남긴다.
 
 Test DB 브라우저 E2E에서는 Double Elimination의 apply → revert → 결과 변경 → reapply 및 reset final 경로와 Single Elimination의 apply → revert 경로를 검증했다. 두 형식 모두 기록 반영 전에는 Result가 생성되지 않고, 반영 시 우승 1 / 준우승 1 / 4강 2의 runtime Result가 생성되며, 반영 취소 시 Result만 제거되고 Match / Entry / EntryParticipant는 유지되는 것을 확인했다.
+
+### P0-6 normalized RankingAward runtime sync
+
+Result sync 뒤에 Event의 runtime Result를 다시 읽고 다음 normalized 관계만 사용한다.
+
+```text
+results.id / results.entry_id
+→ entry_participants.entry_id
+→ entry_participants.player_id
+→ ranking_awards.result_id / player_id
+```
+
+이름 문자열로 Player를 찾지 않으며 개인 Entry에 EntryParticipant가 0명 또는 2명 이상이면 반영을
+중단한다. 생성 row는 `award_kind = placement`, `source = legacy_bracket_runtime`,
+`reason = normalized bracket placement`이고 Master / Light 모두 series와 season count를 켠다.
+
+Event의 Award 전체를 읽되 sync와 cleanup은 runtime placement만 대상으로 한다. `(result_id, player_id)`를
+snapshot key로 사용하며 같은 snapshot은 재삽입하지 않고, 변경된 delta는 UPDATE하며, 현재 Result에
+없는 stale runtime placement만 DELETE한다. 다른 source placement는 충돌로 중단하고 adjustment / reversal은
+보호한다. DB에는 다음 partial unique index를 두어 cross-tab/retry 중복도 차단한다.
+
+```sql
+create unique index if not exists uq_ranking_awards_placement_result_player
+on ypl_schema_validation.ranking_awards (result_id, player_id)
+where award_kind = 'placement'
+  and result_id is not null;
+```
+
+`result_id` 단독 unique가 아니므로 향후 하나의 팀 Result가 서로 다른 여러 Player Award를 가지는 것을
+막지 않는다. partial unique index를 PostgREST upsert conflict target으로 가정하지 않고 SELECT 후
+INSERT/UPDATE/DELETE한다. 동시 INSERT가 unique 충돌하면 동일한 runtime payload가 이미 존재하는지
+재조회해 같은 반영만 idempotent 성공으로 처리한다.
+
+apply write 순서는 `Entry validation → final Match sync → Result sync → RankingAward sync → legacy save → Event completed`다.
+Award sync 실패 시 Award 자체 snapshot을 복구한 뒤 Result를 apply 이전 snapshot으로 복구한다. legacy save
+실패 시 RankingAward 이전 snapshot, Result 이전 snapshot 순서로 복구한다. revert는
+`RankingAward 제거 → Result 제거 → legacy revert save → Event running` 순서이며, legacy revert save 실패 시
+Result, RankingAward 순서로 복구한다.
+
+P0-6 코드와 pure test, production build, Test DB unique index 및 `anon` CRUD GRANT 적용을 완료했다.
+Test DB 브라우저 E2E에서는 Master / Light / Rookie 개인전을 각각 apply → revert까지 검증했다.
+Master는 Result 4건과 `60 / 40 / 20 / 20` placement Award가 생성되고 legacy 랭킹·시즌 delta도 동일한
+`60 / 40 / 20` 정책을 사용했다. Light는 Result 4건과 `30 / 20 / 10 / 10` Award가 생성되고 legacy도
+동일한 `30 / 20 / 10` 정책을 사용했다. Rookie는 Result 4건만 생성되고 RankingAward는 0건이며
+legacy 누적 랭킹과 시즌 성적도 변경되지 않았다. 세 경우 모두 revert 후 runtime Result / Award가 제거되고
+Match / Entry / EntryParticipant는 유지되는 것을 확인했다. RLS와 Production은 변경하지 않았다.
+따라서 P0-6 normalized RankingAward 구현 및 Test DB E2E는 완료됐다.
 
 ### Event 수정 / 삭제 일관성
 

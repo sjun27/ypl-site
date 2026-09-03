@@ -1502,3 +1502,58 @@ historical/runtime 구분 없이 임의 삭제하지 않고 Entry FK 정리 전�
 - Single Elimination 브라우저 E2E 성공: 3개 Match 완료 → 기록 반영 → 우승 1 / 준우승 1 / 4강 2 Result 생성 → 반영 취소 → Result 0건, Match 3건 및 Entry identity 유지
 - historical `legacy_tournament` Result 비침범 및 Event별 non-runtime 충돌 없음 확인
 - P0-5 normalized Result 구현 및 Test DB E2E 완료
+
+## 2026-09-04 P0-6 normalized RankingAward runtime 연결
+
+Event-linked 개인전의 runtime Result를 실제 Player 지급값인 `ranking_awards`로 연결했다.
+
+```text
+Entry identity validation
+→ final Match sync
+→ Result sync
+→ RankingAward sync
+→ legacy ypl_data_v4 record save
+→ Event completed
+```
+
+canonical point policy는 Master `60 / 40 / 20`, Light `30 / 20 / 10`이며 linked Event의 legacy
+랭킹 delta와 normalized Award가 같은 pure helper를 사용한다. Rookie와 `rankingEnabled=false` Event는
+Result만 유지하고 Award를 만들지 않는다. Light도 우승/준우승/4강 count는 각각 1로 기록하며 포인트만
+Master의 절반이다.
+
+Player identity는 이름이 아니라 `Result.entry_id → EntryParticipant.player_id`로 해석한다. 개인 Entry의
+EntryParticipant가 정확히 한 명이 아니면 Award 생성을 중단한다. runtime Award는
+`award_kind=placement`, `source=legacy_bracket_runtime`, `counts_series=true`, `counts_season=true`다.
+
+동기화는 `(result_id, player_id)` snapshot key를 사용한다. 동일 row는 유지하고 delta 변경은 UPDATE,
+stale runtime placement는 DELETE한다. 다른 source placement와 adjustment/reversal은 수정·삭제하지 않는다.
+Test DB에는 다음 unique index를 적용했다.
+
+```sql
+create unique index if not exists uq_ranking_awards_placement_result_player
+on ypl_schema_validation.ranking_awards (result_id, player_id)
+where award_kind = 'placement'
+  and result_id is not null;
+```
+
+따라서 동일 Result/Player placement 중복은 DB에서도 차단하면서 향후 하나의 team Result에 서로 다른
+여러 Player Award를 연결할 수 있다. PostgREST partial-index upsert는 사용하지 않는다.
+
+기록 반영 실패 보상은 Award snapshot을 먼저 복구한 뒤 Result snapshot을 복구한다. 기록 반영 취소는
+runtime Award → Result → legacy 순서로 제거하며 legacy 원복 실패 시 Result → Award 순서로 복구한다.
+정상 취소 후 Match와 Entry / EntryParticipant / Player / Registration은 유지한다.
+
+검증:
+
+- 기존 Match 7개 + Result 10개 + RankingAward 17개, 총 34개 pure helper test 성공
+- Vite production build 성공 (113 modules)
+- `git diff --check` 성공
+- Test DB unique index 적용 및 재조회 확인
+- Test DB `ranking_awards`에 `anon SELECT / INSERT / UPDATE / DELETE` GRANT 적용 및 재조회 확인
+- Master 브라우저 E2E 성공: Result 4건 + RankingAward 4건 생성, `60 / 40 / 20 / 20` 지급, legacy 랭킹·시즌도 `60 / 40 / 20` 정책과 일치, revert 후 Result/Award 0건 및 Match/Entry 유지
+- Light 브라우저 E2E 성공: Result 4건 + RankingAward 4건 생성, `30 / 20 / 10 / 10` 지급, 입상 count는 각 1 유지, legacy 랭킹·시즌도 `30 / 20 / 10` 정책과 일치, revert 정상
+- Rookie 브라우저 E2E 성공: `rankingEnabled=false`, Result 4건 생성, RankingAward 0건, legacy 누적 랭킹·시즌 불변, revert 후 Result 0건
+- Master / Light / Rookie 모두 정상 revert 후 Match 3건, Entry 4건, EntryParticipant 4건 유지 확인
+- RLS는 변경하지 않았고 Production은 변경하지 않음
+
+현재 상태는 P0-6 normalized RankingAward 구현 및 Test DB E2E 완료다.

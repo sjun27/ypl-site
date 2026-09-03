@@ -9,6 +9,11 @@ import {
   buildBracketResultSyncPlan,
   buildEventBracketResultSnapshot,
 } from "./bracketResultSnapshot.js";
+import {
+  buildBracketRankingAwardSyncPlan,
+  buildEventRankingAwardSnapshot,
+  samePlacementAwardValues,
+} from "./bracketRankingAwardSnapshot.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -32,6 +37,7 @@ export function normalizedDbAvailable() {
 
 const eventMatchMutationQueues = new Map();
 const eventResultMutationQueues = new Map();
+const eventRankingAwardMutationQueues = new Map();
 
 function queueEventMatchMutation(eventId, operation) {
   const previous = eventMatchMutationQueues.get(eventId) || Promise.resolve();
@@ -53,6 +59,19 @@ function queueEventResultMutation(eventId, operation) {
   const clear = () => {
     if (eventResultMutationQueues.get(eventId) === current) {
       eventResultMutationQueues.delete(eventId);
+    }
+  };
+  current.then(clear, clear);
+  return current;
+}
+
+function queueEventRankingAwardMutation(eventId, operation) {
+  const previous = eventRankingAwardMutationQueues.get(eventId) || Promise.resolve();
+  const current = previous.catch(() => null).then(operation);
+  eventRankingAwardMutationQueues.set(eventId, current);
+  const clear = () => {
+    if (eventRankingAwardMutationQueues.get(eventId) === current) {
+      eventRankingAwardMutationQueues.delete(eventId);
     }
   };
   current.then(clear, clear);
@@ -398,6 +417,274 @@ export async function assertEventHasNoResults(eventId) {
   if (rows.length) {
     const sources = [...new Set(rows.map(row => row.source || "unknown"))].join(", ");
     throw new Error(`Event에 Result가 ${rows.length}건 남아 있습니다 (${sources}). 기록 반영 취소를 먼저 확인해 주세요.`);
+  }
+  return null;
+}
+
+async function readEventRankingAwards(eventId) {
+  const { data, error } = await db()
+    .from("ranking_awards")
+    .select(`
+      id,
+      event_id,
+      player_id,
+      result_id,
+      award_kind,
+      points_delta,
+      win_delta,
+      runner_up_delta,
+      top4_delta,
+      counts_series,
+      counts_season,
+      related_award_id,
+      reason,
+      source,
+      created_at
+    `)
+    .eq("event_id", eventId);
+
+  if (error) fail(error, "Event의 기존 RankingAward를 확인하지 못했습니다.");
+  return data || [];
+}
+
+async function readEventResultParticipants(eventId, resultRows) {
+  const entryIds = [...new Set((resultRows || []).map(row => row?.entry_id).filter(Boolean))];
+  if (!entryIds.length) return [];
+
+  const { data, error } = await db()
+    .from("entry_participants")
+    .select("id, event_id, entry_id, player_id, member_order")
+    .eq("event_id", eventId)
+    .in("entry_id", entryIds);
+
+  if (error) fail(error, "Result의 EntryParticipant/Player identity를 확인하지 못했습니다.");
+  return data || [];
+}
+
+async function readPlacementAwardByIdentity(eventId, resultId, playerId) {
+  const { data, error } = await db()
+    .from("ranking_awards")
+    .select(`
+      id,
+      event_id,
+      player_id,
+      result_id,
+      award_kind,
+      points_delta,
+      win_delta,
+      runner_up_delta,
+      top4_delta,
+      counts_series,
+      counts_season,
+      reason,
+      source,
+      created_at
+    `)
+    .eq("event_id", eventId)
+    .eq("result_id", resultId)
+    .eq("player_id", playerId)
+    .eq("award_kind", "placement")
+    .maybeSingle();
+
+  if (error) fail(error, "중복 방지 후 기존 placement RankingAward를 확인하지 못했습니다.");
+  return data || null;
+}
+
+async function applyEventRankingAwardSyncPlan(eventId, plan) {
+  for (const update of plan.updates) {
+    const { id: _id, created_at: _createdAt, ...payload } = update.payload;
+    const { data, error } = await db()
+      .from("ranking_awards")
+      .update(payload)
+      .eq("id", update.id)
+      .eq("event_id", eventId)
+      .eq("award_kind", "placement")
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .select("id")
+      .maybeSingle();
+
+    if (error) fail(error, `placement RankingAward '${update.id}'를 수정하지 못했습니다.`);
+    if (!data) throw new Error(`placement RankingAward '${update.id}'가 동기화 중 변경되었습니다.`);
+  }
+
+  let inserted = 0;
+  for (const row of plan.inserts) {
+    const payload = {
+      ...row,
+      event_id: eventId,
+      source: LEGACY_BRACKET_RUNTIME_SOURCE,
+    };
+    const { data, error } = await db()
+      .from("ranking_awards")
+      .insert(payload)
+      .select("id")
+      .maybeSingle();
+
+    if (!error && data) {
+      inserted += 1;
+      continue;
+    }
+
+    if (String(error?.code || "") === "23505") {
+      const concurrent = await readPlacementAwardByIdentity(eventId, row.result_id, row.player_id);
+      if (
+        concurrent?.source === LEGACY_BRACKET_RUNTIME_SOURCE &&
+        samePlacementAwardValues(concurrent, row)
+      ) {
+        continue;
+      }
+    }
+
+    fail(error, "신규 placement RankingAward를 생성하지 못했습니다.");
+  }
+
+  if (plan.deleteIds.length) {
+    const { data, error } = await db()
+      .from("ranking_awards")
+      .delete()
+      .eq("event_id", eventId)
+      .eq("award_kind", "placement")
+      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .in("id", plan.deleteIds)
+      .select("id");
+
+    if (error) fail(error, "더 이상 유효하지 않은 runtime placement RankingAward를 정리하지 못했습니다.");
+    if ((data || []).length !== plan.deleteIds.length) {
+      throw new Error("일부 stale runtime placement RankingAward가 삭제되지 않았습니다.");
+    }
+  }
+
+  return {
+    inserted,
+    updated: plan.updates.length,
+    deleted: plan.deleteIds.length,
+  };
+}
+
+async function replaceEventRuntimeRankingAwardsNow(eventId, desiredRows) {
+  const existingRows = await readEventRankingAwards(eventId);
+  const plan = buildBracketRankingAwardSyncPlan(existingRows, desiredRows);
+  return applyEventRankingAwardSyncPlan(eventId, plan);
+}
+
+async function syncEventBracketRankingAwardsNow(eventId, bracket) {
+  if (!bracket || bracket.eventId !== eventId) {
+    throw new Error("RankingAward 대상 Event와 대진표 연결이 일치하지 않습니다.");
+  }
+
+  const identityState = bracketResultIdentityState(bracket);
+  if (!identityState.eligible) {
+    return {
+      skipped: true,
+      reason: identityState.reason,
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      previousRows: [],
+    };
+  }
+
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("RankingAward를 연결할 Event를 찾을 수 없습니다.");
+  if (event.is_team_event) {
+    throw new Error("팀전 Event의 RankingAward 동기화는 아직 지원하지 않습니다.");
+  }
+
+  const resultRows = await readEventResults(eventId);
+  const runtimeResults = resultRows.filter(row => row.source === LEGACY_BRACKET_RUNTIME_SOURCE);
+  const entryParticipants = await readEventResultParticipants(eventId, runtimeResults);
+  const snapshot = buildEventRankingAwardSnapshot(event, runtimeResults, entryParticipants);
+  if (!snapshot.skipped && !runtimeResults.length) {
+    throw new Error("RankingAward를 생성할 runtime Result가 없습니다.");
+  }
+  const existingRows = await readEventRankingAwards(eventId);
+  const previousRows = existingRows.filter(row =>
+    row.source === LEGACY_BRACKET_RUNTIME_SOURCE && row.award_kind === "placement"
+  );
+  const plan = buildBracketRankingAwardSyncPlan(existingRows, snapshot.rows);
+
+  try {
+    const counts = await applyEventRankingAwardSyncPlan(eventId, plan);
+    return { skipped: snapshot.skipped, reason: snapshot.reason, ...counts, previousRows };
+  } catch (error) {
+    try {
+      await replaceEventRuntimeRankingAwardsNow(eventId, previousRows);
+    } catch (restoreError) {
+      const combined = new Error(
+        `${error?.message || "RankingAward 동기화에 실패했습니다."} (이전 RankingAward snapshot 복구 실패: ${restoreError?.message || "알 수 없는 오류"})`
+      );
+      combined.code = "YPL_RANKING_AWARD_ROLLBACK_FAILED";
+      combined.cause = error;
+      throw combined;
+    }
+    throw error;
+  }
+}
+
+export async function syncEventBracketRankingAwards(eventId, bracket) {
+  if (!eventId) {
+    return {
+      skipped: true,
+      reason: "event_unlinked",
+      inserted: 0,
+      updated: 0,
+      deleted: 0,
+      previousRows: [],
+    };
+  }
+  return queueEventRankingAwardMutation(
+    eventId,
+    () => syncEventBracketRankingAwardsNow(eventId, bracket)
+  );
+}
+
+export async function deleteEventBracketRankingAwards(eventId, bracket) {
+  if (!eventId) return { skipped: true, reason: "event_unlinked", deleted: 0, previousRows: [] };
+  if (!bracket || bracket.eventId !== eventId) {
+    throw new Error("정리할 RankingAward의 Event와 대진표 연결이 일치하지 않습니다.");
+  }
+
+  const identityState = bracketResultIdentityState(bracket);
+  if (!identityState.eligible) {
+    return { skipped: true, reason: identityState.reason, deleted: 0, previousRows: [] };
+  }
+
+  return queueEventRankingAwardMutation(eventId, async () => {
+    const event = await getEvent(eventId);
+    if (!event) throw new Error("runtime RankingAward를 정리할 Event를 찾을 수 없습니다.");
+    if (event.is_team_event) {
+      throw new Error("팀전 Event의 RankingAward 정리는 아직 지원하지 않습니다.");
+    }
+
+    const existingRows = await readEventRankingAwards(eventId);
+    const previousRows = existingRows.filter(row =>
+      row.source === LEGACY_BRACKET_RUNTIME_SOURCE && row.award_kind === "placement"
+    );
+    const plan = buildBracketRankingAwardSyncPlan(existingRows, []);
+    const counts = await applyEventRankingAwardSyncPlan(eventId, plan);
+    return { skipped: false, ...counts, previousRows };
+  });
+}
+
+export async function restoreEventBracketRankingAwards(eventId, previousRows = []) {
+  if (!eventId) return { inserted: 0, updated: 0, deleted: 0 };
+  const snapshot = Array.isArray(previousRows) ? previousRows : [];
+  return queueEventRankingAwardMutation(
+    eventId,
+    () => replaceEventRuntimeRankingAwardsNow(eventId, snapshot)
+  );
+}
+
+export async function assertEventHasNoRankingAwards(eventId) {
+  if (!eventId) return null;
+  const rows = await readEventRankingAwards(eventId);
+  if (rows.length) {
+    const kinds = [...new Set(rows.map(row =>
+      `${row.award_kind || "unknown"}/${row.source || "unknown"}`
+    ))].join(", ");
+    throw new Error(
+      `Event에 RankingAward가 ${rows.length}건 남아 있습니다 (${kinds}). 기록 반영 취소를 먼저 확인해 주세요.`
+    );
   }
   return null;
 }
