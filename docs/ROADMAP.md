@@ -317,7 +317,7 @@ Light / Master 랭킹 반영
 Master 60 / 40 / 20, Light 30 / 20 / 10 canonical policy를 legacy와 공유
 Test DB placement unique index 적용
 Test DB anon CRUD GRANT 적용 및 재조회 확인
-3단계 — 반영 취소 / 재반영
+3단계 — 반영 취소 / 재반영 — 구현 및 Test DB E2E 완료
 normalized Match 유지, Result / RankingAward 원복
 Event lifecycle 원복
 Entry identity 보존 정책 확정
@@ -538,11 +538,14 @@ feature/records-system
 ✓ Light RankingAward 30 / 20 / 10 apply → revert 브라우저 E2E
 ✓ Rookie Result 4건 / RankingAward 0건 apply → revert 브라우저 E2E
 ✓ Master / Light legacy 랭킹·시즌 delta와 normalized Award 점수 일치 확인
+✓ application 4명 + manual 2명 혼합 참가 확정, Entry / EntryParticipant 6명 생성 확인
+✓ Reset Final 포함 Match 11건 전체 played / duplicate node 0 확인
+✓ 우승자 변경 후 reapply → 이전 champion Result/Award 제거, 새 Result/Award 4건만 생성
+✓ 재반영 후 duplicate Result 0 / duplicate Award 0 및 legacy 랭킹·시즌 delta 일치 확인
 
 바로 다음
-1. P0-7 normalized 전체 반영 취소 / 결과 변경 / 재반영 회귀
-2. P0-8 Records normalized read 전환
-3. P1 팀전 normalized 연결
+1. P0-8 Records normalized read 전환
+2. P1 팀전 normalized 연결
 
 그 이후
 9. Team Builder → TeamSnapshot → 공식 Submission

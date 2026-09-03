@@ -1557,3 +1557,68 @@ runtime Award → Result → legacy 순서로 제거하며 legacy 원복 실패 
 - RLS는 변경하지 않았고 Production은 변경하지 않음
 
 현재 상태는 P0-6 normalized RankingAward 구현 및 Test DB E2E 완료다.
+
+## 2026-09-04 P0-7 normalized 전체 lifecycle 회귀
+
+P0-4 Match, P0-5 Result, P0-6 RankingAward를 하나의 실제 운영형 Test Event에서 apply → revert → 결과 변경 → reapply까지 통합 검증했다.
+
+대상 Event는 `제7회 파이컵라이트`이며 개인전 Light / Double Elimination으로 진행했다. 신청 공지를 통해 Test1~4가 application Registration으로 참가했고, 대진표 생성 시 Test5~6을 manual Registration으로 추가하여 총 6명이 참가했다.
+
+대진표 생성 직후 Event는 open에서 running으로 전환됐고 Player / Registration / Entry / EntryParticipant가 각각 6명 기준으로 정상 확정됐다.
+
+경기 완료 후 기록 반영 전 상태는 다음과 같았다.
+
+- runtime Match 11건
+- played 11건
+- unresolved 0건
+- duplicate source node 0건
+- Grand Final과 Reset Final 모두 성립
+- Result 0건
+- RankingAward 0건
+
+첫 기록 반영 결과:
+
+- Event completed
+- Result 4건
+- RankingAward 4건
+- Test1 우승 +30
+- Test3 준우승 +20
+- Test4 4강 +10
+- Test6 4강 +10
+- duplicate Result 0건
+- duplicate RankingAward 0건
+- legacy pointConfig 30 / 20 / 10
+- legacy ranking / season delta와 normalized Award 일치
+
+반영 취소 결과:
+
+- Event running
+- record_applied_at NULL
+- RankingAward 4 → 0
+- Result 4 → 0
+- Match 11건 유지
+- Entry 6건 유지
+- EntryParticipant 6건 유지
+- legacy 해당 회차 제거
+
+이후 경기 결과를 변경해 우승자를 Test1에서 Test6으로 바꾸고 재반영했다.
+
+재반영 결과:
+
+- Test6 우승 +30
+- Test1 준우승 +20
+- Test3 4강 +10
+- Test4 4강 +10
+- Result 정확히 4건
+- RankingAward 정확히 4건
+- 이전 Test1 champion Result 0건
+- 이전 Test1 win Award 0건
+- Test6 champion Result 1건
+- Test6 win Award 1건
+- duplicate Result 0건
+- duplicate RankingAward 0건
+- legacy ranking / season도 새 결과와 일치
+
+따라서 P0-7 개인전 normalized 전체 write lifecycle 회귀를 완료했다.
+
+다음 단계는 P0-8 Records normalized read 전환이다.

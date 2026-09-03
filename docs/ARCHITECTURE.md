@@ -1853,6 +1853,23 @@ legacy 누적 랭킹과 시즌 성적도 변경되지 않았다. 세 경우 모�
 Match / Entry / EntryParticipant는 유지되는 것을 확인했다. RLS와 Production은 변경하지 않았다.
 따라서 P0-6 normalized RankingAward 구현 및 Test DB E2E는 완료됐다.
 
+### P0-7 normalized 전체 lifecycle 회귀
+
+P0-4~P0-6에서 구현한 Match / Result / RankingAward lifecycle을 실제 운영과 유사한 하나의 Event에서 end-to-end로 검증했다.
+
+Test Event는 `제7회 파이컵라이트`이며 application Registration 4명(Test1~4)과 대진표 생성 시 추가한 manual Registration 2명(Test5~6), 총 6명으로 진행했다.
+
+대진표 생성 시 Player / Registration / Entry / EntryParticipant 6명이 정상 확정됐고 Event는 open에서 running으로 전환됐다. 6인 Double Elimination을 끝까지 진행한 결과 Reset Final을 포함한 runtime Match 11건이 생성됐으며 11건 모두 played, unresolved 0건, duplicate source node 0건이었다.
+
+첫 기록 반영에서는 Result 4건과 RankingAward 4건이 생성됐다. Light canonical policy에 따라 Test1 우승 +30, Test3 준우승 +20, Test4 / Test6 4강 각 +10이 반영됐으며 legacy ranking / season delta와 normalized Award가 일치했다.
+
+반영 취소 후 RankingAward와 Result는 각각 0건으로 제거됐고 Match 11건, Entry 6건, EntryParticipant 6건은 유지됐다. legacy 해당 회차도 제거됐으며 Event는 running, record_applied_at은 NULL로 복구됐다.
+
+이후 경기 결과를 수정해 우승자를 Test1에서 Test6으로 변경하고 재반영했다. 새 결과는 Test6 우승 +30, Test1 준우승 +20, Test3 / Test4 4강 각 +10이었다. 이전 Test1 champion Result와 win Award는 남지 않았고 새 Result와 RankingAward는 각각 정확히 4건이었다. duplicate Result와 duplicate RankingAward도 모두 0건이었다.
+
+전체 과정에서 Event lifecycle은 running → completed → running → completed로 정상 동작했고 legacy ranking / season도 재반영 결과와 정확히 일치했다.
+
+따라서 P0-7 개인전 normalized write lifecycle 회귀 검증은 완료됐다. 다음 단계는 P0-8 Records normalized read 전환이다.
 ### Event 수정 / 삭제 일관성
 
 Event가 연결된 신청 공지를 수정할 때 기존 Event의 다음 상태를 보존한다.
