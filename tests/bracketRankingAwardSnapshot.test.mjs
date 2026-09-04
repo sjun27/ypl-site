@@ -5,6 +5,7 @@ import {
   buildBracketRankingAwardSyncPlan,
   buildEventRankingAwardSnapshot,
   getIndividualPlacementPointPolicy,
+  getTeamPlacementPointPolicy,
 } from "../src/services/bracketRankingAwardSnapshot.js";
 
 const runtimeResults = [
@@ -26,6 +27,27 @@ const event = (division, settings = {}) => ({
   competition_settings: settings,
 });
 
+const teamEvent = (division, settings = {}) => ({
+  event_type: "pokecup",
+  division,
+  is_team_event: true,
+  competition_settings: settings,
+});
+
+const teamResult = (id, entryId, placement_code) => ({
+  id,
+  entry_id: entryId,
+  placement_code,
+  source: "legacy_bracket_runtime",
+});
+
+const teamMembers = (entryId, count = 4) => Array.from({ length: count }, (_, index) => ({
+  id: `${entryId}-participant-${index + 1}`,
+  entry_id: entryId,
+  player_id: `${entryId}-player-${index + 1}`,
+  member_order: index + 1,
+}));
+
 test("Master placement policy is 60 / 40 / 20", () => {
   assert.deepEqual(getIndividualPlacementPointPolicy(event("master")).points, {
     win: 60,
@@ -46,6 +68,19 @@ test("Light placement policy is 30 / 20 / 10 including legacy event_type fallbac
     is_team_event: false,
     competition_settings: {},
   }).division, "light");
+});
+
+test("team placement preview policy is fixed per member with no semifinalist points", () => {
+  assert.deepEqual(getTeamPlacementPointPolicy(teamEvent("master")).points, {
+    win: 30,
+    ru: 20,
+    sf: 0,
+  });
+  assert.deepEqual(getTeamPlacementPointPolicy(teamEvent("light")).points, {
+    win: 15,
+    ru: 10,
+    sf: 0,
+  });
 });
 
 test("Rookie creates no RankingAward even if incorrectly enabled", () => {
@@ -90,6 +125,103 @@ test("Light halves points without halving placement counts", () => {
     [20, 0, 1, 0],
     [10, 0, 0, 1],
   ]);
+});
+
+test("4-member Master champion team creates one 30-point Award per member with points only", () => {
+  const snapshot = buildEventRankingAwardSnapshot(
+    teamEvent("master"),
+    [teamResult("team-result-a", "team-entry-a", "champion")],
+    teamMembers("team-entry-a")
+  );
+
+  assert.equal(snapshot.rows.length, 4);
+  assert.deepEqual(snapshot.rows.map(row => row.points_delta), [30, 30, 30, 30]);
+  assert.ok(snapshot.rows.every(row =>
+    row.win_delta === 0 &&
+    row.runner_up_delta === 0 &&
+    row.top4_delta === 0 &&
+    row.counts_series === true &&
+    row.counts_season === true
+  ));
+  assert.ok(snapshot.rows.every(row => row.result_id === "team-result-a"));
+});
+
+test("team Award points are fixed per member regardless of team size", () => {
+  const awardPoints = (division, placement, count) => {
+    const entryId = `team-entry-${division}-${placement}-${count}`;
+    return buildEventRankingAwardSnapshot(
+      teamEvent(division),
+      [teamResult(`team-result-${entryId}`, entryId, placement)],
+      teamMembers(entryId, count)
+    ).rows.map(row => row.points_delta);
+  };
+
+  assert.deepEqual(awardPoints("master", "champion", 4), [30, 30, 30, 30]);
+  assert.deepEqual(awardPoints("master", "champion", 2), [30, 30]);
+  assert.deepEqual(awardPoints("master", "runner_up", 3), [20, 20, 20]);
+  assert.deepEqual(awardPoints("light", "champion", 4), [15, 15, 15, 15]);
+  assert.deepEqual(awardPoints("light", "runner_up", 2), [10, 10]);
+});
+
+test("team semifinalist Results create no RankingAward rows", () => {
+  const entryId = "team-entry-semifinalist";
+  const snapshot = buildEventRankingAwardSnapshot(
+    teamEvent("master"),
+    [teamResult("team-result-semifinalist", entryId, "semifinalist")],
+    teamMembers(entryId, 4)
+  );
+
+  assert.equal(snapshot.skipped, false);
+  assert.deepEqual(snapshot.rows, []);
+});
+
+test("multiple members create multiple Awards for one Team Result", () => {
+  const snapshot = buildEventRankingAwardSnapshot(
+    teamEvent("master"),
+    [teamResult("team-result-a", "team-entry-a", "runner_up")],
+    teamMembers("team-entry-a", 2)
+  );
+
+  assert.deepEqual(snapshot.rows.map(row => row.player_id), [
+    "team-entry-a-player-1",
+    "team-entry-a-player-2",
+  ]);
+  assert.ok(snapshot.rows.every(row => row.result_id === "team-result-a"));
+});
+
+test("team Result requires members and a unique Player identity for every member", () => {
+  const result = teamResult("team-result-a", "team-entry-a", "champion");
+  assert.throws(
+    () => buildEventRankingAwardSnapshot(teamEvent("master"), [result], []),
+    /최소 1명이어야 합니다/
+  );
+
+  const members = teamMembers("team-entry-a", 2);
+  assert.throws(
+    () => buildEventRankingAwardSnapshot(teamEvent("master"), [result], [
+      { ...members[0], player_id: null },
+      members[1],
+    ]),
+    /Player identity가 없습니다/
+  );
+  assert.throws(
+    () => buildEventRankingAwardSnapshot(teamEvent("master"), [result], [
+      members[0],
+      { ...members[1], player_id: members[0].player_id },
+    ]),
+    /중복되어 있습니다/
+  );
+});
+
+test("team rankingEnabled=false creates no RankingAward", () => {
+  const snapshot = buildEventRankingAwardSnapshot(
+    teamEvent("master", { rankingEnabled: false }),
+    [teamResult("team-result-a", "team-entry-a", "champion")],
+    teamMembers("team-entry-a")
+  );
+
+  assert.equal(snapshot.reason, "ranking_disabled");
+  assert.deepEqual(snapshot.rows, []);
 });
 
 test("uses Result.entry_id to map exactly one EntryParticipant.player_id", () => {
@@ -139,6 +271,24 @@ test("same desired snapshot is idempotent", () => {
   const existing = [{ id: "award-a", source: "legacy_bracket_runtime", ...desiredAward }];
   assert.deepEqual(
     buildBracketRankingAwardSyncPlan(existing, [desiredAward]),
+    { inserts: [], updates: [], deleteIds: [] }
+  );
+});
+
+test("team Result/Player keyed Award snapshot remains idempotent", () => {
+  const desired = buildEventRankingAwardSnapshot(
+    teamEvent("master"),
+    [teamResult("team-result-a", "team-entry-a", "champion")],
+    teamMembers("team-entry-a")
+  ).rows;
+  const existing = desired.map((row, index) => ({
+    id: `team-award-${index + 1}`,
+    source: "legacy_bracket_runtime",
+    ...row,
+  }));
+
+  assert.deepEqual(
+    buildBracketRankingAwardSyncPlan(existing, desired),
     { inserts: [], updates: [], deleteIds: [] }
   );
 });

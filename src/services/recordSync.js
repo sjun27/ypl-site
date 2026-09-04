@@ -102,20 +102,20 @@ function splitList(value) {
   return String(value || "").split(/[,/\n]/).map(clean).filter(Boolean);
 }
 
-function distribute(target, members, totalPoints) {
+function distribute(target, members, pointsPerMember) {
   const names = splitList(members);
   if (!names.length) return;
-  const each = Math.round((num(totalPoints) / names.length) * 10) / 10;
-  names.forEach((name) => addDelta(target, name, { points: each }));
+  names.forEach((name) => addDelta(target, name, { points: num(pointsPerMember) }));
 }
 
-function buildDeltasFromRound(round, meta) {
-  const points = meta?.pointConfig || { win: 60, ru: 40, sf: 20 };
+export function buildDeltasFromRound(round, meta) {
+  const points = meta?.pointConfig || (round.team
+    ? { win: 30, ru: 20, sf: 0 }
+    : { win: 60, ru: 40, sf: 20 });
   const deltas = {};
   if (round.team) {
     distribute(deltas, round.winMembers, points.win);
     distribute(deltas, round.ruMembers, points.ru);
-    (round.sfMembers || []).forEach((members) => distribute(deltas, members, points.sf));
   } else {
     addDelta(deltas, round.win, { win: 1, points: points.win });
     addDelta(deltas, round.ru, { ru: 1, points: points.ru });

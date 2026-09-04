@@ -38,8 +38,8 @@ Event
 EventRegistration
 Entry
 EntryParticipant
-Match (개인전 runtime mirror)
-Result (개인전 runtime final placement)
+Match (Event-linked 개인전·팀전 runtime mirror)
+Result (Event-linked 개인 Entry·Team Entry final placement)
         │
         ▼
 현재 연결 경계
@@ -121,7 +121,7 @@ Player / Registration identity 확정
 legacy 팀 participant에 entryId / memberIdentities 보존
 기록 반영 전 삭제 시 Entry / EntryParticipant / 이번 확정 identity 원복
 
-팀전 Match / Result / RankingAward / normalized 기록 반영은 아직 차단한다.
+Event-linked canonical 팀전의 Match / Result / RankingAward / 기록 반영은 P1-4까지 구현 및 Test DB E2E를 완료했다.
 
 기존 legacy-only 팀전은 유지한다.
 
@@ -132,9 +132,9 @@ legacy 팀 participant에 entryId / memberIdentities 보존
 normalized에서 처리
 연결 Event 확인
 Bracket 생성 시 확정된 Entry / EntryParticipant / Registration / Player 검증
-Event 연결 개인전의 실제 Match snapshot 동기화
-Event 연결 개인전의 우승 / 준우승 / 실제 4강 Result 동기화
-Event 연결 Master / Light 개인전의 실제 지급 RankingAward 동기화
+Event 연결 개인전·팀전의 실제 Match snapshot 동기화
+Event 연결 개인전·팀전의 우승 / 준우승 / 실제 4강 Result 동기화
+Event 연결 Master / Light 개인전·팀전의 실제 지급 RankingAward 동기화
 전환 이전 Bracket은 기존 record-apply identity 확정 fallback 사용
 Event completed
 record_applied_at 기록
@@ -150,7 +150,10 @@ Records read는 Test의 P0-8부터 완료된 normalized 개인전 Event와 legac
 Master → 랭킹 반영 / 시즌 반영
 Light  → 랭킹 반영 / 시즌 반영
 Rookie → 랭킹 미반영 / 시즌 미반영
-Team   → normalized 기록 반영 미지원
+Team   → Event-linked canonical write는 P1-4 완료, normalized Records team read는 P1-5 예정
+
+팀전 placement는 팀 이력으로 보존하되 개인 우승 / 준우승 / 4강 count에서는 제외하는 것이 canonical 정책이다.
+다만 현재 `recordsAnalytics.js` / `normalizedRecordsProjection.js`의 legacy projection에는 팀전 placement를 개인 count에 합산하는 경로가 남아 있으며, P1-5에서 분리한다.
 기록 반영 취소 — Test 완료
 
 반영 취소 시:
@@ -194,7 +197,9 @@ counts_series / counts_season 정책 반영
 랭킹
 참가 대회 이력
 우승 / 준우승 / 4강
-팀전 입상 포함
+팀전 placement는 팀 우승 / 준우승 / 4강 이력으로 보존
+개인 우승 / 준우승 / 4강 count에서는 제외하는 canonical 정책
+현재 legacy projection의 개인 count 합산은 P1-5에서 분리 예정
 시즌 3 이후 Match 원본 보존
 팀전 선발 경기 보존
 에이스 결정전 보존
@@ -276,9 +281,9 @@ Event
 EventRegistration
 Entry
 EntryParticipant
-Match (Event-linked 개인전 runtime mirror)
-Result (Event-linked 개인전 runtime final placement)
-RankingAward (Event-linked Master / Light runtime placement payout)
+Match (Event-linked 개인전·팀전 runtime mirror)
+Result (Event-linked 개인 Entry·Team Entry final placement)
+RankingAward (Event-linked Master / Light 개인·팀전 runtime placement payout)
 schema / migration 검증은 되었으나 운영 runtime source of truth가 아닌 엔티티
 RegistrationSubmission
 TeamSnapshot
@@ -349,7 +354,7 @@ RankingAward 기반 랭킹 전환
 
 P1. 팀전 normalized 연결
 
-개인전 end-to-end 흐름이 안정된 뒤 진행한다.
+개인전 normalized end-to-end에 이어 팀전 Event-linked write 흐름을 연결한다.
 
 P1-1 — Team Entry / EntryParticipant identity — 구현 및 Test DB E2E 완료
 EventRegistration의 registration_data.answers 팀 지망 정보 표시
@@ -373,17 +378,26 @@ canonical 팀 명단과 실제 경기 lineup 분리
 타이브레이커 출전자 변경 가능
 stable source_node_key 기반 update 및 played_at 보존/갱신 검증
 downstream stale Match 정리 및 legacy 저장 실패 compensation 검증
-P1-3
-팀 Result 생성
-선수별 RankingAward 생성
+P1-3 — Team Result / player RankingAward — 구현 및 Test DB E2E 완료
+Team Entry 단위 Result 생성
+입상 Team Entry의 공식 멤버별 RankingAward 생성
+Team Master 우승 30 / 준우승 20, Team Light 우승 15 / 준우승 10을 선수별 고정 지급
+팀전 4강은 Result만 보존하고 RankingAward는 생성하지 않음
+팀전 RankingAward는 points-only로 기록하고 개인 우승·준우승·4강 횟수는 증가시키지 않음
 
-P1-4
-팀전 기록 반영 / 취소 / 결과 변경 / 재반영 lifecycle
+P1-4 — team record lifecycle — 구현 및 Test DB E2E 완료
+팀전 기록 반영 / 취소 / 결과 변경 / 재반영 lifecycle 검증
+normalized Result / RankingAward와 legacy 랭킹·시즌 기록의 동시 반영 및 rollback 검증
+반영 취소 시 Match / Entry / EntryParticipant identity는 유지하고 Result / RankingAward / legacy 기록만 제거
+경기 결과 변경 후 재반영 시 새 우승·준우승 결과와 점수를 중복 없이 재생성
+팀전 점수 정책을 preview / legacy write / normalized RankingAward에서 동일하게 적용
 
 P1-5
 Records normalized team read 및 전체 E2E
 
-P1 전체 완료 후 Event-linked 팀전 기록 반영 차단을 해제한다.
+Event-linked canonical 팀전 write는 P1-4까지 완료했다.
+P1-5에서는 normalized team Records read와 개인 / 팀 placement count 분리를 구현한다.
+현재 legacy projection의 팀 placement 개인 count 합산은 아직 남아 있다.
 P2. Team Builder → 공식 파티 제출
 
 신청→기록 normalized 운영 흐름을 먼저 완성한 뒤 연결한다.
@@ -585,7 +599,7 @@ feature/records-system
 ✓ 제7회 파이컵라이트 Records 트레이너·대회·랭킹·포켓몬 브라우저 E2E
 
 바로 다음
-1. P1-3 Team Result / RankingAward
+1. P1-5 Records normalized team read 및 개인 / 팀 placement count 분리
 
 그 이후
 2. Team Builder → TeamSnapshot → 공식 Submission

@@ -1738,3 +1738,33 @@ Event-linked 팀전의 참가 확정과 Team Entry identity 연결을 구현했�
 - 팀전 division UI는 Master / Light, 개인전은 Rookie / Master / Light
 - Test DB 브라우저 E2E 완료
 - 다음 단계: P1-3 Team Result + player RankingAward
+
+기존 날짜별 항목의 당시 상태와 다음 단계 기록은 역사적 사실로 유지한다.
+
+## 2026-09-04 P1-3 normalized Team Result / player RankingAward
+
+P1-1에서 확정한 Team Entry / EntryParticipant identity를 기준으로 Event-linked canonical 팀전의 공식 Result와 선수별 RankingAward를 연결했다.
+
+- 공식 팀 성적은 Team Entry당 Result 1개로 저장하며 선수별 Result를 중복 생성하지 않는다.
+- Team Master 우승 / 준우승은 각 공식 멤버에게 30 / 20, Team Light 우승 / 준우승은 15 / 10을 지급한다.
+- 팀 4강은 Result만 보존하고 RankingAward는 생성하지 않는다.
+- 팀전 RankingAward는 points-only로 기록하며 `win_delta = 0`, `runner_up_delta = 0`, `top4_delta = 0`이다.
+- `counts_series = true`, `counts_season = true`를 사용한다.
+- Player는 이름이 아니라 `Result.entry_id → EntryParticipant → Player` 관계로 해석한다.
+
+## 2026-09-04 P1-4 normalized team record lifecycle
+
+Event-linked canonical 팀전의 기록 반영 / 취소 / 결과 변경 / 재반영 lifecycle을 Test DB에서 검증했다.
+
+- 첫 반영: 2팀 champion / runner_up, Result 2건 / RankingAward 8건
+- 반영 취소: Event `running`, `record_applied_at = NULL`, Result / Award 0건, Match 6건 및 Entry 2건 / EntryParticipant 8건 유지
+- 결과 변경 후 재반영: champion / runner_up 교체, Result 2건 / RankingAward 8건, duplicate 없음
+- legacy ranking / season과 normalized Result / RankingAward가 일치
+
+Event-linked canonical 팀전 write는 P1-4까지 완료했다. legacy-only 팀전은 별도 compatibility path로 유지한다.
+
+### 현재 후속 작업 — P1-5
+
+다음 구현 단계는 Records normalized team read와 개인 / 팀 placement count 분리다.
+canonical 정책상 팀전 placement는 개인 우승 / 준우승 / 4강 count에서 제외한다.
+다만 현재 `recordsAnalytics.js` / `normalizedRecordsProjection.js`의 legacy projection에는 팀전 placement를 개인 count에 합산하는 경로가 아직 남아 있으며, P1-5에서 분리한다.

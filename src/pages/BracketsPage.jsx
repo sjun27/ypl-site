@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries } from "../services/index.js";
+import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
 import { buildDefaultTeamMatchLineups, buildTeamMatchSeries, getTeamMatchLineupOptions, getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -981,7 +981,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
   const [bumpRank,setBumpRank]=useState(true);
   const [bumpSeason,setBumpSeason]=useState(true);
   const [rankKey,setRankKey]=useState((data.rankings||[])[0]?.key||"");
-  const [ptWin,setPtWin]=useState("60"); const [ptRu,setPtRu]=useState("40"); const [ptSf,setPtSf]=useState("20");
+  const [ptWin,setPtWin]=useState(team?"30":"60"); const [ptRu,setPtRu]=useState(team?"20":"40"); const [ptSf,setPtSf]=useState(team?"0":"20");
   const [override,setOverride]=useState({});
   const linked=Boolean(b.eventId);
   const [linkedContext,setLinkedContext]=useState(null);
@@ -1001,7 +1001,9 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
         setLinkedContext(context);
         setSeason(context.season.name);
         setChamp(context.event.event_type==="champions");
-        const pointPolicy=getIndividualPlacementPointPolicy(context.event);
+        const pointPolicy=team
+          ? getTeamPlacementPointPolicy(context.event)
+          : getIndividualPlacementPointPolicy(context.event);
         setBumpRank(pointPolicy.enabled);
         setBumpSeason(pointPolicy.enabled&&context.event.event_type!=="champions");
         if(pointPolicy.points){
@@ -1009,11 +1011,11 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
           setPtRu(String(pointPolicy.points.ru));
           setPtSf(String(pointPolicy.points.sf));
         }
-        const preferredKey=context.event.division==="rookie"
+        const preferredKey=pointPolicy.division==="rookie"
           ? "rookie"
-          : context.event.event_type==="light"
+          : pointPolicy.division==="light"
             ? "pylite"
-            : context.event.division==="master"||context.event.is_team_event
+            : pointPolicy.division==="master"
               ? "master"
               : "pycup";
         if(tours.some(t=>t.key===preferredKey)) setTkey(preferredKey);
@@ -1051,15 +1053,17 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
   const [preview,setPreview]=useState(null);
   const manualExcluded=!!curT&&(curT.key==="rookie"||/루키/.test(curT.label||""));
   const linkedPointPolicy=linkedContext
-    ? getIndividualPlacementPointPolicy(linkedContext.event)
+    ? (team
+      ? getTeamPlacementPointPolicy(linkedContext.event)
+      : getIndividualPlacementPointPolicy(linkedContext.event))
     : null;
   const excluded=linked ? linkedPointPolicy?.enabled===false : manualExcluded;
   const recordSeason=linked ? (linkedContext?.season?.name||"") : season;
   const autoNext=String((curT?.rounds?.reduce((mx,r)=>Math.max(mx,parseInt(r.round)||0),0)||0)+1);
   const placements=[]; if(res.champ)placements.push({pid:res.champ,pts:ptWinN,label:"우승"});
   if(res.ru)placements.push({pid:res.ru,pts:ptRuN,label:"준우승"});
-  res.sf.forEach(pid=>placements.push({pid,pts:ptSfN,label:"4강"}));
-  const alloc=[]; if(team){ placements.forEach(pl=>{ const p=partOf(pl.pid); const mem=p?.members||[]; const per=mem.length?r1(pl.pts/mem.length):0; mem.forEach(m=>alloc.push({key:pl.pid+"|"+m,team:p?.name,member:m,label:pl.label,base:per})); }); }
+  if(!team)res.sf.forEach(pid=>placements.push({pid,pts:ptSfN,label:"4강"}));
+  const alloc=[]; if(team){ placements.forEach(pl=>{ const p=partOf(pl.pid); const mem=p?.members||[]; mem.forEach(m=>alloc.push({key:pl.pid+"|"+m,team:p?.name,member:m,label:pl.label,base:pl.pts})); }); }
   const allocVal=(a)=>{ const o=override[a.key]; return (o===undefined||o==="")?a.base:pN(o); };
   const rankEra=(data.rankings||[]).find(r=>r.key===rankKey);
   const rankRows=rankEra?.rows||[];
@@ -1109,21 +1113,24 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
     let previousAwardRows=null;
 
     if(b.eventId){
-      if(team){
-        flash("팀전 참가자 Player 확정은 아직 연결되지 않았습니다.");
-        return;
-      }
-
       try{
         const participants=b.participants||[];
-        const entryLinkedCount=participants.filter(p=>p.entryId).length;
-        if(entryLinkedCount>0&&entryLinkedCount!==participants.length){
+        const actualParticipants=team
+          ? participants.filter(p=>Array.isArray(p?.members))
+          : participants;
+        const entryLinkedCount=actualParticipants.filter(p=>p.entryId).length;
+        if(entryLinkedCount>0&&entryLinkedCount!==actualParticipants.length){
           throw new Error("일부 참가자에게만 Entry identity가 있어 기록을 반영할 수 없습니다.");
         }
 
-        const usesConfirmedEntries=participants.length>0&&entryLinkedCount===participants.length;
+        const usesConfirmedEntries=actualParticipants.length>0&&entryLinkedCount===actualParticipants.length;
+        if(team&&!usesConfirmedEntries){
+          throw new Error("팀전 Event-linked 대진표에는 확정된 Team Entry identity가 필요합니다.");
+        }
         const resolvedParticipants=usesConfirmedEntries
-          ? await validateEventParticipantEntries(b.eventId,participants)
+          ? (team
+            ? await validateEventTeamEntries(b.eventId,actualParticipants)
+            : await validateEventParticipantEntries(b.eventId,participants))
           : await resolveEventParticipantsForRecord(b.eventId,participants);
 
         if(usesConfirmedEntries){
@@ -1192,15 +1199,16 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
               ...x,
               participants:(x.participants||[]).map(p=>{
                 const resolved=resolvedParticipants.find(r=>r.id===p.id);
-                return resolved
-                  ? {
+                if(!resolved)return p;
+                return team
+                  ? {...p,entryId:resolved.entryId,memberIdentities:resolved.memberIdentities}
+                  : {
                       ...p,
                       registrationId:resolved.registrationId,
                       playerId:resolved.playerId,
                       ...(resolved.entryId?{entryId:resolved.entryId}:{}),
                       ...(resolved.entryParticipantId?{entryParticipantId:resolved.entryParticipantId}:{})
-                    }
-                  : p;
+                    };
               }),
               applied:x.applied
                 ? {
@@ -1443,7 +1451,9 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
             <div className="field">
               <label>등수별 점수</label>
               <div className="bk-hint">
-                우승 {ptWinN} · 준우승 {ptRuN} · 4강 {ptSfN}
+                {team
+                  ? `우승 ${ptWinN} · 준우승 ${ptRuN}`
+                  : `우승 ${ptWinN} · 준우승 ${ptRuN} · 4강 ${ptSfN}`}
               </div>
             </div>
           }
@@ -1496,11 +1506,11 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
         </div>
 
         <div className="field">
-          <label>등수별 점수{team?" (총점 — 팀원 수로 균등 분배)":""}</label>
+          <label>등수별 점수{team?" (팀원별 고정 점수)":""}</label>
           <div className="bk-pts">
             <div className="bk-pt"><span>우승</span><input value={ptWin} onChange={setPt(setPtWin)}/></div>
             <div className="bk-pt"><span>준우승</span><input value={ptRu} onChange={setPt(setPtRu)}/></div>
-            <div className="bk-pt"><span>4강</span><input value={ptSf} onChange={setPt(setPtSf)}/></div>
+            {!team&&<div className="bk-pt"><span>4강</span><input value={ptSf} onChange={setPt(setPtSf)}/></div>}
           </div>
         </div>
 

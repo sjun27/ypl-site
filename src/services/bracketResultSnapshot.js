@@ -13,10 +13,11 @@ function normalizeNullable(value) {
 
 export function bracketResultIdentityState(bracket) {
   if (!bracket?.eventId) return { eligible: false, reason: "event_unlinked" };
-  if (bracket.mode === "team") return { eligible: false, reason: "team_event" };
 
   const participants = (bracket.participants || [])
-    .filter(participant => !Array.isArray(participant?.members));
+    .filter(participant => bracket.mode === "team"
+      ? Array.isArray(participant?.members)
+      : !Array.isArray(participant?.members));
   if (!participants.length) return { eligible: false, reason: "legacy_bracket" };
 
   const entryLinkedCount = participants.filter(participant => participant?.entryId).length;

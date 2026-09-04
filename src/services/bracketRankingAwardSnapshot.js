@@ -15,6 +15,17 @@ const PLACEMENT_POLICY = {
   },
 };
 
+const TEAM_RANKING_AWARD_POLICY = {
+  master: {
+    champion: { points_delta: 30, win_delta: 0, runner_up_delta: 0, top4_delta: 0 },
+    runner_up: { points_delta: 20, win_delta: 0, runner_up_delta: 0, top4_delta: 0 },
+  },
+  light: {
+    champion: { points_delta: 15, win_delta: 0, runner_up_delta: 0, top4_delta: 0 },
+    runner_up: { points_delta: 10, win_delta: 0, runner_up_delta: 0, top4_delta: 0 },
+  },
+};
+
 const AWARD_FIELDS = [
   "result_id",
   "player_id",
@@ -45,9 +56,14 @@ function rankingEnabled(event, division) {
   return division === "master" || division === "light";
 }
 
-export function getIndividualPlacementPointPolicy(event) {
-  if (!event || event.is_team_event) {
-    return { enabled: false, division: null, reason: "team_event", points: null };
+function getPlacementPointPolicy(event, isTeamEvent) {
+  if (!event || (isTeamEvent ? !event.is_team_event : event.is_team_event)) {
+    return {
+      enabled: false,
+      division: null,
+      reason: isTeamEvent ? "individual_event" : "team_event",
+      points: null,
+    };
   }
 
   if (String(event.event_type || "").toLowerCase() === "champions") {
@@ -61,11 +77,13 @@ export function getIndividualPlacementPointPolicy(event) {
   if (division === "rookie") {
     return { enabled: false, division, reason: "rookie", points: { win: 0, ru: 0, sf: 0 } };
   }
-  const placements = PLACEMENT_POLICY[division];
+  const placements = isTeamEvent
+    ? TEAM_RANKING_AWARD_POLICY[division]
+    : PLACEMENT_POLICY[division];
   const points = {
     win: placements.champion.points_delta,
     ru: placements.runner_up.points_delta,
-    sf: placements.semifinalist.points_delta,
+    sf: placements.semifinalist?.points_delta ?? 0,
   };
   if (!rankingEnabled(event, division)) {
     return { enabled: false, division, reason: "ranking_disabled", points, placements };
@@ -80,8 +98,19 @@ export function getIndividualPlacementPointPolicy(event) {
   };
 }
 
+export function getIndividualPlacementPointPolicy(event) {
+  return getPlacementPointPolicy(event, false);
+}
+
+export function getTeamPlacementPointPolicy(event) {
+  return getPlacementPointPolicy(event, true);
+}
+
 export function buildEventRankingAwardSnapshot(event, resultRows = [], entryParticipants = []) {
-  const policy = getIndividualPlacementPointPolicy(event);
+  const isTeamEvent = Boolean(event?.is_team_event);
+  const policy = isTeamEvent
+    ? getTeamPlacementPointPolicy(event)
+    : getIndividualPlacementPointPolicy(event);
   if (!policy.enabled) return { skipped: true, reason: policy.reason, rows: [] };
 
   const runtimeResults = (resultRows || [])
@@ -94,21 +123,36 @@ export function buildEventRankingAwardSnapshot(event, resultRows = [], entryPart
     participantsByEntryId.set(participant.entry_id, rows);
   }
 
-  const rows = runtimeResults.map(result => {
+  const rows = runtimeResults.flatMap(result => {
     if (!result?.id || !result?.entry_id) {
       throw new Error("runtime Result에 RankingAward 연결용 id 또는 entry_id가 없습니다.");
     }
 
+    if (isTeamEvent && result.placement_code === "semifinalist") return [];
+
     const participants = participantsByEntryId.get(result.entry_id) || [];
-    if (participants.length !== 1) {
+    if (!isTeamEvent && participants.length !== 1) {
       throw new Error(
         `개인 Result '${result.id}'의 Entry '${result.entry_id}'에는 EntryParticipant가 정확히 1명이어야 하지만 ${participants.length}명입니다.`
       );
     }
 
-    const playerId = participants[0]?.player_id;
-    if (!playerId) {
-      throw new Error(`개인 Result '${result.id}'의 EntryParticipant에 Player identity가 없습니다.`);
+    if (isTeamEvent) {
+      if (!participants.length) {
+        throw new Error(`팀 Result '${result.id}'의 Entry '${result.entry_id}'에는 EntryParticipant가 최소 1명이어야 합니다.`);
+      }
+
+      const playerIds = new Set();
+      for (const participant of participants) {
+        const playerId = participant?.player_id;
+        if (!playerId) {
+          throw new Error(`팀 Result '${result.id}'의 EntryParticipant에 Player identity가 없습니다.`);
+        }
+        if (playerIds.has(playerId)) {
+          throw new Error(`팀 Result '${result.id}'의 Entry '${result.entry_id}'에 Player '${playerId}'가 중복되어 있습니다.`);
+        }
+        playerIds.add(playerId);
+      }
     }
 
     const placement = policy.placements[result.placement_code];
@@ -116,15 +160,30 @@ export function buildEventRankingAwardSnapshot(event, resultRows = [], entryPart
       throw new Error(`지원하지 않는 runtime Result placement '${result.placement_code}'입니다.`);
     }
 
-    return {
+    if (isTeamEvent) {
+      return participants.map(participant => ({
+        result_id: result.id,
+        player_id: participant.player_id,
+        award_kind: "placement",
+        points_delta: placement.points_delta,
+        win_delta: 0,
+        runner_up_delta: 0,
+        top4_delta: 0,
+        counts_series: true,
+        counts_season: true,
+        reason: RUNTIME_PLACEMENT_AWARD_REASON,
+      }));
+    }
+
+    return [{
       result_id: result.id,
-      player_id: playerId,
+      player_id: participants[0].player_id,
       award_kind: "placement",
       ...placement,
       counts_series: true,
       counts_season: true,
       reason: RUNTIME_PLACEMENT_AWARD_REASON,
-    };
+    }];
   });
 
   return { skipped: false, reason: null, rows };
