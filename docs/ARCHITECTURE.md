@@ -4,7 +4,7 @@
 >
 > 현재 할 일과 우선순위는 `docs/ROADMAP.md`, 실제 변경 이력은 `docs/PATCH_NOTES_2026-08-26.md`를 봅니다.
 
-마지막 업데이트: 2026-09-04
+마지막 업데이트: 2026-09-05
 
 ---
 
@@ -122,7 +122,30 @@ Team Builder 개인 팀
 
 기존 저장 키 호환성을 유지합니다.
 
-대회 엔트리 제출 기능을 추가할 때는 개인 작업본을 그대로 연결하지 않고 **제출 당시 Team Snapshot을 별도로 고정**합니다.
+Local saved team은 편집 가능한 working data이며 localStorage schema v3으로 보존합니다. 이는 공식 제출 데이터와 별개입니다. `savedTeams`, `activeSavedTeamId`, `draft`를 기반으로 팀 전환, 새 팀, 복제를 구분하며, 새 팀은 현재 Regulation / Cup / Type context만 유지하고 members는 비웁니다.
+
+대회 엔트리 제출 기능을 추가할 때는 개인 작업본을 그대로 연결하지 않고 **제출 당시 Team Snapshot을 별도로 고정**합니다. 현재 P2-1에서는 이 경계를 위한 local serializer / loader foundation까지만 구현했으며 Supabase write는 하지 않습니다.
+
+### Team Builder identity 경계
+
+- display name 및 localized name은 identity가 아니다.
+- `pokemon_id`에는 실제 dataset에서 resolve 가능한 form-specific stable canonical ID만 사용한다.
+- saved member를 복원할 때 resolve되지 않는 member는 삭제하지 않고 원본 name / ID / item / moves / stat을 보존한 unresolved 상태로 둔다.
+- unresolved member가 있으면 official TeamSnapshot 생성을 차단한다.
+- Regulation / Cup 변경으로 현재 편집 팀에서 illegal member가 제거될 때는 confirmation 후 기존 filtering semantics를 적용하며, saved team 원본과 current draft를 구분한다.
+
+### P2 공식 제출 경계
+
+다음 항목은 아직 미구현이다.
+
+- Event authoritative context
+- official submit eligibility
+- ownership verification
+- TeamSnapshot DB insert
+- RegistrationSubmission revision
+- `final_submission_id` freeze
+- Entry linkage
+- Supabase write
 
 ---
 
@@ -1069,13 +1092,16 @@ TeamSnapshotMember
 - Pokémon 1~6마리
 - Team Invalid만 제출 차단
 - Team Incomplete는 제출 허용
+- unresolved member가 포함된 local team은 official TeamSnapshot 생성을 차단한다.
 - 기술 4개 미만, 일부 설정 미완성도 Regulation-invalid가 아니면 허용
 - Pokémon 0마리는 공식 제출 불가
 - Stat Points는 계산 결과가 아니라 입력 사실을 저장
 - IV는 Pokémon Champions에서 고정이므로 v1에 저장하지 않음
 - Tera Type은 현재 Mega Rule 기준 v1에서 제외하며 미래 Regulation 확정 후 schema version 증가로 추가 가능
 - `pokemon_id`는 form-specific stable canonical ID를 사용
+- `pokemon_name_snapshot`은 표시·복원을 위한 당시 이름이며 canonical identity와 분리한다.
 - species clause 판정용 identity와 Snapshot 복원용 pokemon_id를 분리
+- local saved team의 id / createdAt / updatedAt을 official Snapshot identity 또는 사실로 재사용하지 않는다.
 - Snapshot 생성 후 기존 Snapshot을 수정하지 않음
 - 파티 제출은 단순 Pokémon 엔트리 목록이 아니라 **특성 / 성격 / Stat Points / 지닌물건 / 기술 4개를 포함한 전체 배틀 세팅**을 보존
 - 모노타입 `assignedType`은 Team Builder 로컬 선택/검증 상태이며 EventRegistration / TeamSnapshot / Records에 저장하지 않음

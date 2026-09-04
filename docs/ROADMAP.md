@@ -5,7 +5,7 @@
 > - 과거 변경 이력: `docs/PATCH_NOTES_2026-08-26.md`
 > - 기술 구조·데이터 모델·운영 원칙: `docs/ARCHITECTURE.md`
 
-마지막 업데이트: 2026-09-04
+마지막 업데이트: 2026-09-05
 
 ---
 
@@ -218,38 +218,22 @@ Match 원본은 유지한다.
 
 2.5 Team Builder
 
-Team Builder는 현재 다음 수준까지 구현되어 있다.
+P2-1 Team Builder foundation ✅
 
-구현된 기반
-본사이트 통합
-Regulation / Cup Rule 선택
-Pokémon
-특성
-성격 / Alignment
-Stat Points
-지닌물건
-기술
-개인 팀 localStorage 저장
-아직 마무리되지 않은 영역
-Pokémon 목록 / 검색 최종 검증
-동일 종 / 폼 / 리전폼 identity 검증
-Regulation validation 정리
-도구 validation 정리
-일부 번역 / 검색 데이터 정리
-모노타입 관련 기능
-저장 / 복원 UX 최종 회귀
-설계만 완료된 영역
-TeamSnapshot v1 canonical contract
-아직 미구현
-Team Builder → TeamSnapshot serializer
-TeamSnapshot → Team Builder loader
-EventRegistration 기반 공식 파티 제출
-RegistrationSubmission revision
-final_submission_id
-관리자 제출 현황
-제출 Snapshot과 Entry 연결
+- canonical Pokémon/form identity
+- local saved/draft schema v3 및 v2 migration
+- unresolved member lossless restore
+- TeamSnapshot v1 serializer / loader foundation
+- Regulation / Cup destructive change confirmation
+- saved team 전환 / 새 팀 / 현재 팀 복제 UX
 
-현재 우선순위는 Team Builder 안정화가 아니라 신청부터 기록까지 normalized 운영 흐름을 먼저 완성하는 것이다.
+다음 P2 단계:
+
+- P2-2 Event context + submission eligibility + ownership policy
+- P2-3 TeamSnapshot / RegistrationSubmission DB write + revision
+- P2-4 final_submission_id freeze + Entry / Records integration E2E
+
+P2-1은 브라우저 및 local 검증까지 완료했지만, 공식 제출·DB write·Entry 연결은 아직 구현하지 않았다.
 
 3. normalized DB 전환 상태
 
@@ -410,7 +394,7 @@ Test DB 브라우저 E2E와 local acceptance audit을 완료했다.
 
 P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다.
 
-다음 단계는 P2 Team Builder → TeamSnapshot → RegistrationSubmission이다.
+P2-1 Team Builder foundation은 완료했으며, 다음 단계는 P2-2 Event context + submission eligibility + ownership policy다.
 
 P2. Team Builder → 공식 파티 제출
 
@@ -422,17 +406,14 @@ Team Builder
 → EventRegistration
 → Entry
 
-구현:
+진행 상태:
 
-TeamSnapshot serializer
-TeamSnapshot loader
-참가자 Registration 확인
-공식 Submission 생성
-재제출 revision 보존
-제출 시각 관리
-관리자 제출 현황
-결과 반영 시 final_submission_id freeze
-최종 Snapshot과 Entry 연결
+- P2-1 Team Builder foundation ✅
+- P2-2 Event context + submission eligibility + ownership policy 예정
+- P2-3 TeamSnapshot / RegistrationSubmission DB write + revision 예정
+- P2-4 final_submission_id freeze + Entry / Records integration E2E 예정
+
+P2-1에서 구현한 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이며, 공식 Submission 생성이나 DB write를 수행하지 않는다.
 
 개인 localStorage 저장본과 공식 제출 Snapshot은 분리한다.
 
@@ -618,9 +599,12 @@ feature/records-system
 ✓ linked legacy team bracket roster / Pokémon / Match compatibility 유지 및 placement/history/archive dedupe
 ✓ Records UI source metadata 및 raw internal code 비노출
 ✓ P1-5 Test DB browser E2E 및 local acceptance audit
+✓ P2-1 Team Builder canonical identity / schema v3 / lossless restore
+✓ P2-1 TeamSnapshot v1 serializer / loader foundation
+✓ P2-1 saved team switching / new / duplicate UX 및 destructive change confirmation
 
 바로 다음
-1. Team Builder → TeamSnapshot → RegistrationSubmission → 공식 Submission
+1. P2-2 Event context + submission eligibility + ownership policy
 
 그 이후
 2. 챔피언스 운영 자동화

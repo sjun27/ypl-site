@@ -34,6 +34,7 @@ import {
   moveName,
   normalizeDraft,
   normalizeSavedTeam,
+  membersRemovedByRuleChange,
   pokemonMatchesCupRule,
   formatSavedDate,
   serializeMembers,
@@ -223,13 +224,14 @@ function TeamSlot({ index, member, active, displayName, itemLabel, onSelect, onR
     );
   }
   const moveCount = member.moves.filter(Boolean).length;
+  const unresolved = member.resolutionState === "unresolved";
   return (
-    <button type="button" className={"tb-slot" + (active ? " active" : "")} onClick={onSelect}>
+    <button type="button" className={"tb-slot" + (active ? " active" : "") + (unresolved ? " unresolved" : "")} onClick={onSelect}>
       <span className="tb-slot-no">{index + 1}</span>
       <img src={spriteUrl(member.pokemon.name)} alt="" className="tb-slot-sprite" onError={event => { event.currentTarget.style.visibility = "hidden"; }} />
       <span className="tb-slot-copy">
         <strong>{displayName}</strong>
-        <small>{itemLabel || "도구 없음"} · 기술 {moveCount}/4</small>
+        <small>{unresolved ? "현재 규칙에서 확인할 수 없는 포켓몬" : `${itemLabel || "도구 없음"} · 기술 ${moveCount}/4`}</small>
       </span>
       <span
         role="button"
@@ -308,6 +310,8 @@ export default function TeamBuilderPage() {
   const [saveName, setSaveName] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
   const [storageAvailable, setStorageAvailable] = useState(true);
+  const [pendingRuleChange, setPendingRuleChange] = useState(null);
+  const [pendingTeamChange, setPendingTeamChange] = useState(null);
   const draftTimerRef = useRef(null);
   const restoringDraftRef = useRef(false);
   const unrestoredDraftExistsRef = useRef(false);
@@ -356,7 +360,7 @@ export default function TeamBuilderPage() {
         const reg = REGULATIONS[draft.regulationId];
         restoringDraftRef.current = true;
         try {
-          const restored = draft.members.map(member => memberFromSaved(member, reg)).filter(Boolean);
+          const restored = draft.members.map(member => memberFromSaved(member, reg));
           setRegulationId(draft.regulationId);
           setCupRuleId(draft.cupRuleId);
           setAssignedTypeId(draft.cupRuleSettings.assignedType || "");
@@ -421,8 +425,8 @@ export default function TeamBuilderPage() {
     dirty: Boolean(dirty),
     selectedIndex: Math.max(0, team.findIndex(member => member.uid === selectedUid)),
     savedAt: new Date().toISOString(),
-    members: serializeMembers(team),
-  }), [regulationId, cupRuleId, cupRule.kind, assignedTypeId, activeSavedTeamId, dirty, team, selectedUid]);
+    members: serializeMembers(team, { detailData }),
+  }), [regulationId, cupRuleId, cupRule.kind, assignedTypeId, activeSavedTeamId, dirty, team, selectedUid, detailData]);
 
   const persistDraftNow = useCallback(() => {
     if (!hydrated || !storageAvailable || restoringDraftRef.current) return false;
@@ -536,30 +540,54 @@ export default function TeamBuilderPage() {
     markDirty();
   }, [team, selectedUid, markDirty]);
 
+  const applyRuleChange = useCallback(change => {
+    const nextRegulation = REGULATIONS[change.regulationId] || regulation;
+    const nextTeam = team.filter(member => !change.removedUids.includes(member.uid));
+    setRegulationId(change.regulationId);
+    setCupRuleId(change.cupRuleId);
+    setAssignedTypeId(change.assignedTypeId);
+    setTeam(nextTeam);
+    if (!nextTeam.some(member => member.uid === selectedUid)) setSelectedUid(nextTeam[0]?.uid || null);
+    setPendingRuleChange(null);
+    markDirty();
+    return nextRegulation;
+  }, [regulation, team, selectedUid, markDirty]);
+
+  const requestRuleChange = useCallback(change => {
+    if (!change.removedMembers.length) {
+      applyRuleChange({ ...change, removedUids: [] });
+      return;
+    }
+    setPendingRuleChange({
+      ...change,
+      removedUids: change.removedMembers.map(member => member.uid),
+    });
+  }, [applyRuleChange]);
+
   const switchRegulation = useCallback(nextId => {
     const next = REGULATIONS[nextId];
     if (!next || nextId === regulationId) return;
-    const allowed = new Set(next.pokemon.map(pokemon => pokemon.name));
-    const nextTeam = team.filter(member => allowed.has(member.pokemon.name));
-    setRegulationId(nextId);
-    setTeam(nextTeam);
-    if (!nextTeam.some(member => member.uid === selectedUid)) setSelectedUid(nextTeam[0]?.uid || null);
-    markDirty();
-  }, [regulationId, team, selectedUid, markDirty]);
+    // Preserve the existing regulation-change semantics: only the new
+    // regulation's Pokémon pool removes members. Cup legality remains the
+    // validator's responsibility until its own rule is changed.
+    const removedMembers = membersRemovedByRuleChange({ team, regulation: next, cupRuleId: "none" });
+    requestRuleChange({ regulationId: nextId, cupRuleId, assignedTypeId, removedMembers });
+  }, [regulationId, team, cupRuleId, assignedTypeId, detailData, requestRuleChange]);
 
   const switchCupRule = useCallback(nextId => {
     if (!CUP_RULES[nextId] || nextId === cupRuleId) return;
-    setCupRuleId(nextId);
-    setAssignedTypeId("");
-    markDirty();
-  }, [cupRuleId, markDirty]);
+    const nextAssignedTypeId = "";
+    const nextRule = CUP_RULES[nextId];
+    const removedMembers = membersRemovedByRuleChange({ team, regulation, cupRuleId: nextId, assignedTypeId: nextAssignedTypeId, detailData });
+    requestRuleChange({ regulationId, cupRuleId: nextId, assignedTypeId: nextAssignedTypeId, removedMembers, ruleName: nextRule.name });
+  }, [cupRuleId, team, regulation, regulationId, detailData, requestRuleChange]);
 
   const switchCupRuleType = useCallback(nextTypeId => {
     const next = TYPE_OPTIONS.some(type => type.id === nextTypeId) ? nextTypeId : "";
     if (next === assignedTypeId) return;
-    setAssignedTypeId(next);
-    markDirty();
-  }, [assignedTypeId, markDirty]);
+    const removedMembers = membersRemovedByRuleChange({ team, regulation, cupRuleId, assignedTypeId: next, detailData });
+    requestRuleChange({ regulationId, cupRuleId, assignedTypeId: next, removedMembers, ruleName: CUP_RULES[cupRuleId]?.name });
+  }, [assignedTypeId, team, regulation, cupRuleId, regulationId, detailData, requestRuleChange]);
 
   const resetTeam = useCallback(() => {
     if (team.length && !window.confirm("현재 팀 구성을 모두 초기화할까요?")) return;
@@ -597,33 +625,33 @@ export default function TeamBuilderPage() {
     }, 20);
   }, [storageAvailable, currentSaved, defaultTeamName]);
 
-  const saveCurrentTeam = useCallback(() => {
+  const saveWorkingTeam = useCallback(({ name, forceNew = false, allowEmpty = false } = {}) => {
     if (!storageAvailable) {
       setSaveMessage("이 브라우저에서는 로컬 저장소를 사용할 수 없습니다.");
-      return;
+      return null;
     }
-    if (!team.length) {
+    if (!allowEmpty && !team.length) {
       setSaveMessage("포켓몬을 1마리 이상 추가한 뒤 저장해 주세요.");
-      return;
+      return null;
     }
-    const name = saveName.trim();
-    if (!name) {
+    const normalizedName = String(name || "").trim();
+    if (!normalizedName) {
       setSaveMessage("팀 이름을 입력해 주세요.");
       setTimeout(() => document.querySelector(".tb-team-name")?.focus(), 0);
-      return;
+      return null;
     }
     const now = new Date().toISOString();
-    const existing = savedTeams.find(saved => saved.id === activeSavedTeamId) || null;
+    const existing = forceNew ? null : savedTeams.find(saved => saved.id === activeSavedTeamId) || null;
     const snapshot = {
       schemaVersion: TEAM_SCHEMA_VERSION,
       id: existing?.id || makeUid("saved"),
-      name: name.slice(0, 40),
+      name: normalizedName.slice(0, 40),
       regulationId,
       cupRuleId,
       cupRuleSettings: { assignedType: cupRule.kind === "monotype" ? assignedTypeId : "" },
       createdAt: existing?.createdAt || now,
       updatedAt: now,
-      members: serializeMembers(team),
+      members: serializeMembers(team, { detailData }),
     };
     const next = existing
       ? savedTeams.map(saved => saved.id === existing.id ? snapshot : saved)
@@ -632,25 +660,40 @@ export default function TeamBuilderPage() {
     if (!writeSavedTeams(next)) {
       setStorageAvailable(false);
       setSaveMessage("팀을 저장하지 못했습니다. 브라우저 저장소 설정을 확인해 주세요.");
-      return;
+      return null;
     }
     setStorageAvailable(true);
     setSavedTeams(next);
     setActiveSavedTeamId(snapshot.id);
     setDirty(false);
     setSaveName(snapshot.name);
-    setSaveMessage("저장되었습니다.");
-  }, [storageAvailable, saveName, savedTeams, activeSavedTeamId, regulationId, cupRuleId, cupRule.kind, assignedTypeId, team]);
+    return snapshot;
+  }, [storageAvailable, saveName, savedTeams, activeSavedTeamId, regulationId, cupRuleId, cupRule.kind, assignedTypeId, team, detailData]);
 
-  const loadSavedTeam = useCallback(saved => {
-    if (dirty && !window.confirm("저장되지 않은 변경사항이 있습니다. 저장하지 않고 다른 팀을 불러올까요?")) return;
+  const saveCurrentTeam = useCallback(() => {
+    const snapshot = saveWorkingTeam({ name: saveName });
+    if (snapshot) setSaveMessage("저장되었습니다.");
+  }, [saveName, saveWorkingTeam]);
+
+  const applyTeamChange = useCallback(change => {
+    if (change.kind === "new") {
+      setTeam([]);
+      setSelectedUid(null);
+      setActiveSavedTeamId(null);
+      setDirty(false);
+      setSaveName("");
+      setSaveMessage("");
+      setLibraryOpen(false);
+      return;
+    }
+    const saved = change.saved;
     const reg = REGULATIONS[saved.regulationId];
     if (!reg) {
       window.alert(`저장된 Regulation(${saved.regulationId})을 현재 팀 빌더에서 찾을 수 없습니다.`);
       return;
     }
-    const restored = saved.members.map(member => memberFromSaved(member, reg)).filter(Boolean);
-    const omitted = saved.members.length - restored.length;
+    const restored = saved.members.map(member => memberFromSaved(member, reg));
+    const unresolvedCount = restored.filter(member => member.resolutionState === "unresolved").length;
     setRegulationId(saved.regulationId);
     setCupRuleId(CUP_RULES[saved.cupRuleId] ? saved.cupRuleId : "none");
     setAssignedTypeId(saved.cupRuleSettings?.assignedType || "");
@@ -658,9 +701,57 @@ export default function TeamBuilderPage() {
     setSelectedUid(restored[0]?.uid || null);
     setActiveSavedTeamId(saved.id);
     setDirty(false);
+    setSaveName(saved.name);
+    setSaveMessage("");
     setLibraryOpen(false);
-    if (omitted) window.alert(`${omitted}마리는 현재 ${reg.shortName} 데이터에서 찾을 수 없어 제외했습니다.`);
-  }, [dirty]);
+    if (unresolvedCount) window.alert(`${unresolvedCount}마리는 현재 ${reg.shortName} 데이터에서 확인할 수 없습니다. 원본 데이터는 보존되며 복구 후 제출할 수 있습니다.`);
+  }, []);
+
+  const requestTeamChange = useCallback(change => {
+    if (change.kind === "load" && change.saved.id === activeSavedTeamId) {
+      setLibraryOpen(false);
+      return;
+    }
+    if (dirty) {
+      setPendingTeamChange(change);
+      return;
+    }
+    applyTeamChange(change);
+  }, [activeSavedTeamId, dirty, applyTeamChange]);
+
+  const loadSavedTeam = useCallback(saved => {
+    requestTeamChange({ kind: "load", saved });
+  }, [requestTeamChange]);
+
+  const startNewTeam = useCallback(() => {
+    requestTeamChange({ kind: "new" });
+  }, [requestTeamChange]);
+
+  const continuePendingTeamChange = useCallback(() => {
+    if (!pendingTeamChange) return;
+    const name = currentSaved?.name || defaultTeamName();
+    const snapshot = saveWorkingTeam({
+      name,
+      allowEmpty: true,
+    });
+    if (!snapshot) return;
+    setPendingTeamChange(null);
+    applyTeamChange(pendingTeamChange);
+  }, [pendingTeamChange, currentSaved, defaultTeamName, saveWorkingTeam, applyTeamChange]);
+
+  const duplicateCurrentTeam = useCallback(() => {
+    if (!team.length) {
+      setSaveMessage("복제할 포켓몬을 1마리 이상 추가해 주세요.");
+      return;
+    }
+    const base = `${currentSaved?.name || defaultTeamName()} 복사본`;
+    let name = base;
+    let index = 2;
+    const existingNames = new Set(savedTeams.map(saved => saved.name));
+    while (existingNames.has(name)) name = `${base} ${index++}`;
+    const snapshot = saveWorkingTeam({ name, forceNew: true });
+    if (snapshot) setSaveMessage(`“${snapshot.name}”으로 복제했습니다.`);
+  }, [team.length, currentSaved, defaultTeamName, savedTeams, saveWorkingTeam]);
 
   const duplicateSavedTeam = useCallback(saved => {
     const now = new Date().toISOString();
@@ -1024,12 +1115,39 @@ export default function TeamBuilderPage() {
         </div>
       </div>
 
+      {pendingRuleChange && <Modal title="규칙 변경 확인" onClose={() => setPendingRuleChange(null)}>
+        <p className="tb-rule-confirm-copy">규칙을 변경하면 현재 팀에서 사용할 수 없는 다음 포켓몬이 제거됩니다.</p>
+        <ul className="tb-rule-confirm-list">
+          {pendingRuleChange.removedMembers.map(member => <li key={member.uid}>{displayPokemon(member.pokemon)}</li>)}
+        </ul>
+        <p className="tb-rule-confirm-copy">계속 변경하시겠습니까?</p>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-ghost" onClick={() => setPendingRuleChange(null)}>취소</button>
+          <button type="button" className="btn tb-main-btn" onClick={() => applyRuleChange(pendingRuleChange)}>확인</button>
+        </div>
+      </Modal>}
+
+      {pendingTeamChange && <Modal title="팀 전환 전 저장" onClose={() => setPendingTeamChange(null)}>
+        <p className="tb-rule-confirm-copy">저장되지 않은 변경사항이 있습니다. 현재 변경을 저장한 뒤 계속하면 팀 전환 중에도 변경사항이 유지됩니다.</p>
+        <p className="tb-rule-confirm-copy">{currentSaved ? `“${currentSaved.name}” 팀에 현재 변경사항을 저장합니다.` : `현재 팀을 “${defaultTeamName()}” 이름의 새 저장 팀으로 보관합니다.`}</p>
+        <div className="modal-actions">
+          <button type="button" className="btn btn-ghost" onClick={() => setPendingTeamChange(null)}>취소</button>
+          <button type="button" className="btn tb-main-btn" onClick={continuePendingTeamChange}>저장 후 계속</button>
+        </div>
+      </Modal>}
+
       {libraryOpen && <Modal title="내 팀" hint="불러오기 후 수정하고 다시 저장하면 기존 팀을 덮어씁니다." onClose={() => setLibraryOpen(false)}>
         <button className="tb-modal-close" type="button" onClick={() => setLibraryOpen(false)} aria-label="내 팀 닫기">×</button>
         <div className="tb-library-save">
           <label className="tb-field"><span>현재 팀 저장</span><input className="tb-input tb-team-name" maxLength={40} value={saveName} onChange={event => setSaveName(event.target.value)} onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); saveCurrentTeam(); } }} placeholder="팀 이름" /></label>
           <div className="tb-library-save-meta"><span>{regulation.name} · {currentCupRuleSummary} · {team.length}/6마리</span><span>이 브라우저에 저장됩니다.</span><span>Incomplete / Invalid 팀도 초안 저장 가능</span></div>
-          <div className="tb-library-save-row"><span></span><button className="btn tb-main-btn btn-sm" disabled={!storageAvailable || team.length === 0} onClick={saveCurrentTeam}>{currentSaved ? "변경사항 저장" : "새 팀 저장"}</button></div>
+          <div className="tb-library-save-row">
+            <div className="tb-library-workspace-actions">
+              <button className="btn btn-ghost btn-sm" disabled={!storageAvailable} onClick={startNewTeam}>새 팀</button>
+              <button className="btn btn-ghost btn-sm" disabled={!storageAvailable || team.length === 0} onClick={duplicateCurrentTeam}>현재 팀 복제</button>
+            </div>
+            <button className="btn tb-main-btn btn-sm" disabled={!storageAvailable || team.length === 0} onClick={saveCurrentTeam}>{currentSaved ? "변경사항 저장" : "새 팀 저장"}</button>
+          </div>
           {saveMessage && <div className="tb-save-message">{saveMessage}</div>}
         </div>
         <div className="tb-saved-list">

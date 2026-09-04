@@ -5,8 +5,8 @@ export const STAT_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"];
 export const STAT_LABELS = { hp: "HP", atk: "공격", def: "방어", spa: "특공", spd: "특방", spe: "스피드" };
 export const TEAM_STORAGE_KEY = "ypl-team-builder:saved-teams:v1";
 export const DRAFT_STORAGE_KEY = "ypl-team-builder:working-draft:v1";
-export const TEAM_SCHEMA_VERSION = 2;
-export const DRAFT_SCHEMA_VERSION = 2;
+export const TEAM_SCHEMA_VERSION = 3;
+export const DRAFT_SCHEMA_VERSION = 3;
 export const DRAFT_SAVE_DELAY_MS = 180;
 
 export const ALIGNMENTS = [
@@ -126,6 +126,61 @@ export function dataId(pokemon) {
   return DATA_ID_OVERRIDES[pokemon.name] || toID(pokemon.name.replace(/\s*\[.*\]$/, ""));
 }
 
+function formIdentityCandidates(pokemon) {
+  if (!pokemon?.name) return [];
+  const name = String(pokemon.name);
+  const base = toID(canonicalBaseName(name));
+  const candidates = [DATA_ID_OVERRIDES[name], dataId(pokemon), toID(name)].filter(Boolean);
+  const form = name.match(/\[([^\]]+)\]/)?.[1] || "";
+  if (!form) return [...new Set(candidates)];
+
+  const words = form.toLowerCase().match(/[a-z0-9]+/g) || [];
+  const generic = new Set(["form", "breed", "flower", "trim", "pattern", "variety", "cream"]);
+  const meaningful = words.filter(word => !generic.has(word));
+  for (const word of meaningful) candidates.push(`${base}${word}`);
+  for (let length = 2; length <= meaningful.length; length += 1) {
+    candidates.push(`${base}${meaningful.slice(0, length).join("")}`);
+  }
+  if (meaningful.length > 1) candidates.push(`${base}${meaningful[meaningful.length - 1]}`);
+
+  const regionalAliases = {
+    alolan: "alola",
+    hisuian: "hisui",
+    galarian: "galar",
+    female: "f",
+  };
+  for (const word of words) {
+    if (regionalAliases[word]) candidates.push(`${base}${regionalAliases[word]}`);
+  }
+  return [...new Set(candidates)];
+}
+
+/**
+ * Resolve only IDs that are present in the loaded Pokédex. Regulation ids
+ * such as mb-1 are list indexes, not official form identities, so they are
+ * intentionally never used as a snapshot pokemon_id.
+ */
+export function resolveCanonicalPokemonId(detailData, pokemon) {
+  if (!detailData?.pokedex || !pokemon?.name) return null;
+  const isForm = /\[[^\]]+\]/.test(String(pokemon.name)) || / Rotom$/.test(String(pokemon.name));
+  const baseId = toID(canonicalBaseName(pokemon.name));
+  for (const candidate of formIdentityCandidates(pokemon)) {
+    const record = detailData.pokedex[candidate];
+    if (!record) continue;
+    if (isForm && candidate === baseId) continue;
+    return record.id || candidate;
+  }
+
+  // Some data snapshots expose a key different from the record id. Accept an
+  // exact normalized form name only when the record itself exists.
+  const normalizedName = toID(pokemon.name.replace(/\[|\]/g, " "));
+  const match = Object.values(detailData.pokedex).find(record => {
+    if (!record?.id || (isForm && record.id === baseId)) return false;
+    return toID(record.name) === normalizedName;
+  });
+  return match?.id || null;
+}
+
 export function dexRecord(detailData, pokemon) {
   if (!detailData || !pokemon) return null;
   return detailData.pokedex?.[dataId(pokemon)] || detailData.pokedex?.[speciesFallbackKey(pokemon)] || null;
@@ -149,6 +204,8 @@ export function makeMember(pokemon) {
   return {
     uid: makeUid("member"),
     pokemon,
+    pokemonId: "",
+    resolutionState: "resolved",
     ability: "",
     alignment: "serious",
     statPoints: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 },
@@ -157,75 +214,243 @@ export function makeMember(pokemon) {
   };
 }
 
-export function serializeMembers(team) {
+export function serializeMembers(team, { detailData } = {}) {
   return (team || []).map(member => ({
     pokemonName: member.pokemon?.name || "",
+    pokemonId: member.resolutionState === "unresolved"
+      ? member.pokemonId || ""
+      : resolveCanonicalPokemonId(detailData, member.pokemon) || member.pokemonId || "",
+    resolutionState: member.resolutionState || "resolved",
     ability: member.ability || "",
     alignment: member.alignment || "serious",
     statPoints: Object.fromEntries(STAT_KEYS.map(key => [key, Number(member.statPoints?.[key] || 0)])),
     item: member.item || "",
     moves: Array.from({ length: 4 }, (_, index) => member.moves?.[index] || ""),
-  })).filter(member => member.pokemonName);
+  })).filter(member => member.pokemonName || member.resolutionState === "unresolved");
 }
 
 function normalizeMembers(members) {
   return (Array.isArray(members) ? members : []).slice(0, 6).map(member => ({
+    ...(member && typeof member === "object" ? member : {}),
     pokemonName: String(member?.pokemonName || ""),
+    pokemonId: String(member?.pokemonId || ""),
+    resolutionState: member?.resolutionState === "unresolved" ? "unresolved" : "resolved",
     ability: String(member?.ability || ""),
     alignment: String(member?.alignment || "serious"),
     statPoints: Object.fromEntries(STAT_KEYS.map(key => [key, Math.max(0, Math.min(32, Number(member?.statPoints?.[key]) || 0))])),
     item: String(member?.item || ""),
     moves: Array.from({ length: 4 }, (_, index) => String(member?.moves?.[index] || "")),
-  })).filter(member => member.pokemonName);
+  }));
 }
 
-export function normalizeSavedTeam(raw) {
-  if (!raw || typeof raw !== "object" || !raw.id || !Array.isArray(raw.members)) return null;
-  const cupRuleId = CUP_RULES[String(raw.cupRuleId || "none")] ? String(raw.cupRuleId || "none") : "none";
-  const assignedType = TYPE_OPTIONS.some(type => type.id === String(raw.cupRuleSettings?.assignedType || "")) ? String(raw.cupRuleSettings?.assignedType || "") : "";
+export function migrateSavedTeam(raw) {
+  if (!raw || typeof raw !== "object" || !Array.isArray(raw.members)) return null;
+  const sourceVersion = Number(raw.schemaVersion) || 1;
   return {
-    schemaVersion: Number(raw.schemaVersion) || TEAM_SCHEMA_VERSION,
-    id: String(raw.id),
-    name: String(raw.name || "이름 없는 팀").slice(0, 40),
-    regulationId: String(raw.regulationId || "m-b"),
-    cupRuleId,
-    cupRuleSettings: { assignedType: CUP_RULES[cupRuleId]?.kind === "monotype" ? assignedType : "" },
-    createdAt: String(raw.createdAt || new Date().toISOString()),
-    updatedAt: String(raw.updatedAt || raw.createdAt || new Date().toISOString()),
+    ...raw,
+    schemaVersion: sourceVersion > TEAM_SCHEMA_VERSION ? sourceVersion : TEAM_SCHEMA_VERSION,
     members: normalizeMembers(raw.members),
   };
 }
 
-export function normalizeDraft(raw, regulations) {
+export function migrateDraft(raw, regulations) {
   if (!raw || typeof raw !== "object" || !Array.isArray(raw.members)) return null;
   const regulationId = String(raw.regulationId || "m-b");
   if (!regulations?.[regulationId]) return null;
-  const cupRuleId = CUP_RULES[String(raw.cupRuleId || "none")] ? String(raw.cupRuleId || "none") : "none";
-  const assignedType = TYPE_OPTIONS.some(type => type.id === String(raw.cupRuleSettings?.assignedType || "")) ? String(raw.cupRuleSettings?.assignedType || "") : "";
+  const sourceVersion = Number(raw.schemaVersion) || 1;
   return {
-    schemaVersion: Number(raw.schemaVersion) || DRAFT_SCHEMA_VERSION,
+    ...raw,
+    schemaVersion: sourceVersion > DRAFT_SCHEMA_VERSION ? sourceVersion : DRAFT_SCHEMA_VERSION,
+    regulationId,
+    members: normalizeMembers(raw.members),
+  };
+}
+
+export function normalizeSavedTeam(raw) {
+  const migrated = migrateSavedTeam(raw);
+  if (!migrated || !migrated.id) return null;
+  const cupRuleId = CUP_RULES[String(migrated.cupRuleId || "none")] ? String(migrated.cupRuleId || "none") : "none";
+  const assignedType = TYPE_OPTIONS.some(type => type.id === String(migrated.cupRuleSettings?.assignedType || "")) ? String(migrated.cupRuleSettings?.assignedType || "") : "";
+  return {
+    ...migrated,
+    schemaVersion: migrated.schemaVersion,
+    id: String(migrated.id),
+    name: String(migrated.name || "이름 없는 팀").slice(0, 40),
+    regulationId: String(migrated.regulationId || "m-b"),
+    cupRuleId,
+    cupRuleSettings: { assignedType: CUP_RULES[cupRuleId]?.kind === "monotype" ? assignedType : "" },
+    createdAt: String(migrated.createdAt || new Date().toISOString()),
+    updatedAt: String(migrated.updatedAt || migrated.createdAt || new Date().toISOString()),
+    members: migrated.members,
+  };
+}
+
+export function normalizeDraft(raw, regulations) {
+  const migrated = migrateDraft(raw, regulations);
+  if (!migrated) return null;
+  const regulationId = migrated.regulationId;
+  const cupRuleId = CUP_RULES[String(migrated.cupRuleId || "none")] ? String(migrated.cupRuleId || "none") : "none";
+  const assignedType = TYPE_OPTIONS.some(type => type.id === String(migrated.cupRuleSettings?.assignedType || "")) ? String(migrated.cupRuleSettings?.assignedType || "") : "";
+  return {
+    ...migrated,
+    schemaVersion: migrated.schemaVersion,
     regulationId,
     cupRuleId,
     cupRuleSettings: { assignedType: CUP_RULES[cupRuleId]?.kind === "monotype" ? assignedType : "" },
-    activeSavedTeamId: raw.activeSavedTeamId ? String(raw.activeSavedTeamId) : null,
-    dirty: Boolean(raw.dirty),
-    selectedIndex: Math.max(0, Number(raw.selectedIndex) || 0),
-    savedAt: String(raw.savedAt || ""),
-    members: normalizeMembers(raw.members),
+    activeSavedTeamId: migrated.activeSavedTeamId ? String(migrated.activeSavedTeamId) : null,
+    dirty: Boolean(migrated.dirty),
+    selectedIndex: Math.max(0, Number(migrated.selectedIndex) || 0),
+    savedAt: String(migrated.savedAt || ""),
+    members: migrated.members,
   };
 }
 
 export function memberFromSaved(savedMember, regulation) {
   const pokemon = regulation?.pokemon?.find(entry => entry.name === savedMember?.pokemonName);
-  if (!pokemon) return null;
-  return {
-    ...makeMember(pokemon),
-    ability: savedMember.ability || "",
-    alignment: ALIGNMENTS.some(n => n.id === savedMember.alignment) ? savedMember.alignment : "serious",
-    statPoints: Object.fromEntries(STAT_KEYS.map(key => [key, Math.max(0, Math.min(32, Number(savedMember.statPoints?.[key]) || 0))])),
-    item: savedMember.item || "",
-    moves: Array.from({ length: 4 }, (_, index) => savedMember.moves?.[index] || ""),
+  const unresolved = !pokemon;
+  const fallbackPokemon = pokemon || {
+    id: savedMember?.pokemonId || "",
+    name: String(savedMember?.pokemonName || "확인할 수 없는 포켓몬"),
+    isNewInMB: false,
   };
+  return {
+    ...makeMember(fallbackPokemon),
+    pokemonId: String(savedMember?.pokemonId || ""),
+    resolutionState: unresolved ? "unresolved" : "resolved",
+    originalPokemonName: String(savedMember?.pokemonName || ""),
+    ability: savedMember?.ability || "",
+    alignment: ALIGNMENTS.some(n => n.id === savedMember?.alignment) ? savedMember.alignment : "serious",
+    statPoints: Object.fromEntries(STAT_KEYS.map(key => [key, Math.max(0, Math.min(32, Number(savedMember?.statPoints?.[key]) || 0))])),
+    item: savedMember?.item || "",
+    moves: Array.from({ length: 4 }, (_, index) => savedMember?.moves?.[index] || ""),
+  };
+}
+
+export function resolveCanonicalPokemonIdentity(member, { detailData } = {}) {
+  const pokemon = member?.pokemon || member;
+  const nameSnapshot = String(member?.originalPokemonName || pokemon?.name || "");
+  if (!pokemon?.name || member?.resolutionState === "unresolved") {
+    return { pokemonId: null, speciesIdentity: null, nameSnapshot, resolved: false };
+  }
+  const storedId = member?.pokemonId && (!detailData || detailData.pokedex?.[member.pokemonId]) ? member.pokemonId : null;
+  const pokemonId = storedId || resolveCanonicalPokemonId(detailData, pokemon);
+  return {
+    pokemonId: pokemonId || null,
+    speciesIdentity: speciesIdentity(detailData, pokemon),
+    nameSnapshot,
+    resolved: Boolean(pokemonId),
+  };
+}
+
+function snapshotCupRuleSettings(settings = {}) {
+  return Object.fromEntries(Object.entries(settings || {}).filter(([key]) => key !== "assignedType"));
+}
+
+function abilityId(value) {
+  return value ? toID(value) : null;
+}
+
+export function toTeamSnapshotV1({
+  team = [],
+  regulationId = null,
+  cupRuleId = null,
+  cupRuleSettings = {},
+  detailData = null,
+  sourceType = "manual",
+  sourceReference = null,
+} = {}) {
+  const errors = [];
+  const members = team.map((member, index) => {
+    const identity = resolveCanonicalPokemonIdentity(member, { detailData });
+    if (!identity.resolved) {
+      errors.push(`${identity.nameSnapshot || `슬롯 ${index + 1}`}의 canonical Pokémon identity를 확인할 수 없습니다.`);
+      return null;
+    }
+    const points = member.statPoints || {};
+    const moves = Array.from({ length: 4 }, (_, moveIndex) => member.moves?.[moveIndex] || null);
+    return {
+      slot: index + 1,
+      pokemon_id: identity.pokemonId,
+      pokemon_name_snapshot: identity.nameSnapshot,
+      ability_id: abilityId(member.ability),
+      nature_id: member.alignment || null,
+      stat_hp: Number(points.hp || 0),
+      stat_atk: Number(points.atk || 0),
+      stat_def: Number(points.def || 0),
+      stat_spa: Number(points.spa || 0),
+      stat_spd: Number(points.spd || 0),
+      stat_spe: Number(points.spe || 0),
+      item_id: member.item || null,
+      move_1_id: moves[0],
+      move_2_id: moves[1],
+      move_3_id: moves[2],
+      move_4_id: moves[3],
+    };
+  });
+
+  if (errors.length) return { ok: false, errors };
+  return {
+    ok: true,
+    snapshot: {
+      schema_version: 1,
+      regulation_id: regulationId,
+      cup_rule_id: cupRuleId,
+      cup_rule_settings: snapshotCupRuleSettings(cupRuleSettings),
+      source_type: sourceType,
+      source_reference: sourceReference,
+    },
+    members,
+  };
+}
+
+function abilityFromId(detailData, pokemon, id) {
+  if (!id) return "";
+  const details = dexRecord(detailData, pokemon);
+  return details?.abilities?.find(value => toID(value) === id) || id;
+}
+
+export function fromTeamSnapshotV1({ snapshot, members = [], regulation, detailData = null } = {}) {
+  if (!snapshot || Number(snapshot.schema_version) !== 1 || !Array.isArray(members)) {
+    return { ok: false, errors: ["지원하지 않는 TeamSnapshot schema입니다."] };
+  }
+  const team = members.slice().sort((a, b) => Number(a.slot || 0) - Number(b.slot || 0)).map(member => {
+    const pokemon = regulation?.pokemon?.find(entry => member.pokemon_id && resolveCanonicalPokemonId(detailData, entry) === member.pokemon_id)
+      || regulation?.pokemon?.find(entry => entry.name === member.pokemon_name_snapshot);
+    const resolvedId = pokemon ? resolveCanonicalPokemonId(detailData, pokemon) : null;
+    const canonicalMismatch = Boolean(member.pokemon_id && detailData && resolvedId !== member.pokemon_id);
+    const savedMember = {
+      pokemonId: member.pokemon_id || "",
+      pokemonName: member.pokemon_name_snapshot || "",
+      ability: abilityFromId(detailData, pokemon, member.ability_id),
+      alignment: member.nature_id || "serious",
+      statPoints: {
+        hp: member.stat_hp,
+        atk: member.stat_atk,
+        def: member.stat_def,
+        spa: member.stat_spa,
+        spd: member.stat_spd,
+        spe: member.stat_spe,
+      },
+      item: member.item_id || "",
+      moves: [member.move_1_id, member.move_2_id, member.move_3_id, member.move_4_id],
+    };
+    const restored = memberFromSaved(savedMember, regulation);
+    if (canonicalMismatch) restored.resolutionState = "unresolved";
+    return restored;
+  });
+  return { ok: true, team };
+}
+
+export function membersRemovedByRuleChange({ team = [], regulation, cupRuleId = "none", assignedTypeId = "", detailData = null } = {}) {
+  const allowedNames = new Set(regulation?.pokemon?.map(pokemon => pokemon.name) || []);
+  const rule = CUP_RULES[cupRuleId] || CUP_RULES.none;
+  return team.filter(member => {
+    if (!allowedNames.has(member.pokemon?.name)) return true;
+    if (rule.kind === "monotype" && assignedTypeId && detailData) {
+      return !pokemonMatchesCupRule({ pokemon: member.pokemon, cupRuleId, assignedTypeId, detailData });
+    }
+    return false;
+  });
 }
 
 export function alignmentFor(member) {

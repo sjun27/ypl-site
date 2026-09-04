@@ -1819,3 +1819,20 @@ P1-5에서 기록 반영이 완료된 normalized 팀전 Event를 Records read에
 - `git diff --check`: PASS, line ending warning 외 오류 없음
 
 P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다. 다음 단계는 P2 Team Builder → TeamSnapshot → RegistrationSubmission이다.
+
+---
+
+## 2026-09-05 P2-1 Team Builder foundation
+
+P2-1에서 Team Builder 개인 작업본과 공식 제출 Snapshot의 경계를 구현하고, 저장 팀 관리 UX를 보강했다.
+
+- local saved / draft schema v3 및 기존 v2 migration
+- form-specific canonical Pokémon identity
+- unresolved saved Pokémon lossless restore
+- TeamSnapshot v1 serializer / loader foundation
+- destructive Regulation / Cup change confirmation
+- saved team selector, 새 팀, 현재 팀 복제 UX
+- Team Builder targeted tests 10/10 PASS
+- 전체 Node test suite 91/91 PASS 및 production build PASS
+
+공식 Submission·TeamSnapshot DB write·Entry linkage는 P2-2 이후 단계로 남겨 두며, 이번 변경에서는 Supabase write를 수행하지 않았다.

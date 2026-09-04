@@ -71,6 +71,7 @@
 .tb-slot:hover:not(.empty) .tb-slot-copy strong{color:var(--cyan-d);}
 .tb-slot:focus-visible{outline:2px solid var(--cyan);outline-offset:2px;}
 .tb-slot.active{border-color:var(--cyan);background:var(--s-card);box-shadow:inset 0 0 0 1px var(--cyan);}
+.tb-slot.unresolved{border-color:rgba(178,62,62,.42);background:rgba(178,62,62,.035);}
 .tb-slot.empty{cursor:default;color:var(--muted2);background:transparent;border-style:dashed;}
 .tb-slot-no{position:absolute;left:8px;top:7px;font-size:9px;font-weight:800;color:var(--muted2);}
 .tb-slot-sprite{width:56px;height:56px;object-fit:contain;flex:none;}
@@ -139,6 +140,7 @@
 
 .tb-library-save{padding-bottom:18px;border-bottom:1px solid var(--line);}
 .tb-library-save-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;font-size:11px;color:var(--muted);}
+.tb-library-workspace-actions{display:flex;flex-wrap:wrap;gap:7px;}
 .tb-save-message{margin-top:8px;font-size:11px;color:#18734a;font-weight:650;}
 .tb-saved-list{display:flex;flex-direction:column;gap:9px;margin-top:14px;max-height:48vh;overflow:auto;padding-right:2px;}
 .tb-saved-team{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px;border:1px solid var(--line);border-radius:15px;background:var(--s-soft);transition:border-color .16s,background .16s;}
@@ -189,7 +191,10 @@
   .tb-saved-actions{width:100%;}
   .tb-saved-actions .btn{flex:1;justify-content:center;}
   .tb-library-save-row{align-items:flex-start;flex-direction:column;}
+  .tb-library-workspace-actions{width:100%;}
+  .tb-library-workspace-actions .btn{flex:1;}
   .tb-library-save-row .btn{width:100%;justify-content:center;}
+  .tb-library-save-row .tb-library-workspace-actions .btn{width:auto;}
 }
 @media(max-width:390px){
   .tb-team-slots{grid-template-columns:1fr;}
@@ -216,6 +221,8 @@
 .tb-active-saved{background:rgba(36,163,108,.11);color:#18734a;border:1px solid rgba(36,163,108,.24);}
 .tb-pokemon-copy small:empty{display:none;}
 .tb-hero-actions .btn:disabled{opacity:.45;cursor:not-allowed;}
+.tb-rule-confirm-copy{font-size:13px;line-height:1.65;color:var(--muted);}
+.tb-rule-confirm-list{margin:12px 0;padding-left:22px;color:var(--danger);font-size:13px;line-height:1.7;}
 
 
 /* 6.4 interaction polish: keyboard/touch behavior stays primary; hover is a desktop enhancement only. */
