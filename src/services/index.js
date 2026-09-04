@@ -3,3 +3,5 @@ export * as championsData from "./championsData.js";
 export * from "./teamBuilderCore.js";
 export * from "./normalizedCompetitionService.js";
 export * from "./bracketRankingAwardSnapshot.js";
+export * from "./normalizedRecordsService.js";
+export * from "./normalizedRecordsProjection.js";

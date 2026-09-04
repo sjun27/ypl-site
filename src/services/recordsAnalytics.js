@@ -798,7 +798,7 @@ function favoritePokemon(rosters) {
     .sort((a, b) => b.entries - a.entries || a.name.localeCompare(b.name, "ko"));
 }
 
-function buildPokemonStats(rosters, champions) {
+export function buildPokemonStats(rosters, champions) {
   const map = new Map();
   const totalEntries = rosters.length;
 

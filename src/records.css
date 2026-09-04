@@ -1,4 +1,6 @@
 .records-main-tabs{margin-bottom:14px}
+.records-read-state{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 12px;padding:10px 12px;border:1px solid var(--line);border-radius:12px;background:var(--s-soft);color:var(--muted);font-size:12px}
+.records-read-state.is-error{border-color:rgba(190,60,60,.35);color:var(--danger)}
 .records-coverage{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:0 0 18px;padding:14px 16px;border:1px solid var(--line);border-radius:16px;background:var(--s-soft)}
 .records-coverage>div:first-child{display:flex;flex-direction:column;gap:4px;min-width:0}
 .records-coverage b{color:var(--navy)}
@@ -80,6 +82,8 @@
 
 .records-toolbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
 .records-toolbar input{max-width:440px}
+.r2-event-name{font-weight:800;color:var(--navy)}
+.r2-source{font-size:9px!important;letter-spacing:.08em;color:var(--muted)!important}
 .records-archive-list{display:flex;flex-direction:column;gap:10px}
 .records-archive-card{padding:0;overflow:hidden}
 .records-archive-main{width:100%;border:0;background:transparent;color:var(--ink);display:grid;grid-template-columns:108px minmax(0,1fr);gap:14px;align-items:start;padding:16px 18px;text-align:left;cursor:pointer}

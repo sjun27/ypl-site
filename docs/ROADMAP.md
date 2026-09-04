@@ -134,10 +134,10 @@ Event completed
 record_applied_at 기록
 아직 legacy에서 처리
 대회 회차
-대회 회차의 입상 필드 및 Records read
-누적 랭킹
-시즌별 성적
-Records 표시 데이터
+대회 회차의 입상 필드 및 기록 반영 write
+누적 랭킹 / 시즌별 성적 write
+
+Records read는 Test의 P0-8부터 완료된 normalized 개인전 Event와 legacy 과거·팀전 기록을 합치는 hybrid 구조다.
 
 현재 정책:
 
@@ -170,10 +170,18 @@ legacy 저장 실패 시에도 이번 반영 과정에서 발생한 Player / Reg
 
 2.4 Records
 
-현재 Records는 대부분 legacy ypl_data_v4를 읽는다.
+Test Records는 P0-8부터 기록 반영이 완료된 normalized 개인전 Event를 직접 읽는다.
+Production과 과거·팀전·챔피언스 기록은 기존 legacy `ypl_data_v4`를 유지한다.
 
 구현된 기반:
 
+completed + record_applied_at Event만 공식 normalized 기록으로 공개
+Event → Entry → EntryParticipant → Player → Match → Result → RankingAward read
+Player ID 기준 트레이너 identity
+같은 Event의 normalized / legacy 회차 중복 억제
+RankingBaseline + RankingAward 원장 합산
+counts_series / counts_season 정책 반영
+최종 TeamSnapshot 우선, 없으면 연결된 legacy party fallback
 트레이너 기록
 대회 기록
 포켓몬 기록
@@ -322,7 +330,7 @@ normalized Match 유지, Result / RankingAward 원복
 Event lifecycle 원복
 Entry identity 보존 정책 확정
 재반영 시 중복 데이터 생성 방지
-4단계 — Records 전환
+4단계 — Records 전환 — 구현 및 Test DB 브라우저 E2E 완료
 Records가 normalized Event / Entry / Result를 직접 읽도록 전환
 Trainer 기록 연결
 Event 상세 연결
@@ -542,14 +550,20 @@ feature/records-system
 ✓ Reset Final 포함 Match 11건 전체 played / duplicate node 0 확인
 ✓ 우승자 변경 후 reapply → 이전 champion Result/Award 제거, 새 Result/Award 4건만 생성
 ✓ 재반영 후 duplicate Result 0 / duplicate Award 0 및 legacy 랭킹·시즌 delta 일치 확인
+✓ P0-8 completed + record_applied_at 개인전 Event normalized read boundary
+✓ Player ID 기준 트레이너 / Result / 참가 이력 연결
+✓ normalized Event와 연결된 legacy 회차·대진표 중복 표시 차단
+✓ RankingBaseline + 전체 RankingAward ledger 및 count flag 기반 누적·시즌 랭킹
+✓ final TeamSnapshot 우선 / 명시적 legacy party fallback
+✓ Test DB `ranking_baselines` anon SELECT 적용 및 권한 재조회
+✓ 제7회 파이컵라이트 Records 트레이너·대회·랭킹·포켓몬 브라우저 E2E
 
 바로 다음
-1. P0-8 Records normalized read 전환
-2. P1 팀전 normalized 연결
+1. P1 팀전 normalized 연결
 
 그 이후
-9. Team Builder → TeamSnapshot → 공식 Submission
-10. 챔피언스 운영 자동화
-11. Team Builder 자체 안정화 / 추가 UX
-12. Auth / RLS
-13. Production migration
+2. Team Builder → TeamSnapshot → 공식 Submission
+3. 챔피언스 운영 자동화
+4. Team Builder 자체 안정화 / 추가 UX
+5. Auth / RLS
+6. Production migration

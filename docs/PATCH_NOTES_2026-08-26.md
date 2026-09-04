@@ -1622,3 +1622,40 @@ P0-4 Match, P0-5 Result, P0-6 RankingAward를 하나의 실제 운영형 Test Ev
 따라서 P0-7 개인전 normalized 전체 write lifecycle 회귀를 완료했다.
 
 다음 단계는 P0-8 Records normalized read 전환이다.
+
+## 2026-09-04 P0-8 Records normalized read 전환
+
+Test Records가 기록 반영이 완료된 normalized 개인전 Event를 직접 읽도록 전환했다. 활성화 조건은 `VITE_YPL_DATA_SCHEMA=ypl_schema_validation`의 명시적 일치이며 Production과 일반 `public` 환경은 기존 legacy read를 유지한다.
+
+`src/services/normalizedRecordsService.js`는 Event, Season, Player, RankingBaseline, Entry, EntryParticipant, Match, Result, RankingAward와 final TeamSnapshot 관계를 읽는다. `src/services/normalizedRecordsProjection.js`는 이 원본과 legacy `ypl_data_v4`를 화면용 snapshot으로 합친다.
+
+- 공식 normalized 범위: completed + record_applied_at + 개인전 Event
+- 트레이너 identity: Player ID
+- 같은 Event의 legacy round / bracket: 중복 표시 및 집계 제외
+- 과거·팀전·챔피언스 기록: legacy fallback 유지
+- 랭킹: RankingBaseline + 전체 RankingAward ledger, counts_series / counts_season 적용
+- Award 중복 방지: ID 및 placement `(result_id, player_id)` 기준
+- 포켓몬: final TeamSnapshot 우선, 없을 때만 연결된 legacy party fallback
+- 오류 처리: 화면 오류와 재시도 제공
+- 공개 정책: 개인 승·패·승률 UI 미추가
+
+Test 프로젝트 `nmqrmvnjenjqityuhngb`에는 다음 권한만 추가했다.
+
+```sql
+GRANT SELECT ON ypl_schema_validation.ranking_baselines TO anon;
+```
+
+적용 후 `anon`은 SELECT만 가능하고 INSERT / UPDATE / DELETE는 불가능함을 재조회했다. RLS와 다른 권한은 변경하지 않았고 Production DB도 변경하지 않았다.
+
+자동 테스트는 normalized 공식 상태, Player ID 분리, legacy 중복 억제, RankingBaseline/Award ledger와 count flag, 포켓몬 Snapshot/fallback을 포함해 전체 39건이 통과했다. production build도 성공했다.
+
+브라우저 E2E에서는 다음을 확인했다.
+
+- Test1~6 모두 `제7회 파이컵라이트` 참가 이력이 정확히 1건
+- Test6 우승, Test1 준우승, Test3/Test4 4강, Test2/Test5 참가 표시
+- 대회 아카이브의 동일 legacy 회차 중복 없음과 `NORMALIZED` 표식
+- 누적 및 YPL 시즌 3 랭킹에 +30 / +20 / +10 / +10 한 번씩 반영
+- 기존 팀전·챔피언스 아카이브와 포켓몬 기록 유지
+- 개인 승·패·승률 열 없음
+
+따라서 P0-8 Test normalized Records read 전환을 완료했다. 다음 단계는 P1 팀전 normalized 연결이며 Production 전환은 별도 migration 단계로 남긴다.

@@ -77,7 +77,8 @@ titleGroups
 news / board / 기타 운영 데이터
 ```
 
-현재 Records 1차 버전은 새 테이블을 만들지 않고 이 데이터를 읽어 파생 기록을 계산합니다.
+Records 1차 버전은 새 테이블을 만들지 않고 이 데이터를 읽어 파생 기록을 계산했습니다.
+Test의 P0-8부터는 기록 반영이 완료된 normalized 개인전 Event를 직접 읽고, 과거·팀전 기록만 legacy 자료로 보완합니다.
 
 ---
 
@@ -1659,15 +1660,14 @@ Player → Registration → Entry → EntryParticipant를 쓰며 중간 실패�
 
 ### 현재 legacy runtime 사용 범위
 
-다음 운영 데이터의 source of truth는 아직 `public.site_data / ypl_data_v4`다.
+다음 운영 write 데이터의 source of truth는 아직 `public.site_data / ypl_data_v4`다.
 
 ```text
 Bracket 결과
 회차 기록
-회차 내부 Result 성격 입상 필드 (Records read source)
-누적 랭킹
-시즌 성적
-Records 표시 데이터
+회차 내부 Result 성격 입상 필드
+누적 랭킹 write
+시즌 성적 write
 ```
 
 Bracket 자체와 화면 렌더링의 source of truth는 계속 legacy JSON이다. 다만 Event-linked
@@ -1683,7 +1683,7 @@ Event / EventRegistration / Player / Entry / EntryParticipant / Match / Result
               Bracket participant.entryId
                            │
                            ▼
-           Bracket / Round placement / Ranking / Records
+                  Bracket / Round placement / Ranking
                           legacy
 ```
 
@@ -1869,7 +1869,34 @@ Test Event는 `제7회 파이컵라이트`이며 application Registration 4명(T
 
 전체 과정에서 Event lifecycle은 running → completed → running → completed로 정상 동작했고 legacy ranking / season도 재반영 결과와 정확히 일치했다.
 
-따라서 P0-7 개인전 normalized write lifecycle 회귀 검증은 완료됐다. 다음 단계는 P0-8 Records normalized read 전환이다.
+따라서 P0-7 개인전 normalized write lifecycle 회귀 검증은 완료됐다.
+
+### P0-8 Records normalized read
+
+Test 환경에서 `VITE_YPL_DATA_SCHEMA=ypl_schema_validation`이 명시된 경우에만 normalized Records read를 활성화한다. Production의 `public` schema 또는 명시되지 않은 환경에서는 기존 legacy Records 경로를 유지한다.
+
+공식 normalized 공개 범위는 `status=completed`, `record_applied_at IS NOT NULL`, 개인전 Event의 교집합이다. 이 Event는 다음 관계를 직접 읽는다.
+
+```text
+Event → Entry → EntryParticipant → Player
+      → Match
+      → Result → RankingAward
+Season → RankingBaseline
+EventRegistration.final_submission_id → RegistrationSubmission → TeamSnapshot → TeamSnapshotMember
+```
+
+- 트레이너 identity는 이름이 아니라 `Player.id`를 사용한다. 동명이인은 별도 profile로 유지하며 fuzzy merge하지 않는다.
+- normalized Event ID가 `round.recordMeta.eventId` 또는 `bracket.eventId`에 연결되면 같은 legacy 회차와 대진표는 표시·집계에서 제외한다.
+- 과거 migrated Event 중 `record_applied_at`이 없는 기록과 팀전·챔피언스 기록은 legacy fallback으로 보존한다.
+- 누적·시즌 랭킹은 `RankingBaseline`에 placement / adjustment / reversal 등 전체 `RankingAward` ledger를 합산한다. `counts_series`와 `counts_season`을 각각 적용하고 동일 Award ID 및 동일 `(result_id, player_id)` placement를 중복 집계하지 않는다.
+- 공개 경기 수는 양쪽 Entry와 승자가 확정된 bracket Match만 계산한다. BYE, unresolved, cancelled는 제외하며 개인 승·패·승률 UI는 추가하지 않는다.
+- 포켓몬 기록은 final submission이 가리키는 immutable TeamSnapshot이 있으면 그 revision만 사용한다. Snapshot이 없을 때만 같은 Event/Player로 연결된 legacy party를 명시적으로 fallback한다.
+- normalized 조회 실패는 화면에 오류와 재시도 버튼을 표시하며 조용히 legacy만 보여주지 않는다.
+
+Test 프로젝트 `nmqrmvnjenjqityuhngb`의 `ypl_schema_validation.ranking_baselines`에는 Records 조회에 필요한 `anon SELECT`만 추가했다. 재조회 결과 `anon`의 INSERT / UPDATE / DELETE 권한은 없고 RLS 상태도 변경하지 않았다. Production DB는 변경하지 않았다.
+
+브라우저 E2E에서 `제7회 파이컵라이트`가 normalized 회차로 정확히 한 번 표시되고 Test6 우승 +30, Test1 준우승 +20, Test3 / Test4 4강 각 +10이 누적 및 YPL 시즌 3 랭킹에 중복 없이 반영되는 것을 확인했다. Test2 / Test5는 참가 기록만 표시된다. 기존 팀전·챔피언스 아카이브와 legacy 포켓몬 기록도 유지된다.
+
 ### Event 수정 / 삭제 일관성
 
 Event가 연결된 신청 공지를 수정할 때 기존 Event의 다음 상태를 보존한다.
