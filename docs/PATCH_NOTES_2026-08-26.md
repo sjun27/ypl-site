@@ -1768,3 +1768,54 @@ Event-linked canonical 팀전 write는 P1-4까지 완료했다. legacy-only 팀�
 다음 구현 단계는 Records normalized team read와 개인 / 팀 placement count 분리다.
 canonical 정책상 팀전 placement는 개인 우승 / 준우승 / 4강 count에서 제외한다.
 다만 현재 `recordsAnalytics.js` / `normalizedRecordsProjection.js`의 legacy projection에는 팀전 placement를 개인 count에 합산하는 경로가 아직 남아 있으며, P1-5에서 분리한다.
+
+## 2026-09-04 P1-5 Records normalized team read 및 전체 E2E
+
+P1-5에서 기록 반영이 완료된 normalized 팀전 Event를 Records read에 포함하고, 팀 history와 개인 placement count를 분리했다.
+
+### 구현 내용
+
+- `status = completed`이고 `record_applied_at IS NOT NULL`인 normalized 개인전·팀전 Event를 Records read 대상으로 포함
+- 공식 Team Result는 Team Entry당 1개를 유지하고, `EntryParticipant → Player`를 통해 각 팀원 profile history로 projection
+- 팀 history label을 `팀 우승`, `팀 준우승`, `팀 4강`으로 유지
+- 팀 placement는 history에는 보존하되 개인 `wins / runnerUps / top4` count에는 포함하지 않음
+- 이 count 분리를 legacy snapshot, normalized merged projection, RecordsPage profile hero에 일관되게 적용
+- Team RankingAward는 저장된 ledger를 그대로 읽고, Team Master 30 / 20 및 Team Light 15 / 10 points-only 정책과 0 placement count delta를 유지
+- 팀 4강 Result는 보존할 수 있으며 RankingAward는 생성하지 않음
+- normalized team Event와 `recordMeta.eventId`로 명시적으로 연결된 legacy tournament round의 placement / history / archive 중복 제거
+- 연결된 legacy team bracket은 제거하지 않고 roster / Pokémon / 기존 Match compatibility source로 유지하며, 파생 placement / history만 normalized team 기록과 중복되지 않게 제외
+- legacy-only 팀전, normalized individual dedupe, legacy Pokémon fallback 유지
+- `team_bout` / `ace` Match는 normalized DB에 보존하되 새 Records Match 상세 UI는 P1-5에 추가하지 않음
+- 일반 사용자 Records 화면에서 `NORMALIZED`, `LEGACY`, raw source, `m-a`, `m-b`, `none`, raw error message를 표시하지 않음
+- numeric team name은 `1 → 1팀`, `1팀 → 1팀`으로 표시
+- source metadata는 projection / dedupe / debug 내부에 유지
+
+### Test DB 브라우저 E2E
+
+대상 Event:
+
+- `P1-1 팀전 E2E 테스트`
+- event_id `964a0322-1bad-46ea-a4b0-6ff1eec71336`
+- 최종 결과: 1팀 champion, 2팀 runner_up
+- 1팀: team1~team4
+- 2팀: team5~team8
+
+확인 결과:
+
+- team1 profile history 1건, `팀 우승`, 개인 우승 count 0
+- team5 profile history 1건, `팀 준우승`, 개인 준우승 count 0
+- tournament archive 동일 팀전 1건, 팀명·멤버 정상 표시
+- team1~team4 각 +30, team5~team8 각 +20
+- normalized / legacy duplicate history 없음
+- linked legacy roster / Pokémon / Match compatibility 유지
+- legacy-only 팀전과 기존 normalized 개인전 Records 유지
+- `NORMALIZED` / `LEGACY` badge 및 `m-a` / `m-b` / `none` 미노출
+
+### Local verification
+
+- targeted tests: 10/10 PASS
+- acceptance audit 강화 후 전체 Node suite: 81/81 PASS
+- production build: PASS, Vite 116 modules transformed
+- `git diff --check`: PASS, line ending warning 외 오류 없음
+
+P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다. 다음 단계는 P2 Team Builder → TeamSnapshot → RegistrationSubmission이다.

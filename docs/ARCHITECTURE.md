@@ -78,7 +78,7 @@ news / board / 기타 운영 데이터
 ```
 
 Records 1차 버전은 새 테이블을 만들지 않고 이 데이터를 읽어 파생 기록을 계산했습니다.
-Test의 P0-8부터는 기록 반영이 완료된 normalized 개인전 Event를 직접 읽고, 과거·팀전 기록만 legacy 자료로 보완합니다.
+Test의 P0-8부터 기록 반영이 완료된 normalized Event를 직접 읽으며, P1-5에서 개인전·팀전으로 범위를 확장했다. legacy-only 과거·팀전·챔피언스 기록은 기존 자료로 보완합니다.
 
 ---
 
@@ -307,7 +307,7 @@ Grand Final Reset 구조를 고려합니다.
 ```
 
 팀전 입상은 팀 이력으로 보존합니다. canonical 정책상 팀전 placement는 해당 트레이너의 개인 우승·준우승·4강 count에 포함하지 않습니다.
-현재 Records legacy projection에는 팀전 placement를 개인 count에 합산하는 경로가 남아 있으며, P1-5에서 분리합니다.
+Records projection은 팀전 placement를 팀 history로 보존하되 개인 우승·준우승·4강 count에서는 제외합니다. 이 분리는 P1-5에서 legacy snapshot, normalized merged projection, Records profile hero에 일관되게 적용했습니다.
 
 ---
 
@@ -1605,18 +1605,17 @@ Bracket participant의 normalized identity는 Entry ID를 기준으로 연결한
 브라우저 클라이언트의 normalized write와 `public.site_data` 저장은 하나의 PostgreSQL transaction으로 묶이지 않는다. 따라서 예측 가능한 동명이인/중복 충돌은 첫 write 전에 검사하고, legacy 저장 실패 시 Event를 완료 처리하지 않는다. 마지막 Event 완료 처리만 실패한 경우 같은 미리보기의 재시도는 동일 round ID를 다시 저장하므로 중복 회차를 만들지 않는다.
 
 Event 연결 팀전은 멤버별 Player / EventRegistration / EntryParticipant와 Team Entry를 확정하고,
-P1-4까지 normalized Match / Result / RankingAward 및 legacy 기록 반영 lifecycle을 지원한다.
+P1-4까지 normalized Match / Result / RankingAward 및 legacy 기록 반영 lifecycle을 지원한다. P1-5에서 normalized team Records read와 개인 / 팀 placement count 분리를 완료했다.
 수동 생성 팀전 등 legacy-only 팀전은 기존 compatibility path로 유지한다.
 
 
 ## 18. 다음 단계
 
-1. P1-5 Records normalized team read 및 개인 / 팀 placement count 분리
-2. Team Builder → TeamSnapshot → 공식 Submission
-3. 챔피언스 운영 자동화
-4. Team Builder 자체 안정화 / 추가 UX
-5. Auth / RLS
-6. Production migration
+1. Team Builder → TeamSnapshot → RegistrationSubmission → 공식 Submission
+2. 챔피언스 운영 자동화
+3. Team Builder 자체 안정화 / 추가 UX
+4. Auth / RLS
+5. Production migration
 
 운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
 <!-- YPL_NORMALIZED_MODEL_V1_END -->
@@ -1709,8 +1708,8 @@ Application
 → Records
 ```
 
-개인전과 팀전의 Event-linked normalized write 전환은 P1-4까지 완료했다.
-현재 남은 전환 범위는 P1-5의 normalized team Records read와 개인 / 팀 placement count 분리다.
+개인전과 팀전의 Event-linked normalized write 전환 및 P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다.
+현재 다음 단계는 Team Builder → TeamSnapshot → RegistrationSubmission 연결이다.
 
 Team Builder / RegistrationSubmission / TeamSnapshot 연결은 신청→기록 흐름이 안정된 뒤 추가한다.
 
@@ -1881,7 +1880,7 @@ Test Event는 `제7회 파이컵라이트`이며 application Registration 4명(T
 
 Test 환경에서 `VITE_YPL_DATA_SCHEMA=ypl_schema_validation`이 명시된 경우에만 normalized Records read를 활성화한다. Production의 `public` schema 또는 명시되지 않은 환경에서는 기존 legacy Records 경로를 유지한다.
 
-공식 normalized 공개 범위는 `status=completed`, `record_applied_at IS NOT NULL`, 개인전 Event의 교집합이다. 이 Event는 다음 관계를 직접 읽는다.
+공식 normalized 공개 범위는 `status=completed`, `record_applied_at IS NOT NULL`, 개인전·팀전 Event의 교집합이다. 이 Event는 다음 관계를 직접 읽는다.
 
 ```text
 Event → Entry → EntryParticipant → Player
@@ -1893,7 +1892,10 @@ EventRegistration.final_submission_id → RegistrationSubmission → TeamSnapsho
 
 - 트레이너 identity는 이름이 아니라 `Player.id`를 사용한다. 동명이인은 별도 profile로 유지하며 fuzzy merge하지 않는다.
 - normalized Event ID가 `round.recordMeta.eventId` 또는 `bracket.eventId`에 연결되면 같은 legacy 회차와 대진표는 표시·집계에서 제외한다.
-- 과거 migrated Event 중 `record_applied_at`이 없는 기록과 팀전·챔피언스 기록은 legacy fallback으로 보존한다.
+- 과거 migrated Event 중 `record_applied_at`이 없는 기록과 legacy-only 팀전·챔피언스 기록은 legacy fallback으로 보존한다.
+- 팀전 공식 Result는 Team Entry당 1개로 읽고, `EntryParticipant`를 통해 각 Player profile history로 펼친다. history label은 `팀 우승`, `팀 준우승`, `팀 4강`이며 개인 placement count에는 포함하지 않는다.
+- 팀전 RankingAward는 저장된 ledger를 그대로 사용한다. Team Master 30 / 20, Team Light 15 / 10의 points-only 정책과 `win_delta = runner_up_delta = top4_delta = 0`을 projection에서 재계산하지 않는다.
+- normalized team Event와 `recordMeta.eventId`로 명시적으로 연결된 legacy round는 placement / history / archive 중복을 만들지 않는다. 연결된 legacy team bracket은 roster / Pokémon / 기존 Match compatibility source로 유지한다.
 - 누적·시즌 랭킹은 `RankingBaseline`에 placement / adjustment / reversal 등 전체 `RankingAward` ledger를 합산한다. `counts_series`와 `counts_season`을 각각 적용하고 동일 Award ID 및 동일 `(result_id, player_id)` placement를 중복 집계하지 않는다.
 - 공개 경기 수는 양쪽 Entry와 승자가 확정된 bracket Match만 계산한다. BYE, unresolved, cancelled는 제외하며 개인 승·패·승률 UI는 추가하지 않는다.
 - 포켓몬 기록은 final submission이 가리키는 immutable TeamSnapshot이 있으면 그 revision만 사용한다. Snapshot이 없을 때만 같은 Event/Player로 연결된 legacy party를 명시적으로 fallback한다.
@@ -1951,8 +1953,8 @@ Test Event `P1-1 팀전 E2E 테스트` (`964a0322-1bad-46ea-a4b0-6ff1eec71336`)�
 따라서 P1-1 Team Entry / EntryParticipant identity lifecycle은 Test DB 브라우저 E2E까지 완료됐다.
 
 P1-2 normalized team Match는 Test DB 브라우저 E2E까지 완료했다.
-P1-3 Team Result / player RankingAward와 P1-4 team record lifecycle도 Test DB 브라우저 E2E까지 완료했다.
-Event-linked canonical 팀전 write는 활성화됐으며 다음 단계는 P1-5 normalized team Records read다.
+P1-3 Team Result / player RankingAward, P1-4 team record lifecycle, P1-5 normalized team Records read도 Test DB 브라우저 E2E까지 완료했다.
+Event-linked canonical 팀전 write와 Records read가 활성화됐으며 P1 전체가 Test 환경 기준 완료됐다.
 
 ### Event 수정 / 삭제 일관성
 
@@ -1967,7 +1969,7 @@ Event가 연결된 신청 공지를 수정할 때 기존 Event의 다음 상태�
 ### 팀전
 
 Event-linked canonical 팀전은 normalized team participant identity, Team Entry, EntryParticipant를 사용한다.
-P1-4까지 팀전 Match / Result / RankingAward 및 legacy 기록 반영 lifecycle을 완료했다.
+P1-4까지 팀전 Match / Result / RankingAward 및 legacy 기록 반영 lifecycle을 완료했고, P1-5에서 normalized team Records read와 개인 / 팀 placement count 분리를 완료했다.
 legacy-only 팀전과 전환 이전 Bracket은 기존 compatibility path로 유지한다.
 
 ### 전환 원칙
@@ -1988,7 +1990,7 @@ legacy-only 팀전과 전환 이전 Bracket은 기존 compatibility path로 유�
 - 일반전 동점 시 UI에서는 `타이브레이커`를 사용하되 내부 `match_kind='ace'`, `series.ace`, `:ace` source key는 유지한다.
 - stable source key를 기준으로 기존 Match row를 갱신하며 변경되지 않은 경기의 `played_at`은 보존한다.
 - 결과 변경 시 stale child/downstream Match를 정리하고 legacy 저장 실패 시 snapshot을 복구한다.
-- 다음 단계는 P1-5 Records normalized team read 및 개인 / 팀 placement count 분리다.
+- P1-5 Records normalized team read 및 개인 / 팀 placement count 분리까지 완료했다.
 
 ## P1-3 normalized Team Result / player RankingAward
 
@@ -2009,7 +2011,26 @@ Test Event `P1-1 팀전 E2E 테스트`에서 팀전 기록 반영 / 취소 / 결
 
 ## P1-5 Records normalized team read
 
-다음 구현 단계는 팀전 normalized Records read와 개인 / 팀 placement count 분리다.
-canonical 정책상 팀전 placement는 개인 우승 / 준우승 / 4강 count에서 제외하지만,
-현재 `recordsAnalytics.js` / `normalizedRecordsProjection.js`의 legacy projection에는 아직 합산되는 경로가 남아 있다.
-이 count 분리는 P1-5에서 구현하며, 팀전 이력은 팀 우승 / 준우승 / 4강으로 계속 보존한다.
+P1-5는 normalized completed 팀전 Event를 Records read 대상에 포함하고 개인 / 팀 placement count를 분리하는 단계다. Test DB 브라우저 E2E와 local acceptance audit까지 완료했다.
+
+```text
+normalized completed Event
+→ Team Entry
+→ Result (Team Entry당 1개)
+→ EntryParticipant
+→ Player profile history
+```
+
+- 공식 Event는 `status = completed`이고 `record_applied_at IS NOT NULL`인 개인전·팀전을 읽는다.
+- 팀 history는 `팀 우승`, `팀 준우승`, `팀 4강`으로 보존한다.
+- 팀 placement는 legacy snapshot, normalized merged projection, RecordsPage profile hero의 개인 `wins / runnerUps / top4` count에서 제외한다.
+- 개인전 placement count와 기존 Player ID 기반 dedupe는 유지한다.
+- Team RankingAward는 저장된 ledger를 그대로 읽는다. Team Master는 멤버별 30 / 20, Team Light는 15 / 10이며, 팀 Award의 개인 placement count delta는 0이다.
+- 팀 4강 Result는 보존할 수 있고 RankingAward는 생성하지 않는다.
+- normalized team Event와 `recordMeta.eventId`로 명시적으로 연결된 legacy tournament round는 placement / history / archive에서 중복하지 않는다.
+- 연결된 legacy team bracket은 제거하지 않고 roster / Pokémon / 기존 Match compatibility source로 유지한다. 그 bracket에서 파생된 placement / history만 normalized team 기록과 중복하지 않도록 제외한다.
+- legacy-only 팀전, 과거 챔피언스 기록, legacy Pokémon fallback은 기존 compatibility path로 유지한다.
+- team_bout / ace Match는 normalized DB와 linked legacy compatibility source에 보존하지만 P1-5에서 새 Records 상세 UI는 추가하지 않는다.
+- `source` metadata는 projection / dedupe / debug 내부에 유지하고 일반 사용자 화면에는 표시하지 않는다. `m-a`, `m-b`, `none` 등 raw 내부 code도 UI에서 제거한다.
+
+Team Builder의 공식 roster 연결은 이 단계에 포함하지 않는다. `TeamSnapshot → RegistrationSubmission → EventRegistration` 연결은 다음 P2 단계에서 구현한다.

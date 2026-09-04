@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Reveal, StandTable } from "../components/index.js";
-import { buildRecordsSnapshot } from "../services/recordsAnalytics.js";
+import { buildRecordsSnapshot, displayRecordMeta, displayTeamName } from "../services/recordsAnalytics.js";
 import { buildNormalizedRecordsProjection } from "../services/normalizedRecordsProjection.js";
 import {
   fetchNormalizedRecordsSnapshot,
@@ -60,11 +60,11 @@ export default function RecordsPage({ data, admin, setModal, save }) {
       </Reveal>
 
       {normalizedRead.loading && (
-        <div className="records-read-state">normalized 기록을 불러오는 중입니다.</div>
+        <div className="records-read-state">공식 기록을 불러오는 중입니다.</div>
       )}
       {normalizedRead.error && (
         <div className="records-read-state is-error" role="alert">
-          <span>normalized 기록을 읽지 못해 아래에는 legacy 기록만 표시됩니다. {normalizedRead.error.message}</span>
+          <span>공식 기록을 읽지 못해 아래에는 기존 기록만 표시됩니다. 다시 시도해 주세요.</span>
           <button type="button" className="btn btn-sm" onClick={() => setReloadKey((value) => value + 1)}>다시 시도</button>
         </div>
       )}
@@ -101,8 +101,8 @@ function CoverageNote({ snapshot }) {
       <div>
         <b>현재 저장 자료 기준</b>
         <span>
-          과거·팀전 기록은 확인 가능한 legacy 자료를 유지합니다.
-          <strong>기록 반영이 완료된 normalized 개인전 Event</strong>는 Player ID, Entry, Result, RankingAward를 기준으로 표시합니다.
+          과거·팀전 기록은 확인 가능한 기존 자료를 유지합니다.
+          <strong>기록 반영이 완료된 공식 개인전·팀전 대회</strong>는 Player ID, Entry, Result, RankingAward를 기준으로 표시합니다.
           개인 승·패·승률 등 평가성 지표는 기본 공개 화면에 표시하지 않습니다.
         </span>
       </div>
@@ -134,10 +134,10 @@ function TrainerView({ snapshot }) {
   const history = profile.history.filter((p) => seasonMatch(p.season));
   const rosters = profile.rosters.filter((r) => seasonMatch(r.season));
 
-  // 팀전 입상도 트레이너의 우승/준우승/4강 기록에 포함한다.
-  const championships = placements.filter((p) => p.placement === "win").length;
-  const runnerUps = placements.filter((p) => p.placement === "ru").length;
-  const top4 = placements.filter((p) => p.placement === "sf").length;
+  const countablePlacements = placements.filter((p) => p.team !== true);
+  const championships = countablePlacements.filter((p) => p.placement === "win").length;
+  const runnerUps = countablePlacements.filter((p) => p.placement === "ru").length;
+  const top4 = countablePlacements.filter((p) => p.placement === "sf").length;
   const favoriteMap = new Map();
   for (const roster of rosters) {
     for (const pokemon of new Set(roster.pokemon || [])) {
@@ -205,27 +205,31 @@ function TrainerView({ snapshot }) {
                 .slice()
                 .sort((a, b) => (a.date < b.date ? 1 : -1))
                 .slice(0, 12)
-                .map((event) => (
-                  <div
-                    className={"records-history-row" + (event.championSeries ? " is-champions" : "")}
-                    key={`${event.id}:${event.playerId || profile.playerId || profile.key}:${event.placement}`}
-                  >
-                    <div>
-                      {event.championSeries && (
-                        <div className="records-history-kicker">CHAMPIONS SERIES</div>
-                      )}
-                      <b>
-                        {event.championSeries
-                          ? `챔피언스 시리즈 ${event.round || ""}회`
-                          : event.eventName || `${event.tournamentName}${event.round ? ` ${event.round}회` : ""}`}
-                      </b>
-                      <span>{[event.date, event.season, event.teamName ? `소속 ${event.teamName}` : "", event.rule].filter(Boolean).join(" · ")}</span>
+                .map((event) => {
+                  const teamName = displayTeamName(event.teamName);
+                  const rule = displayRecordMeta(event.rule);
+                  return (
+                    <div
+                      className={"records-history-row" + (event.championSeries ? " is-champions" : "")}
+                      key={`${event.id}:${event.playerId || profile.playerId || profile.key}:${event.placement}`}
+                    >
+                      <div>
+                        {event.championSeries && (
+                          <div className="records-history-kicker">CHAMPIONS SERIES</div>
+                        )}
+                        <b>
+                          {event.championSeries
+                            ? `챔피언스 시리즈 ${event.round || ""}회`
+                            : event.eventName || `${event.tournamentName}${event.round ? ` ${event.round}회` : ""}`}
+                        </b>
+                        <span>{[event.date, event.season, teamName, rule].filter(Boolean).join(" · ")}</span>
+                      </div>
+                      <strong className={"records-placement p-" + event.placement}>
+                        {event.resultLabel || placementLabel(event.placement, event.team)}
+                      </strong>
                     </div>
-                    <strong className={"records-placement p-" + event.placement}>
-                      {event.resultLabel || placementLabel(event.placement, event.team)}
-                    </strong>
-                  </div>
-                ))}
+                  );
+                })}
               {!history.length && <div className="none">현재 확인 가능한 대회 기록이 없습니다.</div>}
             </div>
           </section>
@@ -368,27 +372,27 @@ function TournamentArchiveView({ snapshot, data, admin, setModal }) {
   const renderRound = (tour, r, key, showCompetition = false) => {
     const rl = r.round ? (/^\d+$/.test(String(r.round)) ? String(r.round) + "회" : r.round) : "";
     const runnerUps = Array.isArray(r.ru) ? r.ru : split(r.ru);
+    const rule = displayRecordMeta(r.rule);
     return (
       <div className={"round2" + (r.championSeries || r.champ ? " champ" : "")} key={key}>
         <div className="r2-date tnum">{r.date}</div>
         <div className="r2-main">
-          {(showCompetition || r.eventName || rl || r.rule || r.team || r.championSeries || r.champ || r.season) && <div className="r2-head">
+          {(showCompetition || r.eventName || rl || rule || r.team || r.championSeries || r.champ || r.season) && <div className="r2-head">
             {showCompetition && <span className="r2-rule">{tour.label}</span>}
             {r.eventName && <span className="r2-event-name">{r.eventName}</span>}
             {rl && <span className="r2-round">{rl}</span>}
             {r.season && <span className="r2-season">{r.season}</span>}
             {(r.championSeries || r.champ) && <span className="r2-champ">챔피언스 시리즈</span>}
             {r.team && <span className="r2-mode">팀전</span>}
-            {r.rule && <span className="r2-rule">{r.rule}</span>}
-            {r.source === "normalized" && <span className="r2-source">NORMALIZED</span>}
+            {rule && <span className="r2-rule">{rule}</span>}
           </div>}
           <div className="r2-res">
             <span className="r2-rk gold">우승</span>
-            {r.win && <span className="r2-name win">{r.win}</span>}
+            {r.win && <span className="r2-name win">{r.team ? displayTeamName(r.win) : r.win}</span>}
             {r.winMembers && r.winMembers.length > 0 && <NameChips list={r.winMembers} kind="mem" />}
             {(runnerUps.length > 0 || (r.ruMembers && r.ruMembers.length > 0)) && <>
               <span className="r2-rk">준우승</span>
-              {r.team ? (runnerUps[0] && <span className="r2-name">{runnerUps[0]}</span>) : <NameChips list={runnerUps} />}
+              {r.team ? (runnerUps[0] && <span className="r2-name">{displayTeamName(runnerUps[0])}</span>) : <NameChips list={runnerUps} />}
               {r.ruMembers && r.ruMembers.length > 0 && <NameChips list={r.ruMembers} kind="mem" />}
             </>}
             {(r.sf || []).length > 0 && <>
@@ -396,7 +400,7 @@ function TournamentArchiveView({ snapshot, data, admin, setModal }) {
               {r.team
                 ? r.sf.map((nm, k) => (
                     <React.Fragment key={k}>
-                      {nm && <span className="r2-name">{nm}</span>}
+                      {nm && <span className="r2-name">{displayTeamName(nm)}</span>}
                       {(r.sfMembers || [])[k] && r.sfMembers[k].length > 0 && <NameChips list={r.sfMembers[k]} kind="mem" />}
                     </React.Fragment>
                   ))

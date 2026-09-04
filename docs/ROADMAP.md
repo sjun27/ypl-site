@@ -122,6 +122,7 @@ legacy 팀 participant에 entryId / memberIdentities 보존
 기록 반영 전 삭제 시 Entry / EntryParticipant / 이번 확정 identity 원복
 
 Event-linked canonical 팀전의 Match / Result / RankingAward / 기록 반영은 P1-4까지 구현 및 Test DB E2E를 완료했다.
+P1-5에서 normalized completed 팀전 Event의 Records read와 개인 / 팀 placement count 분리를 구현하고 전체 E2E를 완료했다.
 
 기존 legacy-only 팀전은 유지한다.
 
@@ -143,17 +144,17 @@ record_applied_at 기록
 대회 회차의 입상 필드 및 기록 반영 write
 누적 랭킹 / 시즌별 성적 write
 
-Records read는 Test의 P0-8부터 완료된 normalized 개인전 Event와 legacy 과거·팀전 기록을 합치는 hybrid 구조다.
+Records read는 Test의 P0-8부터 완료된 normalized 개인전 Event를 읽었고, P1-5에서 normalized 팀전 Event까지 확장한 hybrid 구조다.
 
 현재 정책:
 
 Master → 랭킹 반영 / 시즌 반영
 Light  → 랭킹 반영 / 시즌 반영
 Rookie → 랭킹 미반영 / 시즌 미반영
-Team   → Event-linked canonical write는 P1-4 완료, normalized Records team read는 P1-5 예정
+Team   → Event-linked canonical write 및 normalized Records team read는 P1-5 완료
 
 팀전 placement는 팀 이력으로 보존하되 개인 우승 / 준우승 / 4강 count에서는 제외하는 것이 canonical 정책이다.
-다만 현재 `recordsAnalytics.js` / `normalizedRecordsProjection.js`의 legacy projection에는 팀전 placement를 개인 count에 합산하는 경로가 남아 있으며, P1-5에서 분리한다.
+legacy와 normalized projection 모두 이 정책을 적용한다.
 기록 반영 취소 — Test 완료
 
 반영 취소 시:
@@ -179,8 +180,8 @@ legacy 저장 실패 시에도 이번 반영 과정에서 발생한 Player / Reg
 
 2.4 Records
 
-Test Records는 P0-8부터 기록 반영이 완료된 normalized 개인전 Event를 직접 읽는다.
-Production과 과거·팀전·챔피언스 기록은 기존 legacy `ypl_data_v4`를 유지한다.
+Test Records는 기록 반영이 완료된 normalized 개인전·팀전 Event를 직접 읽는다.
+Production과 legacy-only 과거·팀전·챔피언스 기록은 기존 legacy `ypl_data_v4`를 유지한다.
 
 구현된 기반:
 
@@ -190,7 +191,7 @@ Player ID 기준 트레이너 identity
 같은 Event의 normalized / legacy 회차 중복 억제
 RankingBaseline + RankingAward 원장 합산
 counts_series / counts_season 정책 반영
-최종 TeamSnapshot 우선, 없으면 연결된 legacy party fallback
+개인전은 최종 TeamSnapshot 우선, 없으면 연결된 legacy party fallback
 트레이너 기록
 대회 기록
 포켓몬 기록
@@ -199,7 +200,8 @@ counts_series / counts_season 정책 반영
 우승 / 준우승 / 4강
 팀전 placement는 팀 우승 / 준우승 / 4강 이력으로 보존
 개인 우승 / 준우승 / 4강 count에서는 제외하는 canonical 정책
-현재 legacy projection의 개인 count 합산은 P1-5에서 분리 예정
+linked legacy team bracket은 roster / Pokémon / 기존 Match compatibility source로 유지
+normalized team placement / history / archive와 연결 legacy round의 중복 표시를 차단
 시즌 3 이후 Match 원본 보존
 팀전 선발 경기 보존
 에이스 결정전 보존
@@ -392,12 +394,24 @@ normalized Result / RankingAward와 legacy 랭킹·시즌 기록의 동시 반�
 경기 결과 변경 후 재반영 시 새 우승·준우승 결과와 점수를 중복 없이 재생성
 팀전 점수 정책을 preview / legacy write / normalized RankingAward에서 동일하게 적용
 
-P1-5
-Records normalized team read 및 전체 E2E
+P1-5 — Records normalized team read 및 전체 E2E — 완료 / Test
 
-Event-linked canonical 팀전 write는 P1-4까지 완료했다.
-P1-5에서는 normalized team Records read와 개인 / 팀 placement count 분리를 구현한다.
-현재 legacy projection의 팀 placement 개인 count 합산은 아직 남아 있다.
+Event-linked canonical 팀전 write는 P1-4까지 완료했고, P1-5에서 Records read를 팀전까지 확장했다.
+completed + record_applied_at Event를 개인전·팀전 모두 normalized Records read 대상으로 포함한다.
+Team Entry당 Result 1개를 EntryParticipant를 통해 각 Player profile history로 펼친다.
+팀 history는 팀 우승 / 팀 준우승 / 팀 4강으로 표시하고, 팀 placement는 개인 wins / runnerUps / top4 count에서 제외한다.
+Team RankingAward는 저장된 ledger를 그대로 읽으며 Team Master 30 / 20, Team Light 15 / 10의 points-only 정책과 0 placement count delta를 유지한다.
+팀 4강 Result는 보존할 수 있고 RankingAward는 생성하지 않는다.
+normalized team Event와 명시적으로 연결된 legacy tournament round의 placement / history / archive 중복을 제거한다.
+linked legacy team bracket은 roster / Pokémon / 기존 Match compatibility source로 유지하며, 그 bracket의 placement / history는 normalized team 기록과 중복하지 않는다.
+legacy-only 팀전과 normalized individual Records dedupe / fallback은 기존 동작을 유지한다.
+Records 일반 사용자 화면에서는 source metadata와 raw 내부 code를 표시하지 않으며, team_bout / ace 상세 UI는 P1-5 범위에 추가하지 않았다.
+Test DB 브라우저 E2E와 local acceptance audit을 완료했다.
+
+P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다.
+
+다음 단계는 P2 Team Builder → TeamSnapshot → RegistrationSubmission이다.
+
 P2. Team Builder → 공식 파티 제출
 
 신청→기록 normalized 운영 흐름을 먼저 완성한 뒤 연결한다.
@@ -597,13 +611,19 @@ feature/records-system
 ✓ final TeamSnapshot 우선 / 명시적 legacy party fallback
 ✓ Test DB `ranking_baselines` anon SELECT 적용 및 권한 재조회
 ✓ 제7회 파이컵라이트 Records 트레이너·대회·랭킹·포켓몬 브라우저 E2E
+✓ P1-5 completed + record_applied_at 팀전 Event normalized Records read
+✓ Team Result → EntryParticipant → Player profile history projection
+✓ 팀 우승 / 준우승 / 4강 history와 개인 placement count 분리
+✓ Team Master 30 / 20, Team Light 15 / 10 RankingAward ledger read
+✓ linked legacy team bracket roster / Pokémon / Match compatibility 유지 및 placement/history/archive dedupe
+✓ Records UI source metadata 및 raw internal code 비노출
+✓ P1-5 Test DB browser E2E 및 local acceptance audit
 
 바로 다음
-1. P1-5 Records normalized team read 및 개인 / 팀 placement count 분리
+1. Team Builder → TeamSnapshot → RegistrationSubmission → 공식 Submission
 
 그 이후
-2. Team Builder → TeamSnapshot → 공식 Submission
-3. 챔피언스 운영 자동화
-4. Team Builder 자체 안정화 / 추가 UX
-5. Auth / RLS
-6. Production migration
+2. 챔피언스 운영 자동화
+3. Team Builder 자체 안정화 / 추가 UX
+4. Auth / RLS
+5. Production migration

@@ -51,7 +51,6 @@ export async function fetchNormalizedRecordsSnapshot() {
           championship_phase
         `)
         .eq("status", "completed")
-        .eq("is_team_event", false)
         .not("record_applied_at", "is", null),
       "공식 normalized Event를 읽지 못했습니다."
     ),

@@ -7,6 +7,31 @@ const splitNames = (value) =>
     .map(cleanName)
     .filter(Boolean);
 
+const HIDDEN_RECORD_VALUES = new Set(["none", "null", "undefined"]);
+const INTERNAL_RECORD_CODES = new Set(["m-a", "m-b"]);
+
+function cleanDisplayValue(value) {
+  if (value == null) return "";
+  const next = String(value).trim();
+  return HIDDEN_RECORD_VALUES.has(next.toLowerCase()) ? "" : next;
+}
+
+export function displayTeamName(value) {
+  const next = cleanDisplayValue(value);
+  if (/^\d+\s*팀$/i.test(next)) return next.replace(/\s+/g, "");
+  if (/^\d+$/.test(next)) return `${next}팀`;
+  return next;
+}
+
+export function displayRecordMeta(value) {
+  if (value == null) return "";
+  return String(value)
+    .split("·")
+    .map(cleanDisplayValue)
+    .filter((token) => token && !INTERNAL_RECORD_CODES.has(token.toLowerCase()))
+    .join(" · ");
+}
+
 export function parseParty(value) {
   if (Array.isArray(value)) {
     return value
@@ -908,9 +933,9 @@ export function buildRecordsSnapshot(data = {}) {
       const recorded = profile.placements;
       return {
         name,
-        wins: recorded.filter((p) => p.placement === "win").length,
-        runnerUps: recorded.filter((p) => p.placement === "ru").length,
-        top4: recorded.filter((p) => p.placement === "sf").length,
+        wins: recorded.filter((p) => p.team !== true && p.placement === "win").length,
+        runnerUps: recorded.filter((p) => p.team !== true && p.placement === "ru").length,
+        top4: recorded.filter((p) => p.team !== true && p.placement === "sf").length,
         matches: profile.matchSummary.total,
       };
     })
