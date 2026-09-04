@@ -86,7 +86,7 @@ legacy 팀전
 경기 결과 저장
 기록 반영 완료 대진표 잠금
 반영 취소 → 수정 → 재반영
-normalized Event 연결 — 개인전 구현 완료 / Test
+normalized Event 연결 — 개인전 구현 완료 + 팀전 P1-1 identity 구현 완료 / Test
 Event 선택
 → EventRegistration 조회
 → 신청자 기본 참가
@@ -112,10 +112,16 @@ Event 연결 개인전은 Event당 Bracket 하나만 허용한다.
 기록 반영 전 Bracket 삭제 시 해당 Bracket의 참가 확정 metadata를 기준으로
 Entry / EntryParticipant와 이번 확정에서 만든 identity 변경을 원복한다.
 
-아직 미구현
-팀전 Event의 멤버별 Registration/Player identity 확정
+팀전 P1-1 구현 완료 — Test
+EventRegistration의 실제 신청자와 팀 지망 답변 표시
+기존 수동 팀 편성 UI를 이용한 최종 팀 구성
+팀별 Team Entry 생성
+멤버별 EntryParticipant 생성
+Player / Registration identity 확정
+legacy 팀 participant에 entryId / memberIdentities 보존
+기록 반영 전 삭제 시 Entry / EntryParticipant / 이번 확정 identity 원복
 
-Event 연결 팀전은 위 구조가 완성될 때까지 차단한다.
+팀전 Match / Result / RankingAward / normalized 기록 반영은 아직 차단한다.
 
 기존 legacy-only 팀전은 유지한다.
 
@@ -345,19 +351,34 @@ P1. 팀전 normalized 연결
 
 개인전 end-to-end 흐름이 안정된 뒤 진행한다.
 
-EventRegistration의 팀 지망 정보 사용
-팀 편성
+P1-1 — Team Entry / EntryParticipant identity — 구현 및 Test DB E2E 완료
+EventRegistration의 registration_data.answers 팀 지망 정보 표시
+기존 수동 팀 편성 UI에서 최종 팀 구성 확정
 Team Entry 생성
 멤버별 EntryParticipant 생성
 Player identity 확정
-팀전 Match 생성
-에이스 Match 생성
+legacy 팀 participant에 normalized identity metadata 연결
+Event running 전환
+기록 반영 전 삭제 rollback
+삭제 후 재생성 시 중복 방지
+
+P1-2 — normalized team Match — 다음 단계
+팀 대 팀 부모 bracket Match 생성
+선발 개인 경기 team_bout 생성
+에이스 결정전 ace Match 생성
+legacy 팀전 경기 결과와 normalized Match 동기화
+
+P1-3
 팀 Result 생성
 선수별 RankingAward 생성
-팀전 기록 반영 / 취소
 
-완료 후 Event 연결 팀전 차단을 해제한다.
+P1-4
+팀전 기록 반영 / 취소 / 결과 변경 / 재반영 lifecycle
 
+P1-5
+Records normalized team read 및 전체 E2E
+
+P1 전체 완료 후 Event-linked 팀전 기록 반영 차단을 해제한다.
 P2. Team Builder → 공식 파티 제출
 
 신청→기록 normalized 운영 흐름을 먼저 완성한 뒤 연결한다.
@@ -559,7 +580,7 @@ feature/records-system
 ✓ 제7회 파이컵라이트 Records 트레이너·대회·랭킹·포켓몬 브라우저 E2E
 
 바로 다음
-1. P1 팀전 normalized 연결
+1. P1-2 normalized team Match
 
 그 이후
 2. Team Builder → TeamSnapshot → 공식 Submission

@@ -1659,3 +1659,64 @@ GRANT SELECT ON ypl_schema_validation.ranking_baselines TO anon;
 - 개인 승·패·승률 열 없음
 
 따라서 P0-8 Test normalized Records read 전환을 완료했다. 다음 단계는 P1 팀전 normalized 연결이며 Production 전환은 별도 migration 단계로 남긴다.
+
+## 2026-09-04 P1-1 Team Entry / EntryParticipant identity
+
+Event-linked 팀전의 참가 확정과 Team Entry identity 연결을 구현했다.
+
+- 신청자의 `registration_data.answers` 실제 form field ID를 읽어 팀 지망 답변 표시
+- 기존 팀명 / 쉼표 구분 팀원 입력 UI 유지
+- 팀별 `entry_type = team` Entry 생성
+- 각 멤버별 EntryParticipant 생성
+- 개인전과 동일한 exact-match Player identity 정책 재사용
+- legacy 팀 participant에 `entryId` 및 멤버별 `registrationId / playerId / entryParticipantId / memberOrder` 저장
+- Event당 연결 Bracket 중복 생성 차단
+- 생성 성공 후 Event `running` 전환
+- 실패 및 기록 반영 전 Bracket 삭제 시 identity rollback
+- team Match / Result / RankingAward / record apply는 아직 차단
+
+### Test DB 브라우저 E2E
+
+대상 Event:
+
+- `P1-1 팀전 E2E 테스트`
+- event_id `964a0322-1bad-46ea-a4b0-6ff1eec71336`
+- EventRegistration 20명
+- 기존 Player 연결 4명
+- 신규 identity 대상 16명
+
+최초 생성 결과:
+
+- Event `open → running`
+- Team Entry 4건
+- EntryParticipant 20건
+- Match 0건
+- Result 0건
+- RankingAward 0건
+- 기존 Player 4명 재사용
+- 신규 Player 16명 생성
+- 모든 팀의 member_order 1~5 정상
+
+삭제 rollback 결과:
+
+- Event `running → open`
+- Entry 4 → 0
+- EntryParticipant 20 → 0
+- 신규 Player 16명 제거
+- 신규 이름 Registration.player_id 다시 NULL
+- 기존 Player / Registration 연결 4명 보존
+- Match / Result / RankingAward 0건 유지
+
+동일 구성 재생성 결과:
+
+- Team Entry 정확히 4건
+- EntryParticipant 정확히 20건
+- 신규 Player 정확히 16명
+- duplicate EntryParticipant player 0건
+- duplicate EntryParticipant registration 0건
+- duplicate Team Entry name 0건
+- legacy Bracket의 `entryId / memberIdentities`와 normalized identity 일치
+
+자동 테스트는 기존 테스트를 포함해 43/43 통과했고 production build도 성공했다. 추가 DB 권한, RLS, Production DB는 변경하지 않았다.
+
+따라서 P1-1은 Test 환경 기준 완료했다. 다음 단계는 P1-2 normalized team Match다.

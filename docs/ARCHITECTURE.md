@@ -1897,6 +1897,55 @@ Test 프로젝트 `nmqrmvnjenjqityuhngb`의 `ypl_schema_validation.ranking_basel
 
 브라우저 E2E에서 `제7회 파이컵라이트`가 normalized 회차로 정확히 한 번 표시되고 Test6 우승 +30, Test1 준우승 +20, Test3 / Test4 4강 각 +10이 누적 및 YPL 시즌 3 랭킹에 중복 없이 반영되는 것을 확인했다. Test2 / Test5는 참가 기록만 표시된다. 기존 팀전·챔피언스 아카이브와 legacy 포켓몬 기록도 유지된다.
 
+### P1-1 Team Entry / EntryParticipant identity
+
+Event-linked 팀전의 실제 참가 확정 단계를 normalized 구조에 연결했다.
+
+신청자의 팀 지망은 `EventRegistration.registration_data.answers`에 저장된 실제 form field ID를 그대로 읽는다. P1-1에서는 이를 팀 편성 참고 정보로 표시하며 자동 배정 알고리즘은 추가하지 않았다. 최종 팀 구성은 기존 팀명 / 쉼표 구분 팀원 UI에서 운영자가 확정한다.
+
+팀 편성 확정 시 구조는 다음과 같다.
+
+```text
+EventRegistration
+→ Player identity 확정
+→ Team Entry
+   ├─ EntryParticipant
+   ├─ EntryParticipant
+   └─ ...
+→ legacy team Bracket participant
+```
+
+Team Entry는 `entry_type = team`이며 실제 팀 하나당 한 행을 생성한다. 각 팀원은 자신의 EventRegistration / Player와 연결된 EntryParticipant 한 행을 가진다. `member_order`는 최종 팀 편성 순서를 보존한다.
+
+legacy 팀 participant에는 팀의 `entryId`와 멤버별 `memberIdentities`를 저장한다. 각 member identity에는 `registrationId`, `playerId`, `entryParticipantId`, `memberOrder`가 포함된다.
+
+Player 식별 정책은 개인전과 동일하다. 신청 시 이미 exact single match된 Player는 재사용하고, 실제 참가 확정 시 아직 NULL인 Registration은 exact match를 다시 수행한다. 0명이면 신규 Player를 만들고 2명 이상이면 자동 확정을 중단한다. fuzzy match는 사용하지 않는다.
+
+기록 반영 전 Bracket 삭제 시 FK 역순으로 EntryParticipant와 Team Entry를 제거하고, 이번 참가 확정에서만 연결하거나 생성한 Registration / Player identity를 원복한다. 기존 Player와 신청 단계에서 이미 연결돼 있던 Registration.player_id는 보존한다.
+
+#### P1-1 Test DB E2E
+
+Test Event `P1-1 팀전 E2E 테스트` (`964a0322-1bad-46ea-a4b0-6ff1eec71336`)에서 20명으로 실제 브라우저 E2E를 진행했다.
+
+- EventRegistration 20명
+- 기존 Player exact match 4명, 미확정 16명
+- 추가 질문으로 저장된 1지망 / 2지망 / 3지망 답변 표시 확인
+- 4팀 × 5명으로 수동 팀 편성
+- Team Entry 4건
+- EntryParticipant 20건
+- Event `open → running`
+- Match / Result / RankingAward 0건 유지
+- 기존 Player 4명 재사용
+- 신규 이름 16명의 Player 생성 및 Registration link
+
+기록 반영 전 Bracket 삭제 후에는 Entry와 EntryParticipant가 모두 0건으로 제거됐고 Event가 `open`으로 복구됐다. 신규 Player 16명은 제거되고 해당 Registration.player_id는 다시 NULL이 됐으며 기존 Player 연결 4명은 그대로 유지됐다.
+
+같은 Event에서 동일 팀 구성으로 다시 대진표를 생성한 결과 Team Entry 4건 / EntryParticipant 20건이 다시 정확히 생성됐고 중복 Player 참가, 중복 Registration 사용, 중복 Team Entry는 모두 0건이었다. legacy Bracket의 `entryId` / `memberIdentities`도 재생성된 normalized identity와 일치했다.
+
+따라서 P1-1 Team Entry / EntryParticipant identity lifecycle은 Test DB 브라우저 E2E까지 완료됐다.
+
+다음 단계는 P1-2 normalized team Match이며, 그 전까지 Event-linked 팀전의 normalized Match / Result / RankingAward / 기록 반영은 계속 차단한다.
+
 ### Event 수정 / 삭제 일관성
 
 Event가 연결된 신청 공지를 수정할 때 기존 Event의 다음 상태를 보존한다.

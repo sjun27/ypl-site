@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries } from "../services/index.js";
+import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries } from "../services/index.js";
+import { getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -314,7 +315,7 @@ function downloadBracketPng(b,nameOf){
   bkDownload(cv,`${b.name}_대진표.png`);
 }
 
-function BracketWizard({ onClose, onCreate }){
+function BracketWizard({ data, onClose, onCreate }){
   const [step,setStep]=useState(1);
   const [name,setName]=useState("");
   const [mode,setMode]=useState("single");      // single=개인전, team=팀전
@@ -375,6 +376,9 @@ function BracketWizard({ onClose, onCreate }){
         const n=Math.max(2,participantNames.length);
         setCountStr(String(n));
         setNames(Array.from({length:n},(_,i)=>participantNames[i]||""));
+      }else{
+        setCountStr("8");
+        setTeams(Array(8).fill(null).map(()=>({name:"",members:""})));
       }
     }catch(error){
       setEventError(error?.message||"신청자 목록을 불러오지 못했습니다.");
@@ -418,10 +422,6 @@ function BracketWizard({ onClose, onCreate }){
   };
   const go=async()=>{
     if(creating)return;
-    if(eventId&&mode==="team"){
-      alert("연결된 팀전 Event의 참가자 identity 연동은 아직 지원하지 않습니다. 팀전 normalized 연동 구현 후 사용할 수 있습니다.");
-      return;
-    }
     const parts=buildParticipants();
     if(parts.length<2){ alert("참가자(팀)를 2개 이상 입력해주세요."); return; }
     if(format==="group"&&parts.length<gN*2){ alert("그룹 수에 비해 참가자가 너무 적습니다."); return; }
@@ -441,6 +441,14 @@ function BracketWizard({ onClose, onCreate }){
     }
     if(created)onClose();
   };
+  const linkedEvent=events.find(event=>event.id===eventId)||null;
+  const linkedAnnouncement=(data?.announcements||[]).find(announcement=>
+    announcement.id===linkedEvent?.registration_settings?.announcementId
+  );
+  const linkedFields=linkedAnnouncement?.form?.fields||[];
+  const assignedTeamsFor=(name)=>teams
+    .filter(team=>(team.members||"").split(/[,\n]/).map(value=>value.trim()).includes(name))
+    .map(team=>(team.name||"").trim()||"이름 없는 팀");
   return (<Modal title="새 대회 만들기" onClose={onClose}>
     <div className="swap" key={step}>
     {step===1&&<>
@@ -602,6 +610,31 @@ function BracketWizard({ onClose, onCreate }){
           </button>
         </div>
       </> : <>
+        {eventId&&mode==="team"&&<div className="field">
+          <label>신청자 / 팀 지망</label>
+          <div className="bk-hint">신청서에 저장된 팀 지망을 참고해 아래 기존 팀 편성 입력에서 최종 배정합니다.</div>
+          <div className="bk-fill">
+            {eventRegs.map((reg,i)=>{
+              const answers=getTeamRegistrationAnswerEntries(reg,linkedFields);
+              const assigned=assignedTeamsFor(reg.registration_name);
+              return <div className="bk-pin" key={reg.id} style={{animationDelay:(i*22)+"ms"}}>
+                <span className="bk-pin-no">{i+1}</span>
+                <div style={{flex:1,minWidth:0}}>
+                  <b>{reg.registration_name}</b>
+                  <div className="bk-hint" style={{marginTop:3}}>
+                    {answers.length
+                      ? answers.map(answer=>`${answer.label}: ${answer.value||"-"}`).join(" · ")
+                      : "저장된 팀 지망 답변 없음"}
+                  </div>
+                </div>
+                <span className="bk-hint" style={{margin:0}}>
+                  {assigned.length===0?"미배정":assigned.length===1?assigned[0]:"중복 배정"}
+                </span>
+              </div>;
+            })}
+          </div>
+        </div>}
+
         <div className="field"><label>{mode==="team"?"팀 수":"참가자 수"}</label>
           <div className="bk-count">
             <button type="button" onClick={()=>setCnt(Math.max(2,count-1))}>−</button>
@@ -1611,7 +1644,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   const [drawId,setDrawId]=useState(null);
   const open=list.find(b=>b.id===openId);
   const create=async(b)=>{
-    if(b.eventId&&b.mode!=="team"&&list.some(existing=>existing.eventId===b.eventId)){
+    if(b.eventId&&list.some(existing=>existing.eventId===b.eventId)){
       flash("이 Event에 연결된 대진표가 이미 있습니다.");
       return false;
     }
@@ -1625,7 +1658,9 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
 
     let confirmation;
     try{
-      confirmation=await confirmEventParticipantsForBracket(b.eventId,b.participants||[]);
+      confirmation=b.mode==="team"
+        ? await confirmEventTeamsForBracket(b.eventId,b.participants||[])
+        : await confirmEventParticipantsForBracket(b.eventId,b.participants||[]);
     }catch(error){
       flash(`참가 확정 실패: ${error?.message||"알 수 없는 오류"}`);
       return false;
@@ -1635,13 +1670,16 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
       ...b,
       participants:(b.participants||[]).map(participant=>{
         const resolved=confirmation.participants.find(row=>row.id===participant.id);
-        return resolved?{
-          ...participant,
-          registrationId:resolved.registrationId,
-          playerId:resolved.playerId,
-          entryId:resolved.entryId,
-          entryParticipantId:resolved.entryParticipantId,
-        }:participant;
+        if(!resolved)return participant;
+        return b.mode==="team"
+          ? {...participant,entryId:resolved.entryId,memberIdentities:resolved.memberIdentities}
+          : {
+              ...participant,
+              registrationId:resolved.registrationId,
+              playerId:resolved.playerId,
+              entryId:resolved.entryId,
+              entryParticipantId:resolved.entryParticipantId,
+            };
       }),
       participantConfirmation:{
         eventId:b.eventId,
@@ -1735,9 +1773,15 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
         return;
       }
       identityChanges=Array.isArray(confirmation.identityChanges)?confirmation.identityChanges:[];
+      const expectedIdentityCount=b.mode==="team"
+        ? (b.participants||[]).reduce((sum,participant)=>sum+(participant.members||[]).length,0)
+        : (b.participants||[]).length;
       if(
-        identityChanges.length!==(b.participants||[]).length||
-        identityChanges.some(change=>!change?.participantId||!change?.registrationId||!change?.playerId||!change?.entryId||!change?.entryParticipantId)
+        identityChanges.length!==expectedIdentityCount||
+        identityChanges.some(change=>
+          !change?.participantId||!change?.registrationId||!change?.playerId||!change?.entryId||!change?.entryParticipantId||
+          (b.mode==="team"&&(!change?.teamParticipantId||!change?.memberOrder))
+        )
       ){
         flash("대진표의 참가 확정 metadata가 불완전해 자동 삭제를 중단했습니다.");
         return;
@@ -1821,7 +1865,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
       <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" disabled={!!open.applied} title={open.applied?"기록 반영 취소 후 삭제할 수 있습니다.":""} onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
       {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} refresh={refresh} onApply={(b,res)=>setApply({b,res})}/>}
     </div>}
-    {wizard&&<BracketWizard onClose={()=>setWizard(false)} onCreate={create}/>}
+    {wizard&&<BracketWizard data={data} onClose={()=>setWizard(false)} onCreate={create}/>}
     {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} refresh={refresh} onClose={()=>setApply(null)}/>}
   </section>);
 }

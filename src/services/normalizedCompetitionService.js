@@ -14,6 +14,10 @@ import {
   buildEventRankingAwardSnapshot,
   samePlacementAwardValues,
 } from "./bracketRankingAwardSnapshot.js";
+import {
+  attachConfirmedTeamIdentities,
+  buildTeamMemberCandidates,
+} from "./bracketTeamParticipants.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -1101,7 +1105,11 @@ function actualIndividualParticipants(participants = [], emptyMessage) {
   return actual;
 }
 
-async function preflightEventParticipantIdentities(eventId, participants, { requireEmptyEntries = false } = {}) {
+async function preflightEventParticipantIdentities(
+  eventId,
+  participants,
+  { requireEmptyEntries = false, requireTeamEvent = false } = {}
+) {
   const actualParticipants = actualIndividualParticipants(
     participants,
     "확정할 실제 참가자가 없습니다."
@@ -1109,7 +1117,12 @@ async function preflightEventParticipantIdentities(eventId, participants, { requ
 
   const event = await getEvent(eventId);
   if (!event) throw new Error("연결된 대회를 찾을 수 없습니다.");
-  if (event.is_team_event) throw new Error("팀전 Event의 참가자 확정은 아직 지원하지 않습니다.");
+  if (requireTeamEvent && !event.is_team_event) {
+    throw new Error("개인전 Event에는 팀 참가자를 확정할 수 없습니다.");
+  }
+  if (!requireTeamEvent && event.is_team_event) {
+    throw new Error("팀전 Event에는 개인 참가자를 확정할 수 없습니다.");
+  }
   if (!["open", "running"].includes(event.status) || event.record_applied_at) {
     throw new Error("현재 참가자를 확정할 수 없는 대회입니다.");
   }
@@ -1484,6 +1497,107 @@ export async function confirmEventParticipantsForBracket(eventId, participants =
       entryWasCreated: !!row.entryWasCreated,
     })),
   };
+}
+
+export async function confirmEventTeamsForBracket(eventId, participants = []) {
+  if (!eventId) throw new Error("연결된 Event가 없습니다.");
+
+  const { teams, members } = buildTeamMemberCandidates(participants);
+  const { event, actualParticipants, plans } = await preflightEventParticipantIdentities(
+    eventId,
+    members,
+    { requireEmptyEntries: true, requireTeamEvent: true }
+  );
+  const resolved = await writeEventParticipantIdentities(eventId, plans);
+
+  try {
+    for (const team of teams) {
+      const teamMembers = resolved
+        .filter(member => member.teamParticipantId === team.id)
+        .sort((a, b) => a.memberOrder - b.memberOrder);
+      const entryId = newDatabaseId();
+
+      teamMembers.forEach((member, index) => {
+        member.entryId = entryId;
+        member.entryWasCreated = index === 0;
+      });
+
+      const { data: entry, error: entryError } = await db()
+        .from("entries")
+        .insert({
+          id: entryId,
+          event_id: eventId,
+          entry_type: "team",
+          display_name: team.name,
+          status: "active",
+        })
+        .select("id")
+        .single();
+
+      if (entryError) fail(entryError, `'${team.name}' 팀 Entry를 생성하지 못했습니다.`);
+
+      for (const member of teamMembers) {
+        const entryParticipantId = newDatabaseId();
+        member.entryId = entry.id;
+        member.entryParticipantId = entryParticipantId;
+
+        const { data: entryParticipant, error: participantError } = await db()
+          .from("entry_participants")
+          .insert({
+            id: entryParticipantId,
+            event_id: eventId,
+            entry_id: entry.id,
+            registration_id: member.registrationId,
+            player_id: member.playerId,
+            member_order: member.memberOrder,
+          })
+          .select("id")
+          .single();
+
+        if (participantError) {
+          fail(participantError, `'${team.name}' 팀의 ${member.name} EntryParticipant를 생성하지 못했습니다.`);
+        }
+        member.entryParticipantId = entryParticipant.id;
+      }
+    }
+
+    if (
+      resolved.length !== actualParticipants.length ||
+      resolved.some(row => !row.playerId || !row.registrationId || !row.entryId || !row.entryParticipantId)
+    ) {
+      throw new Error("모든 팀 참가자의 Player/Registration/Entry identity를 확정하지 못했습니다.");
+    }
+
+    const confirmedTeams = attachConfirmedTeamIdentities(teams, resolved);
+
+    return {
+      eventId,
+      previousEventStatus: event.status,
+      confirmedAt: new Date().toISOString(),
+      participants: confirmedTeams,
+      identityChanges: resolved.map(row => ({
+        participantId: row.id,
+        teamParticipantId: row.teamParticipantId,
+        name: row.name,
+        memberOrder: row.memberOrder,
+        registrationId: row.registrationId,
+        playerId: row.playerId,
+        entryId: row.entryId,
+        entryParticipantId: row.entryParticipantId,
+        playerWasCreated: !!row.playerWasCreated,
+        registrationWasCreated: !!row.registrationWasCreated,
+        registrationPlayerWasLinked: !!row.registrationPlayerWasLinked,
+        entryWasCreated: !!row.entryWasCreated,
+      })),
+    };
+  } catch (error) {
+    try {
+      await rollbackEventParticipantConfirmation(eventId, resolved);
+    } catch (rollbackError) {
+      throw rollbackFailure(error, rollbackError.rollbackErrors || [rollbackError]);
+    }
+    throw error;
+  }
 }
 
 export async function validateEventParticipantEntries(eventId, participants = []) {
