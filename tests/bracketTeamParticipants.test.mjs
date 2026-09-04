@@ -3,7 +3,12 @@ import test from "node:test";
 
 import {
   attachConfirmedTeamIdentities,
+  buildDefaultTeamMatchLineups,
+  buildTeamMatchSeries,
   buildTeamMemberCandidates,
+  getApplicationEventDivisionOptions,
+  getConfirmedTeamMemberIdentities,
+  normalizeApplicationEventDivision,
   getTeamRegistrationAnswerEntries,
 } from "../src/services/bracketTeamParticipants.js";
 
@@ -46,6 +51,7 @@ test("team members are flattened without changing the legacy team participant sh
     ["team-a:member:2", "team-a", 2, "나"],
     ["team-b:member:1", "team-b", 1, "다"],
   ]);
+  assert.deepEqual(result.members.map(member => member.role), ["captain", null, "captain"]);
 });
 
 test("team confirmation adds one team Entry and member-level identities", () => {
@@ -77,8 +83,8 @@ test("team confirmation adds one team Entry and member-level identities", () => 
     members: ["가", "나"],
     entryId: "entry-a",
     memberIdentities: [
-      { name: "가", memberOrder: 1, registrationId: "reg-a", playerId: "player-a", entryParticipantId: "ep-a" },
-      { name: "나", memberOrder: 2, registrationId: "reg-b", playerId: "player-b", entryParticipantId: "ep-b" },
+      { name: "가", memberOrder: 1, role: "captain", registrationId: "reg-a", playerId: "player-a", entryParticipantId: "ep-a" },
+      { name: "나", memberOrder: 2, role: null, registrationId: "reg-b", playerId: "player-b", entryParticipantId: "ep-b" },
     ],
   }]);
 });
@@ -87,5 +93,128 @@ test("team confirmation rejects a team without members", () => {
   assert.throws(
     () => buildTeamMemberCandidates([{ id: "team-a", name: "A팀", members: [] }]),
     /참가 선수가 없습니다/,
+  );
+});
+
+test("confirmed member order has exactly one captain at member_order 1", () => {
+  const team = {
+    name: "A팀",
+    memberIdentities: [
+      { name: "나", memberOrder: 2, role: null, playerId: "player-b" },
+      { name: "가", memberOrder: 1, role: "captain", playerId: "player-a" },
+    ],
+  };
+
+  assert.deepEqual(
+    getConfirmedTeamMemberIdentities(team).map(member => [member.name, member.memberOrder, member.role]),
+    [["가", 1, "captain"], ["나", 2, null]]
+  );
+
+  assert.throws(
+    () => getConfirmedTeamMemberIdentities({
+      ...team,
+      memberIdentities: team.memberIdentities.map(member => ({ ...member, role: "captain" })),
+    }),
+    /captain 역할이 중복/
+  );
+});
+
+function confirmedTeam(name, memberNames) {
+  return {
+    name,
+    members: memberNames,
+    memberIdentities: memberNames.map((memberName, index) => ({
+      name: memberName,
+      memberOrder: index + 1,
+      role: index === 0 ? "captain" : null,
+      playerId: `${name}-${memberName}`,
+    })),
+  };
+}
+
+test("default team Match lineup uses max roster size and leaves smaller-team extras unresolved", () => {
+  const fourA = confirmedTeam("A", ["A1", "A2", "A3", "A4"]);
+  const fourB = confirmedTeam("B", ["B1", "B2", "B3", "B4"]);
+  assert.deepEqual(buildDefaultTeamMatchLineups(fourA, fourB), {
+    normalBoutCount: 4,
+    lineupA: ["A1", "A2", "A3", "A4"],
+    lineupB: ["B1", "B2", "B3", "B4"],
+    captainA: "A1",
+    captainB: "B1",
+  });
+
+  const fiveA = confirmedTeam("A", ["A1", "A2", "A3", "A4", "A5"]);
+  assert.deepEqual(buildDefaultTeamMatchLineups(fiveA, fourB), {
+    normalBoutCount: 5,
+    lineupA: ["A1", "A2", "A3", "A4", "A5"],
+    lineupB: ["B1", "B2", "B3", "B4", null],
+    captainA: "A1",
+    captainB: "B1",
+  });
+});
+
+test("actual lineup supports substitutions and duplicate appearances without changing canonical order", () => {
+  const teamA = confirmedTeam("A", ["A1", "A2", "A3", "A4", "A5"]);
+  const teamB = confirmedTeam("B", ["B1", "B2", "B3", "B4"]);
+  const canonicalBefore = teamA.memberIdentities.map(member => ({ ...member }));
+  const result = buildTeamMatchSeries(teamA, teamB, {
+    lineupA: ["A2", "A2", "A3", "A4", "A5"],
+    lineupB: ["B1", "B2", "B3", "B4", "B2"],
+    games: ["a", "b", "a", "b", "a"],
+  });
+
+  assert.equal(result.winnerSide, "a");
+  assert.deepEqual(result.series.lineupA, ["A2", "A2", "A3", "A4", "A5"]);
+  assert.deepEqual(result.series.lineupB, ["B1", "B2", "B3", "B4", "B2"]);
+  assert.equal(result.series.ace, null);
+  assert.deepEqual(teamA.memberIdentities, canonicalBefore);
+});
+
+test("tied normal bouts default Ace candidates to captains but persist editable actual Ace players", () => {
+  const teamA = confirmedTeam("1팀", ["A", "B", "E", "F"]);
+  const teamB = confirmedTeam("2팀", ["C", "D", "G", "H"]);
+
+  const defaults = buildDefaultTeamMatchLineups(teamA, teamB);
+  assert.deepEqual([defaults.captainA, defaults.captainB], ["A", "C"]);
+
+  const tied = buildTeamMatchSeries(teamA, teamB, {
+    lineupA: ["A", "B", "E", "F"],
+    lineupB: ["C", "D", "G", "H"],
+    games: ["a", "b", "a", "b"],
+    ace: { a: "B", b: "D", winner: "b" },
+  });
+  assert.deepEqual(tied, {
+    winnerSide: "b",
+    series: {
+      lineupA: ["A", "B", "E", "F"],
+      lineupB: ["C", "D", "G", "H"],
+      games: ["a", "b", "a", "b"],
+      ace: { a: "B", b: "D", winner: "b" },
+    },
+  });
+
+  const notTied = buildTeamMatchSeries(teamA, teamB, {
+    lineupA: ["A", "B", "E", "F"],
+    lineupB: ["C", "D", "G", "H"],
+    games: ["a", "a", "a", "b"],
+    ace: { a: "B", b: "D", winner: "b" },
+  });
+  assert.equal(notTied.winnerSide, "a");
+  assert.equal(notTied.series.ace, null);
+});
+
+test("application Event division choices separate team structure from classification", () => {
+  assert.deepEqual(getApplicationEventDivisionOptions(false), ["rookie", "master", "light"]);
+  assert.deepEqual(getApplicationEventDivisionOptions(true), ["master", "light"]);
+  assert.ok(!getApplicationEventDivisionOptions(false).includes("none"));
+  assert.ok(!getApplicationEventDivisionOptions(true).includes(""));
+
+  assert.equal(normalizeApplicationEventDivision(null, true), "master");
+  assert.equal(normalizeApplicationEventDivision("rookie", true), "master");
+  assert.equal(normalizeApplicationEventDivision("light", true), "light");
+  assert.equal(normalizeApplicationEventDivision(null, false), "master");
+  assert.equal(
+    normalizeApplicationEventDivision(null, true, { preserveLegacy: true }),
+    null
   );
 });

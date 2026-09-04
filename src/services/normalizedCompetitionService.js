@@ -3,6 +3,7 @@ import {
   LEGACY_BRACKET_RUNTIME_SOURCE,
   buildBracketMatchSyncPlan,
   buildEventBracketMatchSnapshot,
+  resolveBracketMatchParentIds,
 } from "./bracketMatchSnapshot.js";
 import {
   bracketResultIdentityState,
@@ -87,10 +88,10 @@ function bracketMatchIdentityState(eventId, bracket) {
   if (!bracket || (bracket.eventId && bracket.eventId !== eventId)) {
     throw new Error("normalized Match 대상 Event와 대진표 연결이 일치하지 않습니다.");
   }
-  if (bracket.mode === "team") return { eligible: false, reason: "team_event" };
-
   const participants = (bracket.participants || [])
-    .filter(participant => !Array.isArray(participant?.members));
+    .filter(participant => bracket.mode === "team"
+      ? Array.isArray(participant?.members)
+      : !Array.isArray(participant?.members));
   if (!participants.length) return { eligible: false, reason: "legacy_bracket" };
 
   const entryLinkedCount = participants.filter(participant => participant?.entryId).length;
@@ -107,46 +108,37 @@ function bracketMatchIdentityState(eventId, bracket) {
   return { eligible: true, participants };
 }
 
-async function syncEventBracketMatchesNow(eventId, bracket) {
-  const identityState = bracketMatchIdentityState(eventId, bracket);
-  if (!identityState.eligible) {
-    return { skipped: true, reason: identityState.reason, inserted: 0, updated: 0, deleted: 0 };
-  }
+const EVENT_RUNTIME_MATCH_SELECT = `
+  id,
+  source_node_key,
+  match_kind,
+  parent_match_id,
+  round_number,
+  stage_label,
+  sequence_no,
+  entry_a_id,
+  entry_b_id,
+  player_a_id,
+  player_b_id,
+  winner_entry_id,
+  winner_player_id,
+  resolution,
+  played_at
+`;
 
-  const event = await getEvent(eventId);
-  if (!event) throw new Error("normalized Match를 연결할 Event를 찾을 수 없습니다.");
-  if (event.is_team_event) {
-    throw new Error("팀전 Event의 normalized Match 동기화는 아직 지원하지 않습니다.");
-  }
-
-  const desiredRows = buildEventBracketMatchSnapshot(bracket);
-  const { data: existingRows, error: selectError } = await db()
+async function readEventRuntimeMatchesNow(eventId) {
+  const { data, error } = await db()
     .from("matches")
-    .select(`
-      id,
-      source_node_key,
-      match_kind,
-      round_number,
-      stage_label,
-      sequence_no,
-      entry_a_id,
-      entry_b_id,
-      player_a_id,
-      player_b_id,
-      winner_entry_id,
-      winner_player_id,
-      resolution,
-      played_at
-    `)
+    .select(EVENT_RUNTIME_MATCH_SELECT)
     .eq("event_id", eventId)
     .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE);
 
-  if (selectError) fail(selectError, "기존 normalized Match를 확인하지 못했습니다.");
+  if (error) fail(error, "기존 normalized Match를 확인하지 못했습니다.");
+  return data || [];
+}
 
-  const now = new Date().toISOString();
-  const plan = buildBracketMatchSyncPlan(existingRows || [], desiredRows, now);
-
-  for (const update of plan.updates) {
+async function updateEventRuntimeMatchesNow(eventId, updates, now) {
+  for (const update of updates) {
     const { data, error } = await db()
       .from("matches")
       .update({ ...update.payload, updated_at: now })
@@ -159,45 +151,119 @@ async function syncEventBracketMatchesNow(eventId, bracket) {
     if (error) fail(error, `normalized Match '${update.payload.source_node_key}'를 수정하지 못했습니다.`);
     if (!data) throw new Error(`normalized Match '${update.payload.source_node_key}'가 동기화 중 변경되었습니다.`);
   }
+}
 
-  if (plan.inserts.length) {
-    const { data, error } = await db()
-      .from("matches")
-      .insert(plan.inserts.map(row => ({
-        ...row,
-        event_id: eventId,
-        source: LEGACY_BRACKET_RUNTIME_SOURCE,
-        updated_at: now,
-      })))
-      .select("id");
+async function insertEventRuntimeMatchesNow(eventId, rows, now, preserveIds = false) {
+  if (!rows.length) return;
+  const payloads = rows.map(row => {
+    const { id, ...values } = row;
+    return {
+      ...values,
+      ...(preserveIds && id ? { id } : {}),
+      event_id: eventId,
+      source: LEGACY_BRACKET_RUNTIME_SOURCE,
+      updated_at: now,
+    };
+  });
 
-    if (error) fail(error, "신규 normalized Match를 생성하지 못했습니다.");
-    if ((data || []).length !== plan.inserts.length) {
-      throw new Error("일부 신규 normalized Match가 저장되지 않았습니다.");
-    }
+  const { data, error } = await db()
+    .from("matches")
+    .insert(payloads)
+    .select("id");
+
+  if (error) fail(error, "신규 normalized Match를 생성하지 못했습니다.");
+  if ((data || []).length !== rows.length) {
+    throw new Error("일부 신규 normalized Match가 저장되지 않았습니다.");
+  }
+}
+
+async function deleteEventRuntimeMatchIdsNow(eventId, ids) {
+  if (!ids.length) return;
+  const { data, error } = await db()
+    .from("matches")
+    .delete()
+    .eq("event_id", eventId)
+    .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+    .in("id", ids)
+    .select("id");
+
+  if (error) fail(error, "더 이상 성립하지 않는 normalized Match를 정리하지 못했습니다.");
+  if ((data || []).length !== ids.length) {
+    throw new Error("일부 stale normalized Match가 삭제되지 않았습니다.");
+  }
+}
+
+async function deleteEventRuntimeMatchRowsNow(eventId, rows) {
+  const children = rows.filter(row => row?.id && row.match_kind !== "bracket").map(row => row.id);
+  const parents = rows.filter(row => row?.id && row.match_kind === "bracket").map(row => row.id);
+  await deleteEventRuntimeMatchIdsNow(eventId, children);
+  await deleteEventRuntimeMatchIdsNow(eventId, parents);
+}
+
+async function replaceEventRuntimeMatchesNow(eventId, rows) {
+  const snapshot = Array.isArray(rows) ? rows : [];
+  const currentRows = await readEventRuntimeMatchesNow(eventId);
+  await deleteEventRuntimeMatchRowsNow(eventId, currentRows);
+
+  const now = new Date().toISOString();
+  const parents = snapshot.filter(row => row.match_kind === "bracket");
+  const children = snapshot.filter(row => row.match_kind !== "bracket");
+  await insertEventRuntimeMatchesNow(eventId, parents, now, true);
+  await insertEventRuntimeMatchesNow(eventId, children, now, true);
+}
+
+async function syncEventBracketMatchesNow(eventId, bracket) {
+  const identityState = bracketMatchIdentityState(eventId, bracket);
+  if (!identityState.eligible) {
+    return { skipped: true, reason: identityState.reason, inserted: 0, updated: 0, deleted: 0 };
   }
 
-  if (plan.deleteIds.length) {
-    const { data, error } = await db()
-      .from("matches")
-      .delete()
-      .eq("event_id", eventId)
-      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
-      .in("id", plan.deleteIds)
-      .select("id");
-
-    if (error) fail(error, "더 이상 성립하지 않는 normalized Match를 정리하지 못했습니다.");
-    if ((data || []).length !== plan.deleteIds.length) {
-      throw new Error("일부 stale normalized Match가 삭제되지 않았습니다.");
-    }
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("normalized Match를 연결할 Event를 찾을 수 없습니다.");
+  if (Boolean(event.is_team_event) !== (bracket.mode === "team")) {
+    throw new Error("Event의 팀전 구분과 대진표 모드가 일치하지 않습니다.");
   }
 
-  return {
-    skipped: false,
-    inserted: plan.inserts.length,
-    updated: plan.updates.length,
-    deleted: plan.deleteIds.length,
-  };
+  const desiredRows = buildEventBracketMatchSnapshot(bracket);
+  const previousRows = await readEventRuntimeMatchesNow(eventId);
+  const now = new Date().toISOString();
+  const desiredParents = desiredRows.filter(row => row.match_kind === "bracket");
+  const desiredChildren = desiredRows.filter(row => row.match_kind !== "bracket");
+  const existingParents = previousRows.filter(row => row.match_kind === "bracket");
+  const existingChildren = previousRows.filter(row => row.match_kind !== "bracket");
+  const parentPlan = buildBracketMatchSyncPlan(existingParents, desiredParents, now);
+
+  try {
+    await updateEventRuntimeMatchesNow(eventId, parentPlan.updates, now);
+    await insertEventRuntimeMatchesNow(eventId, parentPlan.inserts, now);
+
+    const currentParents = (await readEventRuntimeMatchesNow(eventId))
+      .filter(row => row.match_kind === "bracket");
+    const resolvedChildren = resolveBracketMatchParentIds(desiredChildren, currentParents);
+    const childPlan = buildBracketMatchSyncPlan(existingChildren, resolvedChildren, now);
+
+    await deleteEventRuntimeMatchIdsNow(eventId, childPlan.deleteIds);
+    await updateEventRuntimeMatchesNow(eventId, childPlan.updates, now);
+    await insertEventRuntimeMatchesNow(eventId, childPlan.inserts, now);
+    await deleteEventRuntimeMatchIdsNow(eventId, parentPlan.deleteIds);
+
+    return {
+      skipped: false,
+      inserted: parentPlan.inserts.length + childPlan.inserts.length,
+      updated: parentPlan.updates.length + childPlan.updates.length,
+      deleted: parentPlan.deleteIds.length + childPlan.deleteIds.length,
+      previousRows,
+    };
+  } catch (error) {
+    try {
+      await replaceEventRuntimeMatchesNow(eventId, previousRows);
+    } catch (restoreError) {
+      throw new Error(
+        `${error?.message || "normalized Match 동기화에 실패했습니다."} (이전 Match snapshot 복구 실패: ${restoreError?.message || "알 수 없는 오류"})`
+      );
+    }
+    throw error;
+  }
 }
 
 export async function syncEventBracketMatches(eventId, bracket) {
@@ -209,15 +275,18 @@ export async function deleteEventBracketMatches(eventId) {
   if (!eventId) return { deleted: 0 };
 
   return queueEventMatchMutation(eventId, async () => {
-    const { data, error } = await db()
-      .from("matches")
-      .delete()
-      .eq("event_id", eventId)
-      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
-      .select("id");
+    const rows = await readEventRuntimeMatchesNow(eventId);
+    await deleteEventRuntimeMatchRowsNow(eventId, rows);
+    return { deleted: rows.length };
+  });
+}
 
-    if (error) fail(error, "Event의 runtime normalized Match를 정리하지 못했습니다.");
-    return { deleted: (data || []).length };
+export async function restoreEventBracketMatches(eventId, previousRows) {
+  if (!eventId) return { restored: 0 };
+  const snapshot = Array.isArray(previousRows) ? previousRows : [];
+  return queueEventMatchMutation(eventId, async () => {
+    await replaceEventRuntimeMatchesNow(eventId, snapshot);
+    return { restored: snapshot.length };
   });
 }
 
@@ -1550,6 +1619,7 @@ export async function confirmEventTeamsForBracket(eventId, participants = []) {
             registration_id: member.registrationId,
             player_id: member.playerId,
             member_order: member.memberOrder,
+            role: member.memberOrder === 1 ? "captain" : null,
           })
           .select("id")
           .single();

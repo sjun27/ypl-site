@@ -1944,7 +1944,7 @@ Test Event `P1-1 팀전 E2E 테스트` (`964a0322-1bad-46ea-a4b0-6ff1eec71336`)�
 
 따라서 P1-1 Team Entry / EntryParticipant identity lifecycle은 Test DB 브라우저 E2E까지 완료됐다.
 
-다음 단계는 P1-2 normalized team Match이며, 그 전까지 Event-linked 팀전의 normalized Match / Result / RankingAward / 기록 반영은 계속 차단한다.
+P1-2 normalized team Match는 Test DB 브라우저 E2E까지 완료했다. Event-linked 팀전의 Result / RankingAward / 기록 반영은 P1-3 이후까지 계속 차단한다.
 
 ### Event 수정 / 삭제 일관성
 
@@ -1970,3 +1970,16 @@ Event가 연결된 신청 공지를 수정할 때 기존 Event의 다음 상태�
 - migration 검증 완료와 Production 적용 완료를 구분한다.
 - Production `ypl_data_v4`는 normalized end-to-end 검증 전까지 유지한다.
 - Production Supabase는 별도 migration 단계 전까지 변경하지 않는다.
+
+---
+
+## P1-2 normalized team Match runtime
+
+- 팀 대 팀 경기는 parent `Match(match_kind='bracket')`로 저장한다.
+- 실제 개인전은 child `Match(match_kind='team_bout')`로 저장하고 실제 Player ID를 사용한다.
+- 팀장은 `EntryParticipant.role='captain'`으로 보존하며 canonical 팀 명단과 실제 경기 lineup은 분리한다.
+- 경기별 출전자 변경과 동일 선수 복수 경기 출전을 지원한다.
+- 일반전 동점 시 UI에서는 `타이브레이커`를 사용하되 내부 `match_kind='ace'`, `series.ace`, `:ace` source key는 유지한다.
+- stable source key를 기준으로 기존 Match row를 갱신하며 변경되지 않은 경기의 `played_at`은 보존한다.
+- 결과 변경 시 stale child/downstream Match를 정리하고 legacy 저장 실패 시 snapshot을 복구한다.
+- 다음 단계는 P1-3 Team Result + player RankingAward다.

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Dropdown, Modal } from "../../components/index.js";
 import { CUP_RULES, REGULATIONS } from "../../data/index.js";
+import { getApplicationEventDivisionOptions, normalizeApplicationEventDivision } from "../../services/bracketTeamParticipants.js";
 import { verifyAdminCredentials } from "../adminAuth.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -98,6 +99,11 @@ function FormBuilder({ form, setForm }){
   const del=(id)=>setFields(fields.filter(f=>f.id!==id));
   const move=(i,d)=>{ const j=i+d; if(j<0||j>=fields.length)return; const a=[...fields]; [a[i],a[j]]=[a[j],a[i]]; setFields(a); };
   const changeType=(f,v)=>patch(f.id,{type:v,options:isChoice(v)?((f.options&&f.options.length)?f.options:["옵션 1"]):[]});
+  const eventDraft=form?.eventDraft||{};
+  const isTeamEvent=Boolean(eventDraft.isTeamEvent);
+  const divisionOptions=getApplicationEventDivisionOptions(isTeamEvent);
+  const divisionValue=normalizeApplicationEventDivision(eventDraft.division,isTeamEvent,{preserveLegacy:Boolean(form?.eventId)});
+  const hasLegacyDivision=!divisionOptions.includes(divisionValue);
   return (<div className="fb-wrap">
     <label className="bk-check" style={{marginBottom:enabled?15:0}}>
       <input type="checkbox" checked={enabled} onChange={e=>patchForm({enabled:e.target.checked})}/>
@@ -110,8 +116,8 @@ function FormBuilder({ form, setForm }){
         <div className="fb-note" style={{marginBottom:12}}>참가자 이름은 신청 화면에서 시스템 필드로 별도 입력받습니다. 아래 설정은 이 신청서와 연결되는 Event의 공통 규칙입니다.</div>
         <div className="field"><label>대회명</label><input value={(form?.eventDraft?.name)||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),name:e.target.value}})} placeholder="예: 제1회 정규 파이컵 A"/></div>
         <div className="field"><label>대회 종류</label><select value={(form?.eventDraft?.eventType)||"pokecup"} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),eventType:e.target.value}})}><option value="pokecup">파이컵</option><option value="light">파이컵 Light</option><option value="champions">챔피언스</option></select></div>
-        <div className="field"><label>구분</label><select value={(form?.eventDraft?.division)||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),division:e.target.value||null}})}><option value="">없음</option><option value="master">Master</option><option value="rookie">Rookie</option></select></div>
-        <div className="field"><label>참가 단위</label><select value={(form?.eventDraft?.isTeamEvent)?"team":"individual"} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),isTeamEvent:e.target.value==="team"}})}><option value="individual">개인전</option><option value="team">팀전</option></select></div>
+        <div className="field"><label>구분</label><select value={hasLegacyDivision?"__legacy__":divisionValue} onChange={e=>patchForm({eventDraft:{...eventDraft,division:e.target.value}})}>{hasLegacyDivision&&<option value="__legacy__" disabled>기존 미분류</option>}{divisionOptions.map(value=><option key={value} value={value}>{value[0].toUpperCase()+value.slice(1)}</option>)}</select></div>
+        <div className="field"><label>참가 단위</label><select value={isTeamEvent?"team":"individual"} onChange={e=>{const nextTeam=e.target.value==="team";patchForm({eventDraft:{...eventDraft,isTeamEvent:nextTeam,division:normalizeApplicationEventDivision(eventDraft.division,nextTeam)}});}}><option value="individual">개인전</option><option value="team">팀전</option></select></div>
         <div className="field"><label>배틀 형식</label><select value={(form?.eventDraft?.battleFormat)||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),battleFormat:e.target.value||null}})}><option value="">선택</option><option value="singles">싱글</option><option value="doubles">더블</option></select></div>
         <div className="field"><label>대진 방식</label><select value={(form?.eventDraft?.competitionFormat)||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),competitionFormat:e.target.value||null}})}><option value="">선택</option><option value="double_elimination">더블 엘리미네이션</option><option value="single_elimination">싱글 엘리미네이션</option><option value="round_robin">리그전</option></select></div>
         <div className="field"><label>Regulation</label><select value={(form?.eventDraft?.regulationId)||Object.keys(REGULATIONS)[0]||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),regulationId:e.target.value}})}>{Object.values(REGULATIONS).map(reg=><option key={reg.id} value={reg.id}>{reg.name}</option>)}</select></div>
@@ -152,7 +158,7 @@ export function AnnEditor({ item, onClose, onSave, onDelete }) {
   const [date,setDate]=useState(item?.date||new Date().toISOString().slice(0,10)),[title,setTitle]=useState(item?.title||""),[body,setBody]=useState(item?.body||""),[pinned,setPinned]=useState(item?.pinned||false),[link,setLink]=useState(item?.link||""),[linkLabel,setLinkLabel]=useState(item?.linkLabel||""),[link2,setLink2]=useState(item?.link2||""),[link2Label,setLink2Label]=useState(item?.link2Label||"");
   const [form,setForm]=useState(item?.form||{enabled:false,buttonLabel:"참가 신청하기",fields:[],responses:[]});
   const [linkOpen,setLinkOpen]=useState(!!(item?.link||item?.link2)); // 이미 링크가 있으면 펼친 상태로 시작
-  const normalizedEventDraft=form?.enabled?{...(form.eventDraft||{}),eventType:form?.eventDraft?.eventType||"pokecup",division:form?.eventDraft?.division||null,isTeamEvent:Boolean(form?.eventDraft?.isTeamEvent),battleFormat:form?.eventDraft?.battleFormat||null,competitionFormat:form?.eventDraft?.competitionFormat||null,regulationId:form?.eventDraft?.regulationId||Object.keys(REGULATIONS)[0]||null,cupRuleId:form?.eventDraft?.cupRuleId||"none"}:form?.eventDraft;
+  const normalizedEventDraft=form?.enabled?{...(form.eventDraft||{}),eventType:form?.eventDraft?.eventType||"pokecup",division:normalizeApplicationEventDivision(form?.eventDraft?.division,Boolean(form?.eventDraft?.isTeamEvent),{preserveLegacy:Boolean(form?.eventId)}),isTeamEvent:Boolean(form?.eventDraft?.isTeamEvent),battleFormat:form?.eventDraft?.battleFormat||null,competitionFormat:form?.eventDraft?.competitionFormat||null,regulationId:form?.eventDraft?.regulationId||Object.keys(REGULATIONS)[0]||null,cupRuleId:form?.eventDraft?.cupRuleId||"none"}:form?.eventDraft;
   return (<Modal title={item?"공지 수정":"공지 작성"} onClose={onClose}>
     <div className="field"><label>날짜</label><input value={date} onChange={e=>setDate(e.target.value)} placeholder="2024-05-26"/></div>
     <div className="field"><label>제목</label><input value={title} onChange={e=>setTitle(e.target.value)}/></div>

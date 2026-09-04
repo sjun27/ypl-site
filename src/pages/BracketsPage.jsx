@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries } from "../services/index.js";
-import { getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
+import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries } from "../services/index.js";
+import { buildDefaultTeamMatchLineups, buildTeamMatchSeries, getTeamMatchLineupOptions, getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -671,51 +671,42 @@ function BracketWizard({ data, onClose, onCreate }){
   </Modal>);
 }
 
-/* ===== 팀 대결(선발 순서 + 에이스 결정전) ===== */
-function seriesScore(s){ let a=0,b=0; (s?.games||[]).forEach(w=>{if(w==="a")a++;else if(w==="b")b++;}); if(s?.ace&&s.ace.winner){ if(s.ace.winner==="a")a++; else b++; } return [a,b]; }
+/* ===== 팀 대결(실제 lineup + 에이스 결정전) ===== */
+const teamMatchDisplayName=(value)=>{ const name=String(value??""); const trimmed=name.trim(); return /^\d+$/.test(trimmed)?`${trimmed}팀`:name; };
 function TeamMatchModal({ teamA, teamB, init, onClose, onSave }){
-  const [la,setLa]=useState(init?.lineupA?.length?init.lineupA:[...(teamA.members||[])]);
-  const [lb,setLb]=useState(init?.lineupB?.length?init.lineupB:[...(teamB.members||[])]);
-  const N=Math.min(la.length,lb.length);
+  const defaults=buildDefaultTeamMatchLineups(teamA,teamB);
+  const optionsA=getTeamMatchLineupOptions(teamA),optionsB=getTeamMatchLineupOptions(teamB);
+  const N=defaults.normalBoutCount;
+  const initialLineup=(stored,fallback)=>Array.from({length:N},(_,i)=>Array.isArray(stored)?(stored[i]||""):(fallback[i]||""));
+  const [lineupA,setLineupA]=useState(()=>initialLineup(init?.lineupA,defaults.lineupA));
+  const [lineupB,setLineupB]=useState(()=>initialLineup(init?.lineupB,defaults.lineupB));
   const [games,setGames]=useState(()=>{ const g=Array(N).fill(null); (init?.games||[]).forEach((w,i)=>{if(i<N)g[i]=w;}); return g; });
-  const [aceA,setAceA]=useState(init?.ace?.a||""); const [aceB,setAceB]=useState(init?.ace?.b||""); const [aceW,setAceW]=useState(init?.ace?.winner||null);
-  const [revealed,setRevealed]=useState(!!init);
-  const move=(set,arr,i,d)=>{ const j=i+d; if(j<0||j>=arr.length)return; const a=[...arr]; [a[i],a[j]]=[a[j],a[i]]; set(a); };
+  const [aceA,setAceA]=useState(init?.ace?.a||defaults.captainA||"");
+  const [aceB,setAceB]=useState(init?.ace?.b||defaults.captainB||"");
+  const [aceW,setAceW]=useState(init?.ace?.winner||null);
   const setGame=(i,w)=>setGames(games.map((x,j)=>j===i?(x===w?null:w):x));
   let a=0,b=0; games.forEach(w=>{if(w==="a")a++;else if(w==="b")b++;});
   const allPlayed=N>0&&games.every(w=>w); const tie=allPlayed&&a===b;
-  let finalA=a,finalB=b; if(tie&&aceW){ if(aceW==="a")finalA++; else finalB++; }
-  const decided=allPlayed&&(!tie||!!aceW); const winnerSide=finalA>finalB?"a":(finalB>finalA?"b":null);
-  const confirm=()=>{ if(!decided||!winnerSide){alert("모든 대결(동점 시 에이스 결정전까지) 결과를 입력하세요.");return;}
-    onSave({lineupA:la.slice(0,N),lineupB:lb.slice(0,N),games,ace:tie?{a:aceA,b:aceB,winner:aceW}:null},winnerSide); };
-  return (<Modal title="팀 대결 진행" hint={`${teamA.name} vs ${teamB.name}. 선발 순서를 정해 공개하면 같은 번호끼리 대결합니다.`} onClose={onClose}>
-    <div className="swap" key={revealed?"battle":"lineup"}>
-    {!revealed?<>
-      <div className="bk-lineups">{[["A",teamA,la,setLa],["B",teamB,lb,setLb]].map(([k,t,arr,set])=>(<div className="bk-lineup" key={k}>
-        <div className="bk-lineup-h">{t.name}</div>
-        {arr.length===0&&<div className="bk-lu-empty">팀원이 없습니다</div>}
-        {arr.map((mem,i)=>(<div className="bk-lu-row" key={i}><span className="bk-lu-no">{i+1}</span><span className="bk-lu-nm">{mem}</span><span className="bk-lu-mv"><button type="button" onClick={()=>move(set,arr,i,-1)} disabled={i===0}>▲</button><button type="button" onClick={()=>move(set,arr,i,1)} disabled={i===arr.length-1}>▼</button></span></div>))}
-      </div>))}</div>
-      <div className="bk-hint" style={{marginTop:10}}>▲▼로 각 팀의 선발 순서를 비공개로 정한 뒤, 공개하세요.</div>
-      <div className="modal-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={()=>setRevealed(true)} disabled={N===0}>선발 공개 → 대결</button></div>
-    </>:<>
-      <div className="bk-series">{Array.from({length:N}).map((_,i)=>(<div className="bk-series-row" key={i}>
-        <span className="bk-series-no">{i+1}</span>
-        <button type="button" className={"bk-series-p"+(games[i]==="a"?" win":"")} onClick={()=>setGame(i,"a")}>{la[i]}</button>
+  const allPlayers=lineupA.every(Boolean)&&lineupB.every(Boolean);
+  const decided=allPlayers&&allPlayed&&(!tie||(!!aceA&&!!aceB&&!!aceW));
+  const confirm=()=>{ if(!decided){alert("모든 실제 lineup 선수와 대결 결과(동점 시 타이브레이커 포함)를 입력하세요.");return;}
+    const result=buildTeamMatchSeries(teamA,teamB,{lineupA,lineupB,games,ace:tie?{a:aceA,b:aceB,winner:aceW}:null}); onSave(result.series,result.winnerSide); };
+  const side=(value,onChange,options,winner,onWin,label)=><div className="bk-bout-side"><div className="bk-bout-player"><Dropdown value={value} onChange={onChange} placeholder="선수 선택" options={options}/></div><button type="button" className={"bk-bout-win"+(winner?" is-win":"")} onClick={onWin} aria-label={label} aria-pressed={winner}>{winner?"✓ 승":"승"}</button></div>;
+  const displayTeamA=teamMatchDisplayName(teamA.name),displayTeamB=teamMatchDisplayName(teamB.name);
+  return (<Modal title={`${displayTeamA} vs ${displayTeamB}`} hint="실제 출전 선수를 선택하고 모든 개인전 결과를 입력하세요." onClose={onClose}>
+    <div className="swap bk-team-match-modal">
+      <div className="bk-bout-columns" aria-hidden="true"><span/><strong>{displayTeamA}</strong><span/><strong>{displayTeamB}</strong></div>
+      <div className="bk-series">{Array.from({length:N}).map((_,i)=>(<div className="bk-series-row bk-bout-row" key={i}>
+        <span className="bk-series-no bk-bout-label">{i+1}경기</span>
+        {side(lineupA[i],v=>setLineupA(lineupA.map((name,j)=>j===i?v:name)),optionsA,games[i]==="a",()=>setGame(i,"a"),`${i+1}경기 A팀 승리`)}
         <span className="bk-series-vs">vs</span>
-        <button type="button" className={"bk-series-p"+(games[i]==="b"?" win":"")} onClick={()=>setGame(i,"b")}>{lb[i]}</button>
+        {side(lineupB[i],v=>setLineupB(lineupB.map((name,j)=>j===i?v:name)),optionsB,games[i]==="b",()=>setGame(i,"b"),`${i+1}경기 B팀 승리`)}
       </div>))}</div>
-      <div className="bk-series-score"><b className={finalA>finalB?"lead":""}>{teamA.name} {finalA}</b><span>:</span><b className={finalB>finalA?"lead":""}>{finalB} {teamB.name}</b></div>
       {tie&&<div className="bk-ace">
-        <div className="bk-ace-h">⚔ 동점 — 에이스 결정전</div>
-        <div className="bk-ace-pick">
-          <Dropdown value={aceA} onChange={v=>{setAceA(v);setAceW(null);}} placeholder={teamA.name+" 에이스 선택"} options={(teamA.members||[]).map(mm=>({value:mm,label:mm}))}/>
-          <Dropdown value={aceB} onChange={v=>{setAceB(v);setAceW(null);}} placeholder={teamB.name+" 에이스 선택"} options={(teamB.members||[]).map(mm=>({value:mm,label:mm}))}/>
-        </div>
-        {aceA&&aceB&&<div className="bk-series-row" style={{marginTop:10}}><span className="bk-series-no">A</span><button type="button" className={"bk-series-p"+(aceW==="a"?" win":"")} onClick={()=>setAceW(aceW==="a"?null:"a")}>{aceA}</button><span className="bk-series-vs">vs</span><button type="button" className={"bk-series-p"+(aceW==="b"?" win":"")} onClick={()=>setAceW(aceW==="b"?null:"b")}>{aceB}</button></div>}
+        <div className="bk-ace-h">타이브레이커</div>
+        <div className="bk-series-row bk-bout-row bk-bout-row-ace"><span className="bk-bout-label-spacer" aria-hidden="true"/>{side(aceA,setAceA,optionsA,aceW==="a",()=>setAceW(aceW==="a"?null:"a"),"타이브레이커 A팀 승리")}<span className="bk-series-vs">vs</span>{side(aceB,setAceB,optionsB,aceW==="b",()=>setAceW(aceW==="b"?null:"b"),"타이브레이커 B팀 승리")}</div>
       </div>}
-      <div className="modal-actions"><button className="btn btn-ghost" onClick={()=>setRevealed(false)}>← 선발 수정</button><button className="btn btn-primary" onClick={confirm} disabled={!decided}>대결 확정 ✓</button></div>
-    </>}
+      <div className="modal-actions bk-team-match-actions"><button className="btn btn-ghost" onClick={onClose}>취소</button><button className="btn btn-primary" onClick={confirm} disabled={!decided}>대결 확정 ✓</button></div>
     </div>
   </Modal>);
 }
@@ -728,9 +719,8 @@ function MatchCard({ m, ev, nameOf, admin, onPick, compact, teamMode, onOpenTeam
   const bothReal=pa&&pb&&pa!==BYE&&pb!==BYE;
   if(teamMode){
     const clickable=admin&&(bothReal||decided);
-    const sc=m.series?seriesScore(m.series):null;
     const rowT=(side,pid)=>{ const isWin=decided&&m.winner===side; const isBye=pid===BYE;
-      return <div className={"bk-slot"+(isWin?" win":"")+(isBye?" bye":"")}><span className="bk-tn">{pid===BYE?"부전승":(pid?nameOf(pid):"…")}</span>{sc&&!isBye&&<span className="bk-sc">{side==="a"?sc[0]:sc[1]}</span>}</div>; };
+      return <div className={"bk-slot"+(isWin?" win":"")+(isBye?" bye":"")}><span className="bk-tn">{pid===BYE?"부전승":(pid?nameOf(pid):"…")}</span></div>; };
     return <div className={"bk-match"+(compact?" cmp":"")+(clickable?" team-click":"")} onClick={()=>clickable&&onOpenTeam(m,pa,pb)} title={clickable?"클릭하여 팀 대결 진행/수정":""}>{rowT("a",pa)}{rowT("b",pb)}</div>;
   }
   const canPick=admin&&bothReal;
@@ -813,18 +803,15 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
     matchMutationBusyRef.current=true;
     setMatchMutationBusy(true);
 
+    let previousMatchRows=null;
     try{
-      if(b.eventId&&!teamMode){
+      if(b.eventId){
         try{
-          await syncEventBracketMatches(b.eventId,nextBracket);
+          const matchSync=await syncEventBracketMatches(b.eventId,nextBracket);
+          if(!matchSync.skipped)previousMatchRows=matchSync.previousRows;
         }catch(error){
-          let compensationError=null;
-          try{ await syncEventBracketMatches(b.eventId,b); }
-          catch(rollbackError){ compensationError=rollbackError; }
           await refresh?.();
-          flash(compensationError
-            ? `Match 동기화와 이전 상태 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${compensationError?.message||"알 수 없는 오류"}`
-            : `Match 동기화 실패로 결과를 저장하지 않았습니다: ${error?.message||"알 수 없는 오류"}`);
+          flash(`Match 동기화 실패로 결과를 저장하지 않았습니다: ${error?.message||"알 수 없는 오류"}`);
           return false;
         }
       }
@@ -833,8 +820,8 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
       const saved=await save(nextData);
       if(!saved){
         let compensationError=null;
-        if(b.eventId&&!teamMode){
-          try{ await syncEventBracketMatches(b.eventId,b); }
+        if(b.eventId&&previousMatchRows){
+          try{ await restoreEventBracketMatches(b.eventId,previousMatchRows); }
           catch(error){ compensationError=error; }
         }
         await refresh?.();
@@ -853,7 +840,7 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
   };
   const pick=(matchId,side)=>{ if(locked)return; void persistBracketMutation(withPick(b,matchId,side)); };
   const openTeam=(m,pa,pb)=>{ if(locked)return; const A=(b.participants||[]).find(p=>p.id===pa),B=(b.participants||[]).find(p=>p.id===pb); if(!A||!B)return; setSeries({m,A,B}); };
-  const saveSeries=(sObj,winnerSide)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?withSeries(x,series.m.id,sObj,winnerSide):x)}); setSeries(null); };
+  const saveSeries=async(sObj,winnerSide)=>{ if(locked)return; const saved=await persistBracketMutation(withSeries(b,series.m.id,sObj,winnerSide)); if(saved)setSeries(null); };
   const makeKnockout=async()=>{
     if(locked)return;
     const adv=[];
@@ -1798,7 +1785,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
       }
     }
 
-    if(b.eventId&&b.mode!=="team"){
+    if(b.eventId){
       try{
         await deleteEventBracketMatches(b.eventId);
       }catch(error){

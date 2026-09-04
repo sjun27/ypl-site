@@ -1720,3 +1720,21 @@ Event-linked 팀전의 참가 확정과 Team Entry identity 연결을 구현했�
 자동 테스트는 기존 테스트를 포함해 43/43 통과했고 production build도 성공했다. 추가 DB 권한, RLS, Production DB는 변경하지 않았다.
 
 따라서 P1-1은 Test 환경 기준 완료했다. 다음 단계는 P1-2 normalized team Match다.
+
+---
+
+## 2026-09-04
+
+### P1-2 — normalized team Match
+
+- 팀 대 팀 parent bracket Match 및 실제 개인전 team_bout 동기화 구현
+- 팀장은 EntryParticipant role='captain'으로 보존
+- canonical 팀 명단과 실제 경기 lineup 분리
+- 경기별 출전자 변경 및 동일 선수 복수 출전 지원
+- 동점 시 타이브레이커 지원
+- UI는 `타이브레이커`, 내부 ace 구조는 호환성을 위해 유지
+- stable source key 기반 Match update 및 played_at 보존/갱신
+- downstream stale Match 정리 및 legacy 저장 실패 compensation 검증
+- 팀전 division UI는 Master / Light, 개인전은 Rookie / Master / Light
+- Test DB 브라우저 E2E 완료
+- 다음 단계: P1-3 Team Result + player RankingAward

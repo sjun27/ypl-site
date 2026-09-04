@@ -362,12 +362,17 @@ Event running 전환
 기록 반영 전 삭제 rollback
 삭제 후 재생성 시 중복 방지
 
-P1-2 — normalized team Match — 다음 단계
-팀 대 팀 부모 bracket Match 생성
-선발 개인 경기 team_bout 생성
-에이스 결정전 ace Match 생성
-legacy 팀전 경기 결과와 normalized Match 동기화
-
+P1-2 — normalized team Match — 구현 및 Test DB E2E 완료
+팀 대 팀 parent bracket Match 생성
+실제 출전 Player 기준 team_bout 생성 및 legacy 결과 동기화
+팀장 identity는 EntryParticipant role='captain'으로 보존
+canonical 팀 명단과 실제 경기 lineup 분리
+경기별 출전자 변경 및 동일 선수 복수 경기 출전 지원
+모든 예정 개인전 결과 입력 후 팀 경기 확정
+동점 시 내부 ace Match 생성, UI에서는 타이브레이커로 표시
+타이브레이커 출전자 변경 가능
+stable source_node_key 기반 update 및 played_at 보존/갱신 검증
+downstream stale Match 정리 및 legacy 저장 실패 compensation 검증
 P1-3
 팀 Result 생성
 선수별 RankingAward 생성
@@ -580,7 +585,7 @@ feature/records-system
 ✓ 제7회 파이컵라이트 Records 트레이너·대회·랭킹·포켓몬 브라우저 E2E
 
 바로 다음
-1. P1-2 normalized team Match
+1. P1-3 Team Result / RankingAward
 
 그 이후
 2. Team Builder → TeamSnapshot → 공식 Submission
