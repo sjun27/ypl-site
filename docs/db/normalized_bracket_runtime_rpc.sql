@@ -199,10 +199,14 @@ begin
 
     -- Runtime identity is checked by both supplied id and Event. A different
     -- runtime for the same Event, or an id reused for another Event, fails.
+    -- Event locking serializes all runtime mutations. Use an advisory
+    -- runtime-id lock so SECURITY INVOKER does not require anon UPDATE on
+    -- the immutable runtime table.
+    perform pg_advisory_xact_lock(hashtextextended('normalized-single-runtime:' || p_runtime_id::text, 0));
     select * into v_runtime
       from ypl_schema_validation.bracket_runtimes
      where id = p_runtime_id
-     for update;
+     ;
     if found then
         v_runtime_exists := true;
         if v_runtime.event_id <> p_event_id then
@@ -213,7 +217,7 @@ begin
     select * into v_runtime
       from ypl_schema_validation.bracket_runtimes as br
      where br.event_id = p_event_id
-     for update;
+     ;
     if found and v_runtime.id <> p_runtime_id then
         raise exception using errcode = 'P0001', message = 'Event에 다른 normalized runtime이 이미 존재합니다.';
     end if;
@@ -387,8 +391,7 @@ begin
     loop
         select * into v_player
           from ypl_schema_validation.players
-         where id = v_participant.player_id
-         for update;
+         where id = v_participant.player_id;
         v_player_was_created := not found;
         if v_player_was_created then
             if exists (
@@ -406,8 +409,7 @@ begin
 
         select * into v_registration
           from ypl_schema_validation.event_registrations
-         where id = v_participant.registration_id
-         for update;
+         where id = v_participant.registration_id;
         v_registration_was_created := not found;
         v_registration_player_was_changed := false;
         v_previous_registration_player_id := null;
@@ -448,8 +450,7 @@ begin
 
         select * into v_entry
           from ypl_schema_validation.entries
-         where id = v_participant.entry_id
-         for update;
+         where id = v_participant.entry_id;
         v_entry_was_created := not found;
         if v_entry_was_created then
             insert into ypl_schema_validation.entries (
@@ -467,8 +468,7 @@ begin
 
         select * into v_entry_participant
           from ypl_schema_validation.entry_participants
-         where id = v_participant.entry_participant_id
-         for update;
+         where id = v_participant.entry_participant_id;
         v_entry_participant_was_created := not found;
         if v_entry_participant_was_created then
             insert into ypl_schema_validation.entry_participants (
@@ -585,10 +585,11 @@ begin
         raise exception using errcode = 'P0001', message = '기록 반영 전 open/running 개인전만 삭제할 수 있습니다.';
     end if;
 
+    perform pg_advisory_xact_lock(hashtextextended('normalized-single-runtime:' || p_runtime_id::text, 0));
     select * into v_runtime
       from ypl_schema_validation.bracket_runtimes as br
      where br.id = p_runtime_id and br.event_id = p_event_id
-     for update;
+     ;
     if not found then
         raise exception using errcode = 'P0001', message = 'normalized Single runtime을 찾을 수 없습니다.';
     end if;

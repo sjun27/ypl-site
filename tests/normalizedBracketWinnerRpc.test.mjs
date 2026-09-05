@@ -21,7 +21,7 @@ test("winner RPC is a schema-qualified SECURITY INVOKER draft", () => {
 test("winner mutation locks Event, runtime, and Match state and applies gates", () => {
   for (const pattern of [
     /from ypl_schema_validation\.events[\s\S]*for update/i,
-    /from ypl_schema_validation\.bracket_runtimes[\s\S]*for update/i,
+    /pg_advisory_xact_lock[\s\S]*from ypl_schema_validation\.bracket_runtimes/i,
     /from ypl_schema_validation\.matches as m[\s\S]*for update/i,
     /v_event\.is_team_event/i,
     /competition_format <> 'single_elimination'/i,

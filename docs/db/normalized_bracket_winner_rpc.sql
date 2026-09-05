@@ -78,12 +78,13 @@ begin
         raise exception using errcode = 'P0001', message = 'winner mutation 대상 Event를 찾을 수 없습니다.';
     end if;
 
+    perform pg_advisory_xact_lock(hashtextextended('normalized-single-runtime:' || p_runtime_id::text, 0));
     select *
       into v_runtime
       from ypl_schema_validation.bracket_runtimes as br
      where br.id = p_runtime_id
        and br.event_id = p_event_id
-     for update;
+     ;
     if not found then
         raise exception using errcode = 'P0001', message = 'normalized Single runtime을 찾을 수 없습니다.';
     end if;

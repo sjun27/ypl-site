@@ -97,7 +97,7 @@ test("delete contract is locked, fail-closed, submission-safe, and FK-order awar
   const del = rpcSql.slice(rpcSql.indexOf(deleteSignature), rpcSql.indexOf("-- SECURITY INVOKER"));
   for (const pattern of [
     /from ypl_schema_validation\.events[\s\S]*for update/i,
-    /from ypl_schema_validation\.bracket_runtimes[\s\S]*for update/i,
+    /pg_advisory_xact_lock[\s\S]*from ypl_schema_validation\.bracket_runtimes/i,
     /record_applied_at/i,
     /results as r0 where r0\.event_id = p_event_id/i,
     /ranking_awards as a0 where a0\.event_id = p_event_id/i,

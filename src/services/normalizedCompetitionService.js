@@ -24,6 +24,7 @@ import { isInterruptedBracketCleanupState, validateBracketParticipantConfirmatio
 import { buildSubmissionStatusRows, selectSubmissionRegistration } from "./teamBuilderCore.js";
 import { buildTeamSnapshotSubmission } from "./teamSubmission.js";
 import { normalizeFinalSubmissionFreezeSnapshot } from "./finalSubmissionLifecycle.js";
+import { projectNormalizedSingleEliminationBracket } from "./bracketProjection.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -43,6 +44,158 @@ export const NORMALIZED_DATA_SCHEMA = DATA_SCHEMA;
 
 export function normalizedDbAvailable() {
   return Boolean(client);
+}
+
+// P2-7 Single runtime is intentionally enabled only in the Test normalized
+// schema. Production remains on the legacy ypl_data_v4 adapter until a later
+// migration/cutover explicitly changes this boundary.
+export function normalizedSingleBracketRuntimeEnabled() {
+  return Boolean(client && DATA_SCHEMA === "ypl_schema_validation");
+}
+
+const NORMALIZED_SINGLE_RUNTIME_SELECT = `
+  id, event_id, topology_kind, projection_version, previous_event_status,
+  created_at, updated_at
+`;
+const NORMALIZED_SINGLE_SLOT_SELECT = `
+  bracket_runtime_id, event_id, stage_kind, stage_no, pool_no, slot_no, entry_id,
+  created_at
+`;
+const NORMALIZED_SINGLE_ENTRY_SELECT = `id, event_id, entry_type, display_name, status, seed`;
+const NORMALIZED_SINGLE_PARTICIPANT_SELECT = `
+  id, event_id, entry_id, registration_id, player_id, member_order, role
+`;
+
+async function readNormalizedSingleRuntimeFacts(eventId, runtimeId = null) {
+  if (!normalizedSingleBracketRuntimeEnabled()) return null;
+  const runtimeQuery = db().from("bracket_runtimes").select(NORMALIZED_SINGLE_RUNTIME_SELECT);
+  const { data: runtimeRows, error: runtimeError } = await (runtimeId
+    ? runtimeQuery.eq("id", runtimeId).eq("event_id", eventId)
+    : runtimeQuery.eq("event_id", eventId));
+  if (runtimeError) fail(runtimeError, "normalized bracket runtime을 불러오지 못했습니다.");
+  const runtime = (runtimeRows || [])[0] || null;
+  if (!runtime) return null;
+
+  const [event, slotsResult, entriesResult, participantsResult, matchesResult] = await Promise.all([
+    getEvent(eventId),
+    db().from("bracket_entry_slots").select(NORMALIZED_SINGLE_SLOT_SELECT)
+      .eq("bracket_runtime_id", runtime.id).eq("event_id", eventId).order("slot_no"),
+    db().from("entries").select(NORMALIZED_SINGLE_ENTRY_SELECT).eq("event_id", eventId),
+    db().from("entry_participants").select(NORMALIZED_SINGLE_PARTICIPANT_SELECT).eq("event_id", eventId),
+    db().from("matches").select(EVENT_RUNTIME_MATCH_SELECT).eq("event_id", eventId),
+  ]);
+  if (!event) throw new Error("normalized bracket Event를 찾을 수 없습니다.");
+  const failed = [slotsResult, entriesResult, participantsResult, matchesResult].find(result => result.error);
+  if (failed) fail(failed.error, "normalized bracket canonical facts를 불러오지 못했습니다.");
+
+  if (runtime.topology_kind !== "single_elimination" || runtime.projection_version !== 1) {
+    throw new Error("지원하지 않는 normalized Single runtime topology/version입니다.");
+  }
+  const bracket = projectNormalizedSingleEliminationBracket({
+    event,
+    runtimeId: runtime.id,
+    entries: entriesResult.data || [],
+    entryParticipants: participantsResult.data || [],
+    entrySlots: slotsResult.data || [],
+    matches: matchesResult.data || [],
+  });
+  bracket.applied = event.record_applied_at
+    ? { normalized: true, recordAppliedAt: event.record_applied_at, recordMeta: { eventId } }
+    : null;
+  return {
+    bracket,
+    event,
+    runtime,
+    entries: entriesResult.data || [],
+    entryParticipants: participantsResult.data || [],
+    entrySlots: slotsResult.data || [],
+    matches: matchesResult.data || [],
+  };
+}
+
+export async function fetchNormalizedSingleBracketRuntime(eventId, runtimeId = null) {
+  return readNormalizedSingleRuntimeFacts(eventId, runtimeId);
+}
+
+export async function listNormalizedSingleBracketRuntimes() {
+  if (!normalizedSingleBracketRuntimeEnabled()) return [];
+  const { data, error } = await db().from("bracket_runtimes").select("id, event_id").order("created_at");
+  if (error) fail(error, "normalized bracket runtime 목록을 불러오지 못했습니다.");
+  const rows = await Promise.all((data || []).map(row => readNormalizedSingleRuntimeFacts(row.event_id, row.id)));
+  return rows.filter(Boolean);
+}
+
+function databaseUuid() {
+  if (!globalThis.crypto?.randomUUID) throw new Error("안전한 UUID 생성을 지원하지 않는 브라우저입니다.");
+  return globalThis.crypto.randomUUID();
+}
+
+function nextPowerOfTwo(value) {
+  let result = 1;
+  while (result < value) result *= 2;
+  return result;
+}
+
+export function buildNormalizedSingleCreateAttempt(participants = []) {
+  const input = (participants || []).map((participant, index) => ({
+    participant_key: participant.id || `participant-${index + 1}`,
+    display_name: String(participant.name || participant.display_name || "").trim(),
+    player_id: participant.playerId || participant.player_id || databaseUuid(),
+    registration_id: participant.registrationId || participant.registration_id || databaseUuid(),
+    entry_id: participant.entryId || participant.entry_id || databaseUuid(),
+    entry_participant_id: participant.entryParticipantId || participant.entry_participant_id || databaseUuid(),
+  }));
+  if (input.length < 2) throw new Error("normalized Single bracket에는 참가자가 2명 이상 필요합니다.");
+  const size = nextPowerOfTwo(input.length);
+  const matchCount = size / 2;
+  const byeCount = size - input.length;
+  const shuffled = [...input].sort(() => Math.random() - 0.5);
+  const matchOrder = Array.from({ length: matchCount }, (_, index) => index)
+    .sort(() => Math.random() - 0.5);
+  const byeMatches = new Set(matchOrder.slice(0, byeCount));
+  const slots = [];
+  let cursor = 0;
+  for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
+    const firstSlot = matchIndex * 2 + 1;
+    if (byeMatches.has(matchIndex)) {
+      slots.push({ slot_no: firstSlot, entry_id: shuffled[cursor++].entry_id });
+      continue;
+    }
+    slots.push({ slot_no: firstSlot, entry_id: shuffled[cursor++].entry_id });
+    slots.push({ slot_no: firstSlot + 1, entry_id: shuffled[cursor++].entry_id });
+  }
+  return { runtimeId: databaseUuid(), participants: input, slots };
+}
+
+export async function createNormalizedSingleBracketRuntime({ runtimeId, eventId, participants, slots } = {}) {
+  const { data, error } = await db().rpc("create_normalized_single_bracket_runtime", {
+    p_runtime_id: runtimeId,
+    p_event_id: eventId,
+    p_participants: participants,
+    p_slots: slots,
+  });
+  if (error) fail(error, "normalized Single bracket을 생성하지 못했습니다.");
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export async function setNormalizedSingleBracketWinner({ runtimeId, eventId, sourceNodeKey, winnerEntryId = null } = {}) {
+  const { data, error } = await db().rpc("set_normalized_single_bracket_winner", {
+    p_runtime_id: runtimeId,
+    p_event_id: eventId,
+    p_source_node_key: sourceNodeKey,
+    p_winner_entry_id: winnerEntryId,
+  });
+  if (error) fail(error, "normalized Single bracket 승자 저장에 실패했습니다.");
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export async function deleteNormalizedSingleBracketRuntime({ runtimeId, eventId } = {}) {
+  const { data, error } = await db().rpc("delete_normalized_single_bracket_runtime", {
+    p_runtime_id: runtimeId,
+    p_event_id: eventId,
+  });
+  if (error) fail(error, "normalized Single bracket을 삭제하지 못했습니다.");
+  return Array.isArray(data) ? data[0] || null : data || null;
 }
 
 const eventMatchMutationQueues = new Map();
@@ -115,6 +268,7 @@ function bracketMatchIdentityState(eventId, bracket) {
 
 const EVENT_RUNTIME_MATCH_SELECT = `
   id,
+  event_id,
   source,
   source_node_key,
   match_kind,
