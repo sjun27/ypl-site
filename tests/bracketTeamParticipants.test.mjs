@@ -7,6 +7,7 @@ import {
   buildTeamMatchSeries,
   buildTeamMemberCandidates,
   getApplicationEventDivisionOptions,
+  getApplicationEventTypeLabel,
   getConfirmedTeamMemberIdentities,
   normalizeApplicationEventDivision,
   getTeamRegistrationAnswerEntries,
@@ -217,4 +218,13 @@ test("application Event division choices separate team structure from classifica
     normalizeApplicationEventDivision(null, true, { preserveLegacy: true }),
     null
   );
+});
+
+test("application Event type labels do not repeat division while stored axes remain separate", () => {
+  assert.equal(getApplicationEventTypeLabel("pokecup"), "파이컵");
+  assert.equal(getApplicationEventTypeLabel("light"), "파이컵");
+  assert.equal(getApplicationEventTypeLabel("champions"), "챔피언스");
+  const event = { event_type: "light", division: "light", is_team_event: false };
+  assert.equal(event.event_type, "light");
+  assert.equal(event.division, "light");
 });

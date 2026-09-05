@@ -11,6 +11,14 @@ function displayAnswer(value) {
 const INDIVIDUAL_EVENT_DIVISIONS = ["rookie", "master", "light"];
 const TEAM_EVENT_DIVISIONS = ["master", "light"];
 
+export function getApplicationEventTypeLabel(eventType) {
+  return {
+    pokecup: "파이컵",
+    light: "파이컵",
+    champions: "챔피언스",
+  }[eventType] || eventType || "대회";
+}
+
 export function getApplicationEventDivisionOptions(isTeamEvent = false) {
   return [...(isTeamEvent ? TEAM_EVENT_DIVISIONS : INDIVIDUAL_EVENT_DIVISIONS)];
 }

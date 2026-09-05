@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Dropdown, Modal } from "../../components/index.js";
 import { CUP_RULES, REGULATIONS } from "../../data/index.js";
-import { getApplicationEventDivisionOptions, normalizeApplicationEventDivision } from "../../services/bracketTeamParticipants.js";
+import { getApplicationEventDivisionOptions, getApplicationEventTypeLabel, normalizeApplicationEventDivision } from "../../services/bracketTeamParticipants.js";
 import { verifyAdminCredentials } from "../adminAuth.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
@@ -115,7 +115,7 @@ function FormBuilder({ form, setForm }){
         <div className="fb-q-top"><strong>대회 연결 설정</strong></div>
         <div className="fb-note" style={{marginBottom:12}}>참가자 이름은 신청 화면에서 시스템 필드로 별도 입력받습니다. 아래 설정은 이 신청서와 연결되는 Event의 공통 규칙입니다.</div>
         <div className="field"><label>대회명</label><input value={(form?.eventDraft?.name)||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),name:e.target.value}})} placeholder="예: 제1회 정규 파이컵 A"/></div>
-        <div className="field"><label>대회 종류</label><select value={(form?.eventDraft?.eventType)||"pokecup"} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),eventType:e.target.value}})}><option value="pokecup">파이컵</option><option value="light">파이컵 Light</option><option value="champions">챔피언스</option></select></div>
+        <div className="field"><label>대회 종류</label><select value={(form?.eventDraft?.eventType)||"pokecup"} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),eventType:e.target.value}})}>{["pokecup","light","champions"].map(value=><option key={value} value={value}>{getApplicationEventTypeLabel(value)}</option>)}</select></div>
         <div className="field"><label>구분</label><select value={hasLegacyDivision?"__legacy__":divisionValue} onChange={e=>patchForm({eventDraft:{...eventDraft,division:e.target.value}})}>{hasLegacyDivision&&<option value="__legacy__" disabled>기존 미분류</option>}{divisionOptions.map(value=><option key={value} value={value}>{value[0].toUpperCase()+value.slice(1)}</option>)}</select></div>
         <div className="field"><label>참가 단위</label><select value={isTeamEvent?"team":"individual"} onChange={e=>{const nextTeam=e.target.value==="team";patchForm({eventDraft:{...eventDraft,isTeamEvent:nextTeam,division:normalizeApplicationEventDivision(eventDraft.division,nextTeam)}});}}><option value="individual">개인전</option><option value="team">팀전</option></select></div>
         <div className="field"><label>배틀 형식</label><select value={(form?.eventDraft?.battleFormat)||""} onChange={e=>patchForm({eventDraft:{...(form?.eventDraft||{}),battleFormat:e.target.value||null}})}><option value="">선택</option><option value="singles">싱글</option><option value="doubles">더블</option></select></div>

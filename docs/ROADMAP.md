@@ -52,9 +52,11 @@ Ranking
 Season Record
 Records
 
-Production 운영 데이터의 기준 원본은 아직 Supabase public.site_data / ypl_data_v4다.
-
-normalized 구조는 Test Supabase에서 개발·검증 중이며 Production에는 적용하지 않는다.
+전체 Production 운영 데이터는 아직 Supabase public.site_data / ypl_data_v4 의존이 존재한다.
+다만 Test에서 normalized runtime으로 전환된 신규 Event-linked 사실(Player, Season, Event,
+EventRegistration, Entry, EntryParticipant, Match, Result, RankingAward)은 normalized model을
+canonical target으로 취급한다. Bracket graph / round / legacy ranking write 등 일부 영역은
+아직 ypl_data_v4와 hybrid로 동작하며, Production normalized migration은 적용하지 않는다.
 
 2. 현재 구현 상태
 2.1 신청 / Event
@@ -227,13 +229,36 @@ P2-1 Team Builder foundation ✅
 - Regulation / Cup destructive change confirmation
 - saved team 전환 / 새 팀 / 현재 팀 복제 UX
 
-다음 P2 단계:
+P2-2 Event context + submission eligibility + applicant lookup + operator submission-status read UX ✅
 
-- P2-2 Event context + submission eligibility + ownership policy
-- P2-3 TeamSnapshot / RegistrationSubmission DB write + revision
-- P2-4 final_submission_id freeze + Entry / Records integration E2E
+- Event context는 `?eventId=<event-id>`를 사용하며 Event의 `regulation_id`, `cup_rule_id`,
+  `cup_rule_settings`를 authoritative 값으로 고정한다. free Team Builder mode는 독립 동작을 유지한다.
+- 신청자 이름은 `trim(name)` 후 해당 Event의 `registration_name` exact match로 찾고,
+  `application / advancement / manual`만 허용한다. 0건은 미발견, 1건은 선택, 2건 이상은
+  `YPL_AMBIGUOUS_REGISTRATION`으로 중단하며 fuzzy match와 임의 선택은 사용하지 않는다.
+- 기존 completeness validator와 official submission eligibility를 분리한다. Pokémon 1~6,
+  1~5마리, 기술 0~3개, 일부 ability/item 누락은 허용할 수 있으며 `Incomplete != Invalid`다.
+  Pokémon 0, 6 초과, unresolved member, canonical ID resolve 실패, Regulation/Cup/Clause/
+  ability/item/move/Stat Points 위반 및 legality data 확인 불가는 fail closed 한다.
+  `submission_target_at`은 hard deadline이 아닌 soft deadline이다.
+- `RegistrationSubmission` 존재 여부를 source of truth로 하는 operator read model/UI를 제공한다.
+  개인전은 대진표 전후, 팀전은 대진표 생성 후 `Team Entry → EntryParticipant → registration_id
+  → EventRegistration → RegistrationSubmission`으로 선수별 상태를 읽는다. 미제출자는 Entry나
+  Match에서 제거하지 않는다.
 
-P2-1은 브라우저 및 local 검증까지 완료했지만, 공식 제출·DB write·Entry 연결은 아직 구현하지 않았다.
+P2-2 browser/local 검증 완료:
+
+- Event context 및 Regulation/Cup 고정, 신청자 exact-match, free mode 정상
+- 6 Pokémon + 0 moves는 Team Incomplete이지만 제출 준비 완료, Pokémon 0은 제출 불가
+- 팀전 대진표 생성 후 전체/팀별/선수별 제출 현황과 latestSubmittedAt 표시 정상
+- targeted tests PASS, 전체 Node tests 113/113 PASS, production build PASS, `git diff --check` PASS
+- 실제 Submission DB write가 없으므로 미제출 → 제출 완료 전환 E2E는 P2-3으로 이관
+
+P2-3 TeamSnapshot / RegistrationSubmission DB write + revision 예정
+P2-4 final_submission_id freeze + Entry / Records integration E2E 예정
+
+P2-2에서는 TeamSnapshot / TeamSnapshotMember / RegistrationSubmission INSERT, revision 생성,
+실제 제출 버튼 저장, `final_submission_id` freeze를 수행하지 않았다.
 
 3. normalized DB 전환 상태
 
@@ -270,8 +295,8 @@ EntryParticipant
 Match (Event-linked 개인전·팀전 runtime mirror)
 Result (Event-linked 개인 Entry·Team Entry final placement)
 RankingAward (Event-linked Master / Light 개인·팀전 runtime placement payout)
-schema / migration 검증은 되었으나 운영 runtime source of truth가 아닌 엔티티
-RegistrationSubmission
+schema / migration 검증은 되었으나 official submission write의 운영 runtime source of truth가 아닌 엔티티
+RegistrationSubmission (P2-2에서는 존재 여부 read model만 사용)
 TeamSnapshot
 TeamSnapshotMember
 RankingBaseline
@@ -336,7 +361,10 @@ RankingAward 기반 랭킹 전환
 
 완료 조건:
 
-개인전 기준으로 신청부터 Records까지 legacy 기록 저장에 의존하지 않고 하나의 normalized 흐름으로 처리할 수 있어야 한다.
+P0/P1은 normalized identity/write mirror, Match/Result/RankingAward runtime, normalized Records
+read, 개인전·팀전 E2E를 포함한 **normalized competition lifecycle foundation** 완료를 의미한다.
+Event-linked Bracket graph와 일부 round / ranking / season legacy write 의존은 남아 있으며,
+이를 전환하는 단계는 P2-5에서 별도로 수행한다.
 
 P1. 팀전 normalized 연결
 
@@ -394,7 +422,8 @@ Test DB 브라우저 E2E와 local acceptance audit을 완료했다.
 
 P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다.
 
-P2-1 Team Builder foundation은 완료했으며, 다음 단계는 P2-2 Event context + submission eligibility + ownership policy다.
+P2-1 Team Builder foundation과 P2-2 Event context + submission eligibility + applicant lookup 및
+operator submission-status read UX는 Test 기준 완료했다. 실제 공식 Submission DB write는 아직 구현하지 않았다.
 
 P2. Team Builder → 공식 파티 제출
 
@@ -409,13 +438,29 @@ Team Builder
 진행 상태:
 
 - P2-1 Team Builder foundation ✅
-- P2-2 Event context + submission eligibility + ownership policy 예정
+- P2-2 Event context + submission eligibility + applicant lookup + operator submission-status read UX ✅
 - P2-3 TeamSnapshot / RegistrationSubmission DB write + revision 예정
 - P2-4 final_submission_id freeze + Entry / Records integration E2E 예정
+- P2-5 Event-linked Bracket normalized cutover 예정
 
-P2-1에서 구현한 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이며, 공식 Submission 생성이나 DB write를 수행하지 않는다.
+P2-1의 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이다.
+P2-2는 Event context, applicant Registration confirmation, official eligibility와 운영자 제출 상태
+read만 구현했으며 공식 Submission 생성이나 DB write를 수행하지 않는다.
 
 개인 localStorage 저장본과 공식 제출 Snapshot은 분리한다.
+
+P2-5 — Event-linked Bracket normalized cutover
+
+P2-3과 P2-4 이후, Champions 구현 전에 Event-linked 신규 대진표의 hybrid 의존을 줄이는 전환 단계다.
+
+- normalized `Entry / EntryParticipant / Match` 기반 Bracket UI projection
+- 신규 Event-linked Bracket의 canonical 운영 사실을 normalized DB로 이동
+- legacy dual-write 의존 축소·제거 및 create / result change / delete lifecycle 단일화
+- legacy Bracket은 historical / legacy-only compatibility로 제한
+- 기존 Records fallback과 과거 대회 데이터는 보존
+- Production migration은 별도 후속 단계
+
+P2-5는 아직 구현되지 않았다.
 
 P3. 챔피언스 운영
 
@@ -604,10 +649,12 @@ feature/records-system
 ✓ P2-1 saved team switching / new / duplicate UX 및 destructive change confirmation
 
 바로 다음
-1. P2-2 Event context + submission eligibility + ownership policy
+1. P2-3 TeamSnapshot / RegistrationSubmission DB write + revision
 
 그 이후
-2. 챔피언스 운영 자동화
-3. Team Builder 자체 안정화 / 추가 UX
-4. Auth / RLS
-5. Production migration
+2. P2-4 final_submission_id freeze + Entry / Records integration E2E
+3. P2-5 Event-linked Bracket normalized cutover
+4. 챔피언스 운영 자동화
+5. Team Builder 자체 안정화 / 추가 UX
+6. Auth / RLS
+7. Production migration

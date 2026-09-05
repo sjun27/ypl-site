@@ -1836,3 +1836,123 @@ P2-1에서 Team Builder 개인 작업본과 공식 제출 Snapshot의 경계를 
 - 전체 Node test suite 91/91 PASS 및 production build PASS
 
 공식 Submission·TeamSnapshot DB write·Entry linkage는 P2-2 이후 단계로 남겨 두며, 이번 변경에서는 Supabase write를 수행하지 않았다.
+
+---
+
+## 2026-09-05 P2-2 Event context / submission eligibility / operator status read
+
+P2-2에서 Team Builder를 Event 운영 맥락으로 열고, 공식 제출 가능 여부와 신청자 Registration을
+확인하며, 운영자가 제출 상태를 읽을 수 있는 UI를 구현했다. 이 단계는 실제 Submission 완료가
+아니며 공식 Submission DB write를 수행하지 않았다.
+
+### Event context
+
+- 기존 `?eventId=<event-id>` query convention으로 Event-linked Team Builder context를 연다.
+- Event의 `regulation_id`, `cup_rule_id`, `cup_rule_settings`를 authoritative 값으로 사용한다.
+- Event context에서는 Regulation / Cup 변경을 막고 P2-1 destructive-change confirmation semantics를 유지한다.
+- free Team Builder mode는 기존대로 독립 동작한다.
+
+### applicant Registration lookup
+
+- 참가자가 입력한 이름을 `trim(name)`한 뒤 해당 Event의 `registration_name` exact match로 조회한다.
+- `registration_source`는 `application`, `advancement`, `manual`만 허용하고 `migration`은 제외한다.
+- 0건은 신청자 미발견, 1건은 해당 Registration 선택, 2건 이상은
+  `YPL_AMBIGUOUS_REGISTRATION`으로 중단한다.
+- fuzzy matching과 임의 Registration 선택은 사용하지 않으며, `player_id`가 NULL이어도 제출용
+  Registration lookup은 가능하다.
+
+### official submission eligibility
+
+기존 Team completeness validator와 official submission eligibility를 분리했다.
+
+- Pokémon 1~6마리 허용, 1~5마리도 허용
+- 기술 0~3개 허용
+- 일부 ability / item 누락 허용
+- Pokémon 0마리, 6마리 초과, unresolved member, canonical Pokémon ID resolve 실패 차단
+- Regulation / Cup / Species Clause / Item Clause / ability / item / move / Stat Points 위반 차단
+- legality validation data 확인 불가 시 fail closed
+
+따라서 `Team Incomplete != official submission Invalid`이며, Incomplete 상태여도 Regulation-invalid가
+아니면 제출 준비가 될 수 있다. `submission_target_at`은 hard deadline이 아닌 soft deadline이다.
+
+### operator submission-status read UX
+
+제출 상태의 source of truth는 `final_submission_id`가 아닌 `RegistrationSubmission` 존재 여부다.
+read model은 최소 `registrationId`, `registrationName`, `hasSubmission`, `latestRevision`,
+`latestSubmittedAt`를 제공한다.
+
+- 개인전은 대진표 생성 전 참가자 확정 화면 및 대진표 생성 후 파티 제출 현황에서 상태를 표시할 수 있다.
+- 팀전 팀 편성 modal에서는 submission status를 제거하고 팀 편성에 필요한 정보만 표시한다.
+- 팀전 대진표 생성 후 `Team Entry → EntryParticipant → registration_id → EventRegistration
+  → RegistrationSubmission`으로 연결해 전체/팀별/선수별 미제출·제출 완료와 latestSubmittedAt을 표시한다.
+- 미제출자는 Entry / Match에서 제거하지 않고 참가 자체를 막지 않는다. revision 숫자는 기본 UI에 노출하지 않는다.
+- event type / division 중복 label UI를 정리했다.
+
+### P2-2 validation
+
+Local 검증:
+
+- P2-2 targeted tests PASS
+- lifecycle regression fix까지 포함한 전체 Node tests 113/113 PASS
+- production build PASS
+- `git diff --check` PASS
+
+Browser 검증:
+
+1. Event context 정상
+2. Event Regulation / Cup 고정 정상
+3. 신청자 exact-match 정상
+4. 6 Pokémon + 0 moves: Team Incomplete이지만 제출 준비 완료
+5. Pokémon 0: 제출 불가
+6. free Team Builder mode 정상
+7. 팀전 대진표 생성 후 파티 제출 현황 UI 정상
+8. 팀전 grouping / count / 선수별 status 표시 정상
+
+실제 Submission DB write가 아직 없으므로 브라우저에서 미제출 → 제출 완료 전환은 검증하지 않았으며,
+해당 E2E는 P2-3으로 이관한다.
+
+### 별도 bugfix — Event-linked bracket deletion lifecycle regression
+
+P2-2 browser E2E 중 Event-linked bracket 삭제 lifecycle regression을 발견하고 수정했다.
+
+원인은 `rollbackEventParticipantConfirmation()`의 DELETE 요청에 삭제 row 검증용
+`.select("id")`가 없었던 것이다. DELETE 자체는 성공했지만 반환 data가 비어 exact-row 검사가
+실패로 판단할 수 있었고, normalized Entry / EntryParticipant가 삭제된 뒤 오류가 발생할 수 있었다.
+
+수정 내용:
+
+- Phase A: read-only deletion preflight
+- Phase B: Match 삭제 → participant confirmation rollback → legacy bracket 삭제 → previous Event status 복구
+- 단계별 failure compensation
+- ownership을 안전하게 확정할 수 있는 경우에만 interrupted deletion finalize
+- DELETE return에 `.select("id")`를 추가해 exact-row 삭제 검증
+
+Test DB 브라우저 E2E에서 `P1-1 팀전 E2E 테스트`를 생성→삭제→재생성하며 다음을 확인했다.
+
+생성 후:
+
+- Event `running`
+- Team Entry 4건
+- EntryParticipant 4건
+- runtime Match 2건
+
+삭제 후:
+
+- Event `open`
+- EventRegistration 20건 유지
+- Entry 0건
+- EntryParticipant 0건
+- runtime Match 0건
+- Result 0건
+- RankingAward 0건
+- `record_applied_at = NULL`
+- legacy bracket 제거
+
+삭제 후 동일 Event의 재생성도 정상 동작했다. 이 수정은 P2-2 submission architecture 문제가 아니라
+Event-linked bracket lifecycle regression을 browser E2E에서 발견해 수정한 이력이다.
+
+### 다음 단계
+
+P2-3에서 TeamSnapshot / TeamSnapshotMember / RegistrationSubmission DB INSERT, revision 생성,
+실제 제출 버튼 저장을 구현한다. `final_submission_id` freeze와 result-apply submission freeze,
+실제 Submission → Records final snapshot E2E는 이후 P2-4 범위다.

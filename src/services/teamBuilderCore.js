@@ -684,6 +684,188 @@ export function validateTeam({ team, regulation, regulationId, cupRuleId, assign
   return { valid, complete, status, errors, incomplete, warnings };
 }
 
+/**
+ * Official submission eligibility is intentionally separate from validateTeam().valid.
+ * A party may be incomplete (fewer than six Pokémon or fewer than four moves) and
+ * still be submitted; only an empty party or an actual legality/identity failure
+ * makes it ineligible.
+ */
+export function validateSubmissionEligibility({
+  team = [],
+  regulation,
+  regulationId,
+  cupRuleId,
+  assignedTypeId,
+  detailData,
+  detailStatus,
+  legalItems,
+  displayPokemon,
+} = {}) {
+  const members = Array.isArray(team) ? team : [];
+  const errors = [];
+  const warnings = [];
+  const maxTeamSize = Number(regulation?.maxTeamSize || 6);
+  const dataReady = Boolean(detailData)
+    && (!detailStatus || detailStatus === "ready");
+
+  if (!members.length) errors.push("포켓몬을 1마리 이상 선택해 주세요.");
+  if (members.length > maxTeamSize) errors.push(`포켓몬은 최대 ${maxTeamSize}마리까지 제출할 수 있습니다.`);
+
+  if (!dataReady) {
+    errors.push("파티 적합성을 확인할 수 없습니다. 데이터를 다시 불러온 후 시도해 주세요.");
+  }
+  if (dataReady && !Array.isArray(legalItems)) {
+    errors.push("파티 적합성을 확인할 수 없습니다. 사용 가능 도구 데이터를 다시 불러온 후 시도해 주세요.");
+  }
+
+  for (const member of members) {
+    const name = displayPokemon?.(member?.pokemon) || member?.pokemon?.name || "알 수 없는 포켓몬";
+    if (!member?.pokemon?.name || member.resolutionState === "unresolved") {
+      errors.push(`${name}의 canonical Pokémon identity를 확인할 수 없습니다.`);
+      continue;
+    }
+    if (dataReady && !resolveCanonicalPokemonIdentity(member, { detailData }).resolved) {
+      errors.push(`${name}의 canonical Pokémon identity를 확인할 수 없습니다.`);
+    }
+  }
+
+  if (dataReady && Array.isArray(legalItems) && members.every(member => member?.pokemon?.name)) {
+    const validation = validateTeam({
+      team: members,
+      regulation,
+      regulationId,
+      cupRuleId,
+      assignedTypeId,
+      detailData,
+      detailStatus: "ready",
+      legalItems,
+      displayPokemon,
+    });
+    errors.push(...validation.errors);
+  }
+
+  const cupRule = CUP_RULES[cupRuleId] || CUP_RULES.none;
+  if (cupRule.kind === "monotype" && !assignedTypeId) {
+    errors.push("모노타입 공식 제출의 배정 타입을 확인할 수 없습니다.");
+  }
+
+  if (members.length > 0 && members.length < maxTeamSize) {
+    warnings.push(`포켓몬이 ${members.length}/${maxTeamSize}마리 설정되었습니다. 미완성 상태로 제출할 수 있습니다.`);
+  }
+  for (const member of members) {
+    const moveCount = Array.isArray(member?.moves) ? member.moves.filter(Boolean).length : 0;
+    if (moveCount < 4) warnings.push(`${displayPokemon?.(member?.pokemon) || member?.pokemon?.name || "포켓몬"}의 기술이 ${moveCount}/4개 설정되었습니다.`);
+  }
+
+  return {
+    eligible: errors.length === 0,
+    errors: [...new Set(errors)],
+    warnings: [...new Set(warnings)],
+  };
+}
+
+export function buildSubmissionStatusRows(registrations = [], submissions = []) {
+  const latestByRegistration = new Map();
+  for (const submission of Array.isArray(submissions) ? submissions : []) {
+    const registrationId = submission?.registration_id || submission?.registrationId;
+    if (!registrationId) continue;
+    const revision = Number(submission?.revision || 0);
+    const previous = latestByRegistration.get(registrationId);
+    if (!previous || revision > previous.revision) {
+      latestByRegistration.set(registrationId, {
+        revision,
+        submittedAt: submission?.submitted_at || submission?.submittedAt || null,
+      });
+    }
+  }
+  return (Array.isArray(registrations) ? registrations : []).map(registration => {
+    const latest = latestByRegistration.get(registration?.id);
+    return {
+      registrationId: registration?.id || null,
+      registrationName: registration?.registration_name || registration?.registrationName || "",
+      hasSubmission: Boolean(latest),
+      latestRevision: latest?.revision || null,
+      latestSubmittedAt: latest?.submittedAt || null,
+    };
+  });
+}
+
+export function buildBracketSubmissionStatusModel(bracket = {}, statuses = []) {
+  const statusByRegistrationId = new Map(
+    (Array.isArray(statuses) ? statuses : [])
+      .filter(status => status?.registrationId)
+      .map(status => [status.registrationId, status])
+  );
+  const statusFor = (registrationId, name, participantId = null, entryParticipantId = null) => {
+    const status = statusByRegistrationId.get(registrationId);
+    return {
+      participantId,
+      entryParticipantId,
+      registrationId,
+      name: name || status?.registrationName || "이름 없음",
+      hasSubmission: Boolean(status?.hasSubmission),
+      latestSubmittedAt: status?.latestSubmittedAt || null,
+    };
+  };
+
+  if (bracket?.mode === "team") {
+    const teams = (Array.isArray(bracket?.participants) ? bracket.participants : [])
+      .filter(team => team?.entryId && Array.isArray(team?.memberIdentities))
+      .map(team => {
+        const members = team.memberIdentities
+          .slice()
+          .sort((a, b) => Number(a?.memberOrder || 0) - Number(b?.memberOrder || 0))
+          .filter(member => member?.entryParticipantId && member?.registrationId)
+          .map(member => statusFor(member.registrationId, member.name, null, member.entryParticipantId));
+        return {
+          teamId: team.id || null,
+          entryId: team.entryId,
+          teamName: team.name || "이름 없는 팀",
+          submitted: members.filter(member => member.hasSubmission).length,
+          total: members.length,
+          members,
+        };
+      })
+      .filter(team => team.total > 0);
+    return {
+      mode: "team",
+      submitted: teams.reduce((sum, team) => sum + team.submitted, 0),
+      total: teams.reduce((sum, team) => sum + team.total, 0),
+      teams,
+    };
+  }
+
+  const participants = (Array.isArray(bracket?.participants) ? bracket.participants : [])
+    .filter(participant => participant?.registrationId || participant?.registration_id)
+    .map(participant => statusFor(
+      participant.registrationId || participant.registration_id,
+      participant.name,
+      participant.id || null,
+      participant.entryParticipantId || participant.entry_participant_id || null
+    ));
+  return {
+    mode: "individual",
+    submitted: participants.filter(participant => participant.hasSubmission).length,
+    total: participants.length,
+    participants,
+  };
+}
+
+export function selectSubmissionRegistration(registrations = [], registrationName = "") {
+  const name = String(registrationName || "").trim();
+  if (!name) return null;
+  const matches = (Array.isArray(registrations) ? registrations : []).filter(registration =>
+    ["application", "advancement", "manual"].includes(registration?.registration_source || registration?.registrationSource)
+    && String(registration?.registration_name || registration?.registrationName || "") === name
+  );
+  if (matches.length > 1) {
+    const ambiguous = new Error("동일한 이름의 신청자가 있어 자동으로 확인할 수 없습니다. 운영진에게 문의해주세요.");
+    ambiguous.code = "YPL_AMBIGUOUS_REGISTRATION";
+    throw ambiguous;
+  }
+  return matches[0] || null;
+}
+
 export function prettifyID(id) {
   return String(id || "").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, c => c.toUpperCase());
 }

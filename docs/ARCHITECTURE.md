@@ -42,7 +42,7 @@ src/
 
 # 2. 운영 데이터 원본
 
-현재 운영 데이터의 기준 원본은 다음입니다.
+전체 Production 운영 데이터는 아직 다음 legacy 저장소에 의존합니다.
 
 ```text
 Supabase
@@ -50,9 +50,21 @@ table: site_data
 key: ypl_data_v4
 ```
 
+그러나 Test에서 이미 normalized runtime으로 전환된 신규 Event-linked 사실은
+normalized model을 canonical target으로 취급합니다.
+
+```text
+Player / Season / Event / EventRegistration
+Entry / EntryParticipant / Match / Result / RankingAward
+```
+
+Bracket graph / round / legacy ranking write 등 일부 영역만 아직 `ypl_data_v4`와 hybrid로
+동작합니다. Production은 아직 normalized migration 전이므로 Test architecture 완료와
+Production 적용 완료를 혼동하지 않습니다.
+
 GitHub 코드의 SEED는 fallback 및 개발용 기본 데이터이며 자동 백업본이 아닙니다.
 
-따라서:
+따라서 Production의 현재 데이터 판단은:
 
 ```text
 운영 데이터 판단
@@ -124,7 +136,10 @@ Team Builder 개인 팀
 
 Local saved team은 편집 가능한 working data이며 localStorage schema v3으로 보존합니다. 이는 공식 제출 데이터와 별개입니다. `savedTeams`, `activeSavedTeamId`, `draft`를 기반으로 팀 전환, 새 팀, 복제를 구분하며, 새 팀은 현재 Regulation / Cup / Type context만 유지하고 members는 비웁니다.
 
-대회 엔트리 제출 기능을 추가할 때는 개인 작업본을 그대로 연결하지 않고 **제출 당시 Team Snapshot을 별도로 고정**합니다. 현재 P2-1에서는 이 경계를 위한 local serializer / loader foundation까지만 구현했으며 Supabase write는 하지 않습니다.
+대회 엔트리 제출 기능을 추가할 때는 개인 작업본을 그대로 연결하지 않고 **제출 당시 Team Snapshot을 별도로 고정**합니다.
+P2-1에서는 이 경계를 위한 local serializer / loader foundation을 구현했고, P2-2에서는 공식 제출을
+판정하기 위한 Event context, applicant Registration lookup, eligibility, 운영자 제출 상태 read만 구현했다.
+실제 공식 Submission DB write는 P2-3에서 구현한다.
 
 ### Team Builder identity 경계
 
@@ -134,18 +149,42 @@ Local saved team은 편집 가능한 working data이며 localStorage schema v3�
 - unresolved member가 있으면 official TeamSnapshot 생성을 차단한다.
 - Regulation / Cup 변경으로 현재 편집 팀에서 illegal member가 제거될 때는 confirmation 후 기존 filtering semantics를 적용하며, saved team 원본과 current draft를 구분한다.
 
-### P2 공식 제출 경계
+### P2-2 공식 제출 판정과 운영자 read 경계
 
-다음 항목은 아직 미구현이다.
+P2-2 구현 완료 범위:
 
-- Event authoritative context
-- official submit eligibility
-- ownership verification
+- Team Builder는 `?eventId=<event-id>` query convention으로 Event context를 열며,
+  `regulation_id`, `cup_rule_id`, `cup_rule_settings`는 Event authoritative 값으로 고정한다.
+  Event context에서는 Regulation / Cup 변경을 막고 P2-1 destructive-change confirmation semantics를 유지한다.
+- free Team Builder mode는 기존대로 독립 동작한다.
+- 참가자가 입력한 이름을 `trim(name)`한 뒤 해당 Event의 `registration_name` exact match로 조회한다.
+  `registration_source`는 `application`, `advancement`, `manual`만 허용하고 `migration`은 제외한다.
+  0건은 미발견, 1건은 선택, 2건 이상은 `YPL_AMBIGUOUS_REGISTRATION`으로 중단하며 fuzzy match와
+  임의 선택은 금지한다. `player_id`가 NULL인 Registration도 제출용 lookup 대상이다.
+- 기존 Team completeness validator와 official submission eligibility는 분리한다.
+  Pokémon 1~6, 1~5마리, 기술 0~3개, 일부 ability/item 누락은 Regulation-invalid가 아니면 허용한다.
+  Pokémon 0 / 6 초과, unresolved member, canonical Pokémon ID resolve 실패, Regulation/Cup/Species
+  Clause/Item Clause/ability/item/move/Stat Points 위반, legality validation data 확인 불가는 차단한다.
+  즉 `Incomplete != Invalid`이며 legality data 확인 불가는 fail closed다.
+- `RegistrationSubmission` 존재 여부가 제출 상태 source of truth다. 최소 read model은
+  `registrationId`, `registrationName`, `hasSubmission`, `latestRevision`, `latestSubmittedAt`를 가진다.
+  개인전은 대진표 전후에 상태를 표시할 수 있고, 팀전은 팀 편성 modal이 아니라 대진표 생성 후
+  `Team Entry → EntryParticipant → registration_id → EventRegistration → RegistrationSubmission`으로
+  선수별 상태를 확인한다. revision 숫자는 기본 UI에 노출하지 않아도 된다.
+- 미제출자는 Entry / Match에서 제거하지 않으며 참가 자체를 막지 않는다.
+
+P2-2에서 아직 구현하지 않은 항목:
+
 - TeamSnapshot DB insert
-- RegistrationSubmission revision
+- TeamSnapshotMember DB insert
+- RegistrationSubmission DB insert
+- revision write
 - `final_submission_id` freeze
-- Entry linkage
-- Supabase write
+- result-apply submission freeze
+- actual Submission → Records final snapshot E2E
+
+현재는 Auth/RLS가 없고 이름 exact match 기반 운영이므로, 이 단계의 귀속 표현은 Auth identity
+verification이 아닌 **EventRegistration applicant lookup/confirmation**이다.
 
 ---
 
@@ -571,6 +610,36 @@ AUTO / REVIEW / MANUAL 구분을 검토합니다.
 # 11. Migration 원칙
 
 현재 `ypl_data_v4`를 한 번에 제거하지 않습니다.
+
+현재 Event-linked 대진표는 다음 hybrid runtime이다.
+
+```text
+legacy:     Bracket graph / UI state
+normalized: Event / EventRegistration / Entry / EntryParticipant
+            Match / Result / RankingAward
+```
+
+신규 기능은 normalized-first로 개발한다. 새로운 canonical 운영 사실을 legacy JSON에 추가로
+확대하지 않으며, `ypl_data_v4`는 장기적으로 historical data compatibility, 아직 migration되지
+않은 legacy-only Event, 과거 Records fallback 용도로 축소한다.
+
+목표 runtime은 다음과 같다.
+
+```text
+Event
+→ Entry
+→ EntryParticipant
+→ Match
+→ Bracket UI projection
+→ Result
+→ RankingAward
+→ Records
+```
+
+따라서 신규 Event-linked Bracket도 최종적으로 normalized Match / Entry 상태에서 UI를
+projection한다. legacy Bracket object를 신규 Event-linked canonical source로 계속 유지하지
+않으며, 이 전환은 P2-5에서 수행한다. P2-5는 아직 구현되지 않았고 Production migration은
+별도 후속 단계다.
 
 권장 전환:
 
@@ -1637,11 +1706,12 @@ P1-4까지 normalized Match / Result / RankingAward 및 legacy 기록 반영 lif
 
 ## 18. 다음 단계
 
-1. Team Builder → TeamSnapshot → RegistrationSubmission → 공식 Submission
-2. 챔피언스 운영 자동화
-3. Team Builder 자체 안정화 / 추가 UX
-4. Auth / RLS
-5. Production migration
+1. P2-3 TeamSnapshot / RegistrationSubmission DB write + revision
+2. P2-4 final_submission_id freeze + Entry / Records integration E2E
+3. P2-5 Event-linked Bracket normalized cutover
+4. 챔피언스 운영 자동화
+5. Auth / RLS
+6. Production migration
 
 운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
 <!-- YPL_NORMALIZED_MODEL_V1_END -->
@@ -1661,6 +1731,7 @@ Entry
 EntryParticipant
 Match (개인전·팀전 Event-linked runtime)
 Result (개인 Entry·Team Entry final placement)
+RankingAward (Event-linked Master / Light 개인·팀전 runtime placement payout)
 ```
 
 신규 신청은 EventRegistration에 저장하며 신청 단계에서는 신규 Player를 생성하지 않는다.
@@ -1689,7 +1760,7 @@ Player → Registration → Entry → EntryParticipant를 쓰며 중간 실패�
 
 ### 현재 legacy runtime 사용 범위
 
-다음 운영 write 데이터의 source of truth는 아직 `public.site_data / ypl_data_v4`다.
+다음 일부 영역의 source of truth는 아직 `public.site_data / ypl_data_v4`다.
 
 ```text
 Bracket 결과
@@ -1699,7 +1770,8 @@ Bracket 결과
 시즌 성적 write
 ```
 
-Bracket 자체와 화면 렌더링의 source of truth는 계속 legacy JSON이다. Event-linked
+Event-linked 신규 사실의 canonical target은 normalized model이지만, 현재 Bracket graph와
+화면 렌더링, round / legacy ranking / season write는 legacy JSON에 남아 있다. Event-linked
 개인전과 팀전에서 실제 Entry가 성립한 경기는 normalized `matches`에도 함께 저장한다.
 
 따라서 현재 기록 반영 경로는 다음 hybrid 구조다.
@@ -1720,24 +1792,25 @@ Event / EventRegistration / Player / Entry / EntryParticipant / Match / Result
 
 ### 목표 runtime 흐름
 
-다음 순서로 legacy dependency를 제거한다.
+다음 순서로 Event-linked Bracket의 legacy dependency를 제거한다.
 
 ```text
-Application
-→ EventRegistration
+Event
 → Entry
 → EntryParticipant
-→ Bracket
 → Match
+→ Bracket UI projection
 → Result
 → RankingAward
 → Records
 ```
 
-개인전과 팀전의 Event-linked normalized write 전환 및 P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다.
-현재 다음 단계는 Team Builder → TeamSnapshot → RegistrationSubmission 연결이다.
+개인전과 팀전의 Event-linked normalized identity / Match / Result / RankingAward runtime 및
+P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다. Team Builder P2-2에서는
+Event context, applicant lookup, eligibility와 submission-status read까지 완료했으며,
+공식 Submission DB write는 P2-3에서 구현한다. Bracket normalized cutover는 P2-5에서 수행한다.
 
-Team Builder / RegistrationSubmission / TeamSnapshot 연결은 신청→기록 흐름이 안정된 뒤 추가한다.
+Team Builder의 공식 Submission / TeamSnapshot write와 revision은 신청→기록 흐름 위에 P2-3으로 추가한다.
 
 ### Bracket 생성과 기록 반영 write ordering
 
@@ -1772,7 +1845,12 @@ legacy 기록을 저장하기 직전에 final Match sync, final Result sync, Ran
 
 기록 반영 취소에서는 runtime placement RankingAward를 먼저 제거하고 runtime Result를 제거한 뒤 legacy 기록을 원복하고 Event를 다시 `running`으로 열어 `record_applied_at`을 NULL로 되돌린다. legacy 원복 저장이 실패하면 FK 순서에 맞춰 직전 Result snapshot, RankingAward snapshot 순서로 복구한다. Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
 
-기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. Event에 RankingAward와 Result가 모두 0건인지 먼저 확인한 뒤 FK 순서에 따라 runtime Match를 삭제하고 normalized 참가 확정을 원복한 다음 legacy Bracket 삭제를 저장한다. 다른 source나 unknown Award/Result가 남아 있으면 임의 삭제하지 않고 중단한다. 이후 `participantConfirmation.previousEventStatus`가 `open`이면 Event를 `open`으로 복구한다. 이전부터 `running`이었던 Event는 `running`을 유지한다.
+기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. Phase A에서 read-only deletion preflight로
+Event의 RankingAward / Result와 ownership을 확인하고, Phase B에서 `Match 삭제 → participant
+confirmation rollback → legacy Bracket 삭제 → previous Event status 복구`를 수행한다. 단계별
+실패에는 compensation을 적용하며, interrupted deletion은 ownership을 안전하게 확정할 수 있는
+경우만 finalize한다. `rollbackEventParticipantConfirmation()`의 DELETE 결과 검증에는
+`.select("id")`를 포함해 exact-row 확인이 실제 삭제를 오인하지 않도록 한다.
 
 ### P0-4 normalized Match runtime sync
 

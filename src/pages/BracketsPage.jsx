@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { assertEventHasNoRankingAwards, assertEventHasNoResults, completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
+import { completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, listEventRegistrationSubmissionStatuses, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
 import { buildDefaultTeamMatchLineups, buildTeamMatchSeries, getTeamMatchLineupOptions, getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
+import { executeBracketDeletionLifecycle, preserveBracketLifecycleMetadata, validateBracketParticipantConfirmation } from "../services/bracketLifecycle.js";
+import { buildBracketSubmissionStatusModel } from "../services/teamBuilderCore.js";
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
@@ -333,6 +335,8 @@ function BracketWizard({ data, onClose, onCreate }){
   const [eventRegs,setEventRegs]=useState([]);
   const [eventBusy,setEventBusy]=useState(false);
   const [eventError,setEventError]=useState("");
+  const [submissionStatuses,setSubmissionStatuses]=useState([]);
+  const [submissionStatusError,setSubmissionStatusError]=useState("");
   const [selectedRegistrationIds,setSelectedRegistrationIds]=useState([]);
   const [addedParticipants,setAddedParticipants]=useState([]);
   const [creating,setCreating]=useState(false);
@@ -348,6 +352,8 @@ function BracketWizard({ data, onClose, onCreate }){
     setEventId(id);
     setEventError("");
     setEventRegs([]);
+    setSubmissionStatuses([]);
+    setSubmissionStatusError("");
     if(!id) return;
 
     const event=events.find(x=>x.id===id);
@@ -366,8 +372,16 @@ function BracketWizard({ data, onClose, onCreate }){
 
     setEventBusy(true);
     try{
-      const regs=await listEventRegistrations(id);
+      const [registrationResult, statusResult] = await Promise.allSettled([
+        listEventRegistrations(id),
+        listEventRegistrationSubmissionStatuses(id),
+      ]);
+      if (registrationResult.status === "rejected") throw registrationResult.reason;
+      const regs = registrationResult.value || [];
+      const statuses = statusResult.status === "fulfilled" ? statusResult.value : [];
+      if (statusResult.status === "rejected") setSubmissionStatusError(statusResult.reason?.message || "제출 상태를 불러오지 못했습니다.");
       setEventRegs(regs);
+      setSubmissionStatuses(statuses || []);
       setSelectedRegistrationIds((regs||[]).map(r=>r.id));
       setAddedParticipants([]);
 
@@ -382,6 +396,7 @@ function BracketWizard({ data, onClose, onCreate }){
       }
     }catch(error){
       setEventError(error?.message||"신청자 목록을 불러오지 못했습니다.");
+      setSubmissionStatusError(error?.message || "제출 상태를 불러오지 못했습니다.");
     }finally{
       setEventBusy(false);
     }
@@ -441,6 +456,13 @@ function BracketWizard({ data, onClose, onCreate }){
     }
     if(created)onClose();
   };
+  const submissionStatusByRegistrationId = new Map((submissionStatuses || []).map(status => [status.registrationId, status]));
+  const formatSubmissionTime = value => value ? new Date(value).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" }) : "";
+  const submissionBadge = registrationId => {
+    const status = submissionStatusByRegistrationId.get(registrationId);
+    if (!status?.hasSubmission) return <span className="bk-hint" style={{ margin: 0, color: "var(--muted2)" }}>미제출</span>;
+    return <span className="bk-hint" style={{ margin: 0, color: "#18734a", fontWeight: 750 }}>제출 완료{formatSubmissionTime(status.latestSubmittedAt) ? ` · ${formatSubmissionTime(status.latestSubmittedAt)}` : ""}</span>;
+  };
   const linkedEvent=events.find(event=>event.id===eventId)||null;
   const linkedAnnouncement=(data?.announcements||[]).find(announcement=>
     announcement.id===linkedEvent?.registration_settings?.announcementId
@@ -477,6 +499,7 @@ function BracketWizard({ data, onClose, onCreate }){
         {eventId&&!eventBusy&&
           <div className="bk-hint">
             신청자 {eventRegs.length}명 · 공지에 설정된 대회 정보와 참가자 명단을 사용합니다.
+            {mode!=="team"&&submissionStatusError&&<span style={{display:"block",color:"var(--loss)",marginTop:4}}>파티 제출 상태: {submissionStatusError}</span>}
           </div>
         }
       </div>
@@ -560,6 +583,7 @@ function BracketWizard({ data, onClose, onCreate }){
                   style={{width:"auto"}}
                 />
                 <span style={{flex:1,fontWeight:700}}>{reg.registration_name}</span>
+                {submissionBadge(reg.id)}
                 {!checked&&<span className="bk-hint" style={{margin:0}}>불참</span>}
               </label>
             );
@@ -787,19 +811,119 @@ function PartyEditor({ b, onClose, onSave }){
   </Modal>);
 }
 
-function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
+function formatBracketSubmissionTime(value) {
+  return value
+    ? new Date(value).toLocaleString("ko-KR", {
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "";
+}
+
+function SubmissionStatusPanel({ model, busy, error, expanded, onToggle, onRetry }) {
+  const renderMember = member => (
+    <div className="bk-submission-member" key={member.registrationId}>
+      <span className="bk-submission-member-name">{member.name}</span>
+      <span className={`bk-submission-state${member.hasSubmission ? " submitted" : ""}`}>
+        {member.hasSubmission
+          ? `제출 완료${formatBracketSubmissionTime(member.latestSubmittedAt) ? ` · ${formatBracketSubmissionTime(member.latestSubmittedAt)}` : ""}`
+          : "미제출"}
+      </span>
+    </div>
+  );
+
+  return (
+    <section className="bk-submission" aria-label="파티 제출 현황">
+      <button
+        type="button"
+        className="bk-submission-toggle"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        disabled={busy && model.total === 0}
+      >
+        <span className="bk-submission-title">파티 제출 현황</span>
+        <span className="bk-submission-summary">
+          {busy && model.total === 0 ? "불러오는 중…" : `${model.submitted} / ${model.total} 제출`}
+          <span className="bk-submission-chevron" aria-hidden="true">{expanded ? "▲" : "▼"}</span>
+        </span>
+      </button>
+      {error && <div className="bk-submission-error">
+        <span>{error}</span>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onRetry}>다시 불러오기</button>
+      </div>}
+      {expanded && !busy && !error && model.total > 0 && (
+        <div className="bk-submission-detail">
+          {model.mode === "team" ? (
+            <div className="bk-submission-groups">
+              {model.teams.map(team => (
+                <div className="bk-submission-group" key={team.entryId}>
+                  <div className="bk-submission-group-head">
+                    <strong>{team.teamName}</strong>
+                    <span>{team.submitted} / {team.total}</span>
+                  </div>
+                  <div className="bk-submission-members">{team.members.map(renderMember)}</div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="bk-submission-members bk-submission-individuals">
+              {model.participants.map(renderMember)}
+            </div>
+          )}
+        </div>
+      )}
+      {expanded && !busy && !error && model.total === 0 && (
+        <div className="bk-submission-empty">확정된 Registration 연결이 없어 제출 현황을 표시할 수 없습니다.</div>
+      )}
+    </section>
+  );
+}
+
+function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=false }){
   const nameOf=(pid)=>{ const p=(b.participants||[]).find(x=>x.id===pid); return p?p.name:pid; };
   const teamMode=b.mode==="team";
-  const locked=!!b.applied;
+  const locked=!!b.applied||deleting;
   const [matchMutationBusy,setMatchMutationBusy]=useState(false);
   const matchMutationBusyRef=useRef(false);
   const editAdmin=admin&&!locked&&!matchMutationBusy;
   const [series,setSeries]=useState(null);
   const [party,setParty]=useState(false);
-  const savePartyFn=(parts)=>{ if(locked)return; save({...data,brackets:data.brackets.map(x=>x.id===b.id?{...x,participants:parts}:x)}); setParty(false); flash("엔트리 저장 ✓"); };
+  const [submissionStatuses,setSubmissionStatuses]=useState([]);
+  const [submissionStatusError,setSubmissionStatusError]=useState("");
+  const [submissionStatusBusy,setSubmissionStatusBusy]=useState(Boolean(b.eventId));
+  const [submissionStatusExpanded,setSubmissionStatusExpanded]=useState(false);
+  const [submissionStatusReloadKey,setSubmissionStatusReloadKey]=useState(0);
+  useEffect(()=>{
+    if(!b.eventId){
+      setSubmissionStatuses([]);
+      setSubmissionStatusError("");
+      setSubmissionStatusBusy(false);
+      return;
+    }
+    let cancelled=false;
+    setSubmissionStatusBusy(true);
+    setSubmissionStatusError("");
+    listEventRegistrationSubmissionStatuses(b.eventId)
+      .then(rows=>{ if(!cancelled) setSubmissionStatuses(rows||[]); })
+      .catch(error=>{ if(!cancelled) setSubmissionStatusError(error?.message||"파티 제출 현황을 불러오지 못했습니다."); })
+      .finally(()=>{ if(!cancelled) setSubmissionStatusBusy(false); });
+    return ()=>{ cancelled=true; };
+  },[b.eventId,data,submissionStatusReloadKey]);
+  const submissionStatusModel=buildBracketSubmissionStatusModel(b,submissionStatuses);
+  const savePartyFn=async(parts)=>{
+    if(locked)return;
+    const nextBracket=preserveBracketLifecycleMetadata(b,{...b,participants:parts});
+    const saved=await save({...data,brackets:data.brackets.map(x=>x.id===b.id?nextBracket:x)});
+    if(!saved){ await refresh?.(); return; }
+    setParty(false);
+    flash("엔트리 저장 ✓");
+  };
   const hasParty=(b.participants||[]).some(p=>p.party||(p.memberParties&&Object.values(p.memberParties).some(Boolean)));
   const persistBracketMutation=async(nextBracket,successMessage="")=>{
     if(locked||matchMutationBusyRef.current)return false;
+    nextBracket=preserveBracketLifecycleMetadata(b,nextBracket);
     matchMutationBusyRef.current=true;
     setMatchMutationBusy(true);
 
@@ -933,6 +1057,14 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply }){
     flash("기록 반영 취소 ✓");
   };
   return (<div className="bk-board swap">
+    {b.eventId&&<SubmissionStatusPanel
+      model={submissionStatusModel}
+      busy={submissionStatusBusy}
+      error={submissionStatusError}
+      expanded={submissionStatusExpanded}
+      onToggle={()=>setSubmissionStatusExpanded(value=>!value)}
+      onRetry={()=>setSubmissionStatusReloadKey(value=>value+1)}
+    />}
     {editAdmin&&<div className="bk-tools"><button className="btn btn-ghost btn-sm" onClick={()=>setParty(true)}>📋 파티 엔트리 기록</button></div>}
     {b.format==="group"&&<>
       <div className="bk-groups">{b.groups.map(gr=>{ const ev=evalGraph({rounds:[gr.matches]}); const st=groupStandings(gr);
@@ -1195,7 +1327,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
           brackets:(nextData.brackets||[]).map(x=>{
             if(x.id!==b.id) return x;
 
-            return {
+            return preserveBracketLifecycleMetadata(b,{
               ...x,
               participants:(x.participants||[]).map(p=>{
                 const resolved=resolvedParticipants.find(r=>r.id===p.id);
@@ -1219,7 +1351,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
                     }
                   }
                 : x.applied
-            };
+            });
           }),
 
           tournaments:(nextData.tournaments||[]).map(tour=>({
@@ -1639,6 +1771,8 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   const [wizard,setWizard]=useState(false);
   const [apply,setApply]=useState(null);
   const [drawId,setDrawId]=useState(null);
+  const [deletingId,setDeletingId]=useState(null);
+  const deletingRef=useRef(false);
   const open=list.find(b=>b.id===openId);
   const create=async(b)=>{
     if(b.eventId&&list.some(existing=>existing.eventId===b.eventId)){
@@ -1759,96 +1893,59 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   };
   const del=async(b)=>{
     if(b.applied){alert("기록 반영 취소 후 대진표를 삭제할 수 있습니다.");return;}
-    if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return;
+    if(deletingRef.current)return;
+    deletingRef.current=true;
+    setDeletingId(b.id);
 
-    const confirmation=b.participantConfirmation;
-    let identityChanges=[];
+    try{
+      if(!confirm(`'${b.name}' 대회를 삭제할까요?`))return;
 
-    if(b.eventId&&confirmation){
-      if(confirmation.eventId!==b.eventId){
-        flash("대진표의 참가 확정 metadata가 Event와 일치하지 않아 삭제를 중단했습니다.");
-        return;
-      }
-      identityChanges=Array.isArray(confirmation.identityChanges)?confirmation.identityChanges:[];
-      const expectedIdentityCount=b.mode==="team"
-        ? (b.participants||[]).reduce((sum,participant)=>sum+(participant.members||[]).length,0)
-        : (b.participants||[]).length;
-      if(
-        identityChanges.length!==expectedIdentityCount||
-        identityChanges.some(change=>
-          !change?.participantId||!change?.registrationId||!change?.playerId||!change?.entryId||!change?.entryParticipantId||
-          (b.mode==="team"&&(!change?.teamParticipantId||!change?.memberOrder))
-        )
-      ){
+      const confirmationState=validateBracketParticipantConfirmation(b);
+      if(b.eventId&&!confirmationState.ok){
         flash("대진표의 참가 확정 metadata가 불완전해 자동 삭제를 중단했습니다.");
         return;
       }
-    }
-
-    if(b.eventId&&confirmation){
-      try{
-        await assertEventHasNoRankingAwards(b.eventId);
-        await assertEventHasNoResults(b.eventId);
-      }catch(error){
-        flash(`Result/RankingAward 확인 실패로 대진표를 유지했습니다: ${error?.message||"알 수 없는 오류"}`);
-        return;
-      }
-    }
-
-    if(b.eventId){
-      try{
-        await deleteEventBracketMatches(b.eventId);
-      }catch(error){
-        flash(`runtime Match 정리 실패로 대진표를 유지했습니다: ${error?.message||"알 수 없는 오류"}`);
-        return;
-      }
-    }
-
-    if(b.eventId&&confirmation){
-      try{
-        await rollbackEventParticipantConfirmation(
+      const result=await executeBracketDeletionLifecycle({
+        preflight:async()=>b.eventId
+          ? preflightEventBracketDeletion(b.eventId,b)
+          : { safe:true, event:null, previousEventStatus:null, matchRows:[], entries:[], entryParticipants:[], registrations:[], players:[] },
+        deleteMatches:rows=>deleteEventBracketMatches(b.eventId,rows),
+        rollbackParticipants:snapshot=>rollbackEventParticipantConfirmation(
           b.eventId,
-          identityChanges,
-          {requireUnappliedEvent:true}
-        );
-      }catch(error){
-        let matchRestoreError=null;
-        try{ await syncEventBracketMatches(b.eventId,b); }
-        catch(restoreError){ matchRestoreError=restoreError; }
-        flash(matchRestoreError
-          ? `참가 확정 원복과 runtime Match 복구에 실패해 대진표를 유지했습니다: ${error?.message||"알 수 없는 오류"} / ${matchRestoreError?.message||"알 수 없는 오류"}`
-          : `참가 확정 원복 실패로 대진표를 유지하고 runtime Match를 복구했습니다: ${error?.message||"알 수 없는 오류"}`);
+          snapshot.identityChanges,
+          {requireUnappliedEvent:true,requireExactRows:true}
+        ),
+        saveLegacy:()=>save({...data,brackets:list.filter(x=>x.id!==b.id)}),
+        restoreLegacy:()=>save(data),
+        restoreParticipants:snapshot=>restoreEventParticipantConfirmation(b.eventId,snapshot),
+        restoreMatches:rows=>restoreEventBracketMatches(b.eventId,rows),
+        restoreEventStatus:previousStatus=>restoreApplicationEventStatus(b.eventId,previousStatus),
+      });
+
+      if(!result.ok){
+        await refresh?.();
+        if(result.phase==="preflight"){
+          flash(`삭제 전 read-only 확인 실패로 대진표를 유지했습니다: ${result.error?.message||"알 수 없는 오류"}`);
+        }else if(result.compensationErrors?.length){
+          flash(`삭제 ${result.phase} 단계 실패 후 일부 보상 복구에도 실패했습니다: ${result.error?.message||"알 수 없는 오류"} / ${result.compensationErrors.join(" / ")}`);
+        }else{
+          flash(`삭제 ${result.phase} 단계 실패로 삭제 전 상태를 복구했습니다: ${result.error?.message||"알 수 없는 오류"}`);
+        }
         return;
       }
-    }
 
-    const saved=await save({...data,brackets:list.filter(x=>x.id!==b.id)});
-    if(!saved){
-      await refresh?.();
-      flash(confirmation
-        ? "참가 확정은 정리됐지만 legacy 대진표 삭제에 실패했습니다. 같은 대진표 삭제를 다시 시도해 주세요."
-        : "대진표 삭제 저장에 실패했습니다.");
-      return;
+      setOpenId(null);
+      flash(result.phase==="interrupted_recovery" ? "중단된 대진표 삭제를 안전하게 마무리했습니다 ✓" : "대진표 삭제 ✓");
+    }finally{
+      deletingRef.current=false;
+      setDeletingId(null);
     }
-
-    if(b.eventId&&confirmation?.previousEventStatus){
-      try{
-        await restoreApplicationEventStatus(b.eventId,confirmation.previousEventStatus);
-      }catch(error){
-        flash(`대진표는 삭제됐지만 Event 상태 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
-        setOpenId(null);
-        return;
-      }
-    }
-
-    setOpenId(null);
-    flash("대진표 삭제 ✓");
   };
   const statusTag=(b)=>{ const r=b.format==="group"?(b.knockout?elimResult(b.knockout):null):elimResult(b.graph); if(b.applied)return"기록 반영됨"; if(r&&r.done)return"종료"; return"진행 중"; };
   return (<section className="sec">
     <Reveal className="sec-head"><div className="kick">Bracket</div><h2>대진표</h2>
       <p className="sub">대회 대진을 직접 생성하고 결과를 입력하면, 확정된 성적이 기록에 연동됩니다.</p>
-      {admin&&<div className="row-actions"><button className="btn btn-gold btn-sm" onClick={()=>setWizard(true)}>+ 새 대회 만들기</button></div>}
+      {admin&&<div className="row-actions"><button className="btn btn-gold btn-sm" disabled={!!deletingId} onClick={()=>setWizard(true)}>+ 새 대회 만들기</button></div>}
     </Reveal>
     {!open&&<div className="bk-list swap">
       {list.length===0&&<div className="bk-empty">아직 생성된 대회가 없습니다.{admin&&" 우측 상단에서 새 대회를 만들어보세요."}</div>}
@@ -1859,8 +1956,8 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
       </button>))}
     </div>}
     {open&&<div className="bk-open swap">
-      <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" disabled={!!open.applied} title={open.applied?"기록 반영 취소 후 삭제할 수 있습니다.":""} onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>삭제</button>}</div>
-      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} refresh={refresh} onApply={(b,res)=>setApply({b,res})}/>}
+      <div className="bk-open-bar"><button className="btn btn-ghost btn-sm" disabled={deletingId===open.id} onClick={()=>{setOpenId(null);setDrawId(null);}}>← 목록</button><div className="bk-open-title">{open.name}</div>{admin&&<button className="btn btn-ghost btn-sm" disabled={!!open.applied||deletingId===open.id} title={open.applied?"기록 반영 취소 후 삭제할 수 있습니다.":""} onClick={()=>del(open)} style={{marginLeft:"auto",color:"var(--loss)"}}>{deletingId===open.id?"삭제 중…":"삭제"}</button>}</div>
+      {drawId===open.id ? <BracketDraw b={open} onDone={()=>setDrawId(null)}/> : <BracketBoard b={open} data={data} admin={admin} save={save} flash={flash} refresh={refresh} deleting={deletingId===open.id} onApply={(b,res)=>setApply({b,res})}/>}
     </div>}
     {wizard&&<BracketWizard data={data} onClose={()=>setWizard(false)} onCreate={create}/>}
     {apply&&<BracketApply b={apply.b} res={apply.res} data={data} save={save} flash={flash} refresh={refresh} onClose={()=>setApply(null)}/>}

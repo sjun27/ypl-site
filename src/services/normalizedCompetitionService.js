@@ -20,6 +20,8 @@ import {
   buildTeamMemberCandidates,
   getConfirmedTeamMemberIdentities,
 } from "./bracketTeamParticipants.js";
+import { isInterruptedBracketCleanupState, validateBracketParticipantConfirmation } from "./bracketLifecycle.js";
+import { buildSubmissionStatusRows, selectSubmissionRegistration } from "./teamBuilderCore.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -111,6 +113,7 @@ function bracketMatchIdentityState(eventId, bracket) {
 
 const EVENT_RUNTIME_MATCH_SELECT = `
   id,
+  source,
   source_node_key,
   match_kind,
   parent_match_id,
@@ -127,6 +130,13 @@ const EVENT_RUNTIME_MATCH_SELECT = `
   played_at
 `;
 
+function sameRuntimeMatchSnapshot(left, right) {
+  const normalize = rows => (Array.isArray(rows) ? rows : [])
+    .map(row => JSON.stringify(row))
+    .sort();
+  return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
+}
+
 async function readEventRuntimeMatchesNow(eventId) {
   const { data, error } = await db()
     .from("matches")
@@ -135,6 +145,16 @@ async function readEventRuntimeMatchesNow(eventId) {
     .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE);
 
   if (error) fail(error, "기존 normalized Match를 확인하지 못했습니다.");
+  return data || [];
+}
+
+async function readEventAllMatchesNow(eventId) {
+  const { data, error } = await db()
+    .from("matches")
+    .select(EVENT_RUNTIME_MATCH_SELECT)
+    .eq("event_id", eventId);
+
+  if (error) fail(error, "Event의 normalized Match ownership을 확인하지 못했습니다.");
   return data || [];
 }
 
@@ -272,14 +292,156 @@ export async function syncEventBracketMatches(eventId, bracket) {
   return queueEventMatchMutation(eventId, () => syncEventBracketMatchesNow(eventId, bracket));
 }
 
-export async function deleteEventBracketMatches(eventId) {
+export async function deleteEventBracketMatches(eventId, expectedRows = null) {
   if (!eventId) return { deleted: 0 };
 
   return queueEventMatchMutation(eventId, async () => {
     const rows = await readEventRuntimeMatchesNow(eventId);
-    await deleteEventRuntimeMatchRowsNow(eventId, rows);
-    return { deleted: rows.length };
+    if (Array.isArray(expectedRows) && !sameRuntimeMatchSnapshot(rows, expectedRows)) {
+      throw new Error("삭제 Phase A 이후 normalized Match 상태가 변경되어 삭제를 중단했습니다.");
+    }
+    try {
+      await deleteEventRuntimeMatchRowsNow(eventId, rows);
+      return { deleted: rows.length, previousRows: rows };
+    } catch (error) {
+      try {
+        await replaceEventRuntimeMatchesNow(eventId, rows);
+      } catch (restoreError) {
+        throw new Error(
+          `${error?.message || "normalized Match 삭제에 실패했습니다."} (삭제 전 Match snapshot 복구 실패: ${restoreError?.message || "알 수 없는 오류"})`
+        );
+      }
+      throw error;
+    }
   });
+}
+
+function unsafeBracketCleanup(message) {
+  const error = new Error(message);
+  error.code = "YPL_UNSAFE_BRACKET_CLEANUP";
+  return error;
+}
+
+/**
+ * Read the rows that a bracket deletion is allowed to remove. This is also
+ * the guard for Event-linked brackets: an existing normalized artifact must
+ * never be hidden by deleting only the legacy JSON bracket.
+ */
+export async function inspectEventBracketCleanup(eventId, bracket, identityChanges = []) {
+  if (!eventId) return { safe: true, event: null, matchRows: [], entries: [], entryParticipants: [], registrations: [], players: [] };
+
+  if (!bracket?.eventId || bracket.eventId !== eventId) {
+    throw unsafeBracketCleanup("대진표의 eventId와 삭제 대상 Event가 일치하지 않아 삭제를 중단했습니다.");
+  }
+
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("대진표를 삭제할 Event를 찾을 수 없습니다.");
+  if (Boolean(event.is_team_event) !== (bracket?.mode === "team")) {
+    throw unsafeBracketCleanup("Event의 팀전 구분과 대진표 모드가 일치하지 않아 삭제를 중단했습니다.");
+  }
+  if (event.record_applied_at || event.status === "completed") {
+    throw new Error("기록이 반영된 Event의 대진표는 먼저 기록 반영을 취소해야 합니다.");
+  }
+  if (!["open", "running"].includes(event.status)) {
+    throw new Error("현재 Event 상태에서는 대진표를 삭제할 수 없습니다.");
+  }
+
+  const allMatchRows = await readEventAllMatchesNow(eventId);
+  const foreignMatchRows = allMatchRows.filter(row => row.source !== LEGACY_BRACKET_RUNTIME_SOURCE);
+  if (foreignMatchRows.length) {
+    throw unsafeBracketCleanup("다른 source의 normalized Match가 존재해 대진표 삭제를 중단했습니다.");
+  }
+  const matchRows = allMatchRows.filter(row => row.source === LEGACY_BRACKET_RUNTIME_SOURCE);
+  const confirmationState = validateBracketParticipantConfirmation(bracket);
+  if (!confirmationState.ok) {
+    throw unsafeBracketCleanup(
+      "참가 확정 metadata가 없거나 불완전해 대진표 삭제를 중단했습니다."
+    );
+  }
+
+  const changes = confirmationState.identityChanges;
+  const entryIds = [...new Set(changes.map(change => change.entryId).filter(Boolean))];
+  const entryParticipantIds = [...new Set(changes.map(change => change.entryParticipantId).filter(Boolean))];
+  const registrationIds = [...new Set(changes.map(change => change.registrationId).filter(Boolean))];
+  const playerIds = [...new Set(changes.map(change => change.playerId).filter(Boolean))];
+  const [entryResult, entryParticipantResult, registrationResult, playerResult] = await Promise.all([
+    db().from("entries").select("id, event_id, entry_type, display_name, status").eq("event_id", eventId),
+    db().from("entry_participants").select("id, event_id, entry_id, registration_id, player_id, member_order, role").eq("event_id", eventId),
+    db().from("event_registrations").select("id, event_id, player_id, registration_name, registration_data, registration_source, registered_at, final_submission_id, updated_at").eq("event_id", eventId).in("id", registrationIds),
+    playerIds.length
+      ? db().from("players").select("id, display_name, status").in("id", playerIds)
+      : Promise.resolve({ data: [], error: null }),
+  ]);
+  if (entryResult.error) fail(entryResult.error, "대진표 삭제 전에 Entry ownership을 확인하지 못했습니다.");
+  if (entryParticipantResult.error) fail(entryParticipantResult.error, "대진표 삭제 전에 EntryParticipant ownership을 확인하지 못했습니다.");
+  if (registrationResult.error) fail(registrationResult.error, "대진표 삭제 전에 Registration ownership을 확인하지 못했습니다.");
+  if (playerResult.error) fail(playerResult.error, "대진표 삭제 전에 Player ownership을 확인하지 못했습니다.");
+
+  const entries = entryResult.data || [];
+  const entryParticipants = entryParticipantResult.data || [];
+  const registrations = registrationResult.data || [];
+  const players = playerResult.data || [];
+  const expectedEntryIdSet = new Set(entryIds);
+  const expectedEntryParticipantIdSet = new Set(entryParticipantIds);
+  const unexpectedEntries = entries.filter(row => !expectedEntryIdSet.has(row.id));
+  const unexpectedEntryParticipants = entryParticipants.filter(row => !expectedEntryParticipantIdSet.has(row.id));
+  if (isInterruptedBracketCleanupState({ matchRows, entries, entryParticipants })) {
+    if (registrations.length !== registrationIds.length || players.length !== playerIds.length) {
+      throw unsafeBracketCleanup("interrupted deletion의 Registration/Player identity가 현재 Event와 일치하지 않아 복구를 중단했습니다.");
+    }
+    const registrationById = new Map(registrations.map(row => [row.id, row]));
+    const playerById = new Map(players.map(row => [row.id, row]));
+    for (const change of changes) {
+      const registration = registrationById.get(change.registrationId);
+      if (!registration || registration.event_id !== eventId || registration.player_id !== change.playerId || !playerById.has(change.playerId)) {
+        throw unsafeBracketCleanup("interrupted deletion의 Registration/Player identity가 metadata와 일치하지 않아 복구를 중단했습니다.");
+      }
+    }
+    return {
+      safe: true,
+      interrupted: true,
+      event,
+      previousEventStatus: confirmationState.previousEventStatus,
+      matchRows,
+      entries,
+      entryParticipants,
+      registrations,
+      players,
+      identityChanges: changes,
+    };
+  }
+  const ownedEntries = entries.filter(row => expectedEntryIdSet.has(row.id));
+  const ownedEntryParticipants = entryParticipants.filter(row => expectedEntryParticipantIdSet.has(row.id));
+  const expectedEntryCount = (bracket.participants || []).length;
+  if (unexpectedEntries.length || unexpectedEntryParticipants.length || ownedEntries.length !== expectedEntryCount || ownedEntryParticipants.length !== changes.length || registrations.length !== registrationIds.length || players.length !== playerIds.length) {
+    throw unsafeBracketCleanup("참가 확정 metadata와 normalized identity row 수가 일치하지 않아 대진표 삭제를 중단했습니다.");
+  }
+
+  const entryById = new Map(ownedEntries.map(row => [row.id, row]));
+  const entryParticipantById = new Map(ownedEntryParticipants.map(row => [row.id, row]));
+  const registrationById = new Map(registrations.map(row => [row.id, row]));
+  for (const change of changes) {
+    const entry = entryById.get(change.entryId);
+    const entryParticipant = entryParticipantById.get(change.entryParticipantId);
+    const registration = registrationById.get(change.registrationId);
+    if (!entry || entry.entry_type !== (bracket.mode === "team" ? "team" : "individual") || entry.status !== "active" ||
+      !registration || registration.player_id !== change.playerId ||
+      !entryParticipant || entryParticipant.event_id !== eventId || entryParticipant.entry_id !== change.entryId || entryParticipant.registration_id !== change.registrationId ||
+      entryParticipant.player_id !== change.playerId ||
+      (bracket.mode === "team" && entryParticipant.member_order !== change.memberOrder) ||
+      bracket.mode !== "team" && entryParticipant.member_order !== 1) {
+      throw unsafeBracketCleanup("참가 확정 metadata가 현재 normalized Entry/EntryParticipant와 일치하지 않아 대진표 삭제를 중단했습니다.");
+    }
+  }
+
+  return { safe: true, event, previousEventStatus: confirmationState.previousEventStatus, matchRows, entries: ownedEntries, entryParticipants: ownedEntryParticipants, registrations, players, identityChanges: changes };
+}
+
+export async function preflightEventBracketDeletion(eventId, bracket) {
+  const ownership = await inspectEventBracketCleanup(eventId, bracket);
+  await assertEventHasNoResults(eventId);
+  await assertEventHasNoRankingAwards(eventId);
+  return ownership;
 }
 
 export async function restoreEventBracketMatches(eventId, previousRows) {
@@ -915,17 +1077,12 @@ export async function findSubmissionRegistration(eventId, registrationName) {
 
   if (error) fail(error, "신청 정보를 확인하지 못했습니다.");
 
-  if (!data?.length) return null;
-
-  if (data.length > 1) {
-    const ambiguous = new Error("동일한 이름의 신청자가 여러 명 존재합니다. 운영진에게 문의해 주세요.");
-    ambiguous.code = "YPL_AMBIGUOUS_REGISTRATION";
-    throw ambiguous;
-  }
+  const selected = selectSubmissionRegistration(data || [], name);
+  if (!selected) return null;
 
   return {
     event,
-    registration: data[0],
+    registration: selected,
   };
 }
 
@@ -1088,6 +1245,31 @@ export async function listEventRegistrations(eventId) {
   if (error) fail(error, "대회 참가자 목록을 불러오지 못했습니다.");
 
   return data || [];
+}
+
+export async function listEventRegistrationSubmissionStatuses(eventId) {
+  if (!eventId) return [];
+
+  const { data: registrations, error: registrationError } = await db()
+    .from("event_registrations")
+    .select("id, registration_name, registration_source")
+    .eq("event_id", eventId)
+    .in("registration_source", ["application", "advancement", "manual"])
+    .order("registered_at", { ascending: true });
+
+  if (registrationError) fail(registrationError, "대회 참가자 제출 상태를 불러오지 못했습니다.");
+
+  const registrationRows = registrations || [];
+  if (!registrationRows.length) return [];
+  const registrationIds = registrationRows.map(registration => registration.id).filter(Boolean);
+  const { data: submissions, error: submissionError } = await db()
+    .from("registration_submissions")
+    .select("registration_id, revision, submitted_at")
+    .in("registration_id", registrationIds)
+    .order("revision", { ascending: false });
+
+  if (submissionError) fail(submissionError, "대회 참가자 제출 상태를 불러오지 못했습니다.");
+  return buildSubmissionStatusRows(registrationRows, submissions || []);
 }
 
 export async function cancelApplicationEvent(eventId) {
@@ -1329,7 +1511,7 @@ function rollbackFailure(originalError, rollbackErrors) {
 export async function rollbackEventParticipantConfirmation(
   eventId,
   identityChanges = [],
-  { requireUnappliedEvent = false } = {}
+  { requireUnappliedEvent = false, requireExactRows = false } = {}
 ) {
   if (!eventId) return null;
 
@@ -1352,34 +1534,46 @@ export async function rollbackEventParticipantConfirmation(
 
   for (const change of changes) {
     if (!change?.entryParticipantId) continue;
-    const { error } = await db()
+    const { data, error } = await db()
       .from("entry_participants")
       .delete()
       .eq("id", change.entryParticipantId)
-      .eq("event_id", eventId);
+      .eq("event_id", eventId)
+      .select("id");
     remember(error, `${change.name || "참가자"}의 EntryParticipant를 정리하지 못했습니다.`);
+    if (requireExactRows && !error && (data || []).length !== 1) {
+      remember(new Error(`${change.name || "참가자"}의 EntryParticipant가 예상한 ownership과 일치하지 않습니다.`), "EntryParticipant ownership 확인에 실패했습니다.");
+    }
   }
 
   for (const change of changes) {
     if (!change?.entryWasCreated || !change.entryId) continue;
-    const { error } = await db()
+    const { data, error } = await db()
       .from("entries")
       .delete()
       .eq("id", change.entryId)
-      .eq("event_id", eventId);
+      .eq("event_id", eventId)
+      .select("id");
     remember(error, `${change.name || "참가자"}의 Entry를 정리하지 못했습니다.`);
+    if (requireExactRows && !error && (data || []).length !== 1) {
+      remember(new Error(`${change.name || "참가자"}의 Entry가 예상한 ownership과 일치하지 않습니다.`), "Entry ownership 확인에 실패했습니다.");
+    }
   }
 
   for (const change of changes) {
     if (!change?.registrationId) continue;
 
     if (change.registrationWasCreated) {
-      const { error } = await db()
+      const { data, error } = await db()
         .from("event_registrations")
         .delete()
         .eq("id", change.registrationId)
-        .eq("event_id", eventId);
+        .eq("event_id", eventId)
+        .select("id");
       remember(error, `${change.name || "참가자"}의 신규 참가 등록을 정리하지 못했습니다.`);
+      if (requireExactRows && !error && (data || []).length !== 1) {
+        remember(new Error(`${change.name || "참가자"}의 신규 Registration이 예상한 ownership과 일치하지 않습니다.`), "Registration ownership 확인에 실패했습니다.");
+      }
       continue;
     }
 
@@ -1421,6 +1615,111 @@ export async function rollbackEventParticipantConfirmation(
     throw error;
   }
 
+  return null;
+}
+
+export async function restoreEventParticipantConfirmation(eventId, snapshot) {
+  if (!eventId || !snapshot) return null;
+
+  const players = Array.isArray(snapshot.players) ? snapshot.players : [];
+  if (players.length) {
+    const playerIds = players.map(row => row.id).filter(Boolean);
+    const { data: existingPlayers, error: existingError } = await db()
+      .from("players")
+      .select("id")
+      .in("id", playerIds);
+    if (existingError) fail(existingError, "참가 확정 보상 과정에서 기존 Player를 확인하지 못했습니다.");
+    const existingPlayerIds = new Set((existingPlayers || []).map(row => row.id));
+    const missingPlayers = players.filter(row => !existingPlayerIds.has(row.id));
+    const { error } = missingPlayers.length
+      ? await db().from("players").insert(missingPlayers)
+      : { error: null };
+    if (error) fail(error, "참가 확정 보상 과정에서 Player를 복구하지 못했습니다.");
+  }
+
+  const registrations = Array.isArray(snapshot.registrations) ? snapshot.registrations : [];
+  const registrationIds = registrations.map(row => row.id).filter(Boolean);
+  if (registrationIds.length) {
+    const { data: existingRegistrations, error: existingError } = await db()
+      .from("event_registrations")
+      .select("id, event_id, player_id")
+      .in("id", registrationIds);
+    if (existingError) fail(existingError, "참가 확정 보상 과정에서 기존 Registration을 확인하지 못했습니다.");
+    const existingById = new Map((existingRegistrations || []).map(row => [row.id, row]));
+    if ([...existingById.values()].some(row => row.event_id !== eventId)) {
+      throw new Error("참가 확정 보상 대상 Registration의 Event ownership이 일치하지 않습니다.");
+    }
+    const missingRegistrations = registrations
+      .filter(row => !existingById.has(row.id))
+      .map(row => ({
+        id: row.id,
+        event_id: row.event_id,
+        player_id: row.player_id,
+        registration_name: row.registration_name,
+        registration_data: row.registration_data || {},
+        registration_source: row.registration_source,
+        registered_at: row.registered_at,
+        final_submission_id: row.final_submission_id || null,
+        updated_at: row.updated_at,
+      }));
+    if (missingRegistrations.length) {
+      const { error } = await db().from("event_registrations").insert(missingRegistrations);
+      if (error) fail(error, "참가 확정 보상 과정에서 Registration을 복구하지 못했습니다.");
+    }
+  }
+
+  const registrationById = new Map(registrations.map(row => [row.id, row]));
+  for (const change of (snapshot.identityChanges || []).filter(row => row.registrationId)) {
+    const registration = registrationById.get(change.registrationId);
+    if (!registration) throw new Error(`${change.name || "참가자"}의 Registration snapshot이 없습니다.`);
+    const { data, error } = await db()
+      .from("event_registrations")
+      .update({ player_id: registration.player_id, updated_at: new Date().toISOString() })
+      .eq("id", registration.id)
+      .eq("event_id", eventId)
+      .select("id")
+      .maybeSingle();
+    if (error) fail(error, `${change.name || "참가자"}의 Registration 연결을 복구하지 못했습니다.`);
+    if (!data) throw new Error(`${change.name || "참가자"}의 Registration 연결 복구 대상이 없습니다.`);
+  }
+
+  const entries = Array.isArray(snapshot.entries) ? snapshot.entries : [];
+  if (entries.length) {
+    const entryIds = entries.map(row => row.id).filter(Boolean);
+    const { data: existingEntries, error: existingError } = await db()
+      .from("entries")
+      .select("id, event_id, entry_type, display_name, status")
+      .in("id", entryIds);
+    if (existingError) fail(existingError, "참가 확정 보상 과정에서 기존 Entry를 확인하지 못했습니다.");
+    if ((existingEntries || []).some(row => row.event_id !== eventId)) {
+      throw new Error("참가 확정 보상 대상 Entry의 Event ownership이 일치하지 않습니다.");
+    }
+    const existingEntryIds = new Set((existingEntries || []).map(row => row.id));
+    const missingEntries = entries.filter(row => !existingEntryIds.has(row.id));
+    if (missingEntries.length) {
+      const { error } = await db().from("entries").insert(missingEntries);
+      if (error) fail(error, "참가 확정 보상 과정에서 Entry를 복구하지 못했습니다.");
+    }
+  }
+
+  const entryParticipants = Array.isArray(snapshot.entryParticipants) ? snapshot.entryParticipants : [];
+  if (entryParticipants.length) {
+    const entryParticipantIds = entryParticipants.map(row => row.id).filter(Boolean);
+    const { data: existingEntryParticipants, error: existingError } = await db()
+      .from("entry_participants")
+      .select("id, event_id, entry_id, registration_id, player_id, member_order, role")
+      .in("id", entryParticipantIds);
+    if (existingError) fail(existingError, "참가 확정 보상 과정에서 기존 EntryParticipant를 확인하지 못했습니다.");
+    if ((existingEntryParticipants || []).some(row => row.event_id !== eventId)) {
+      throw new Error("참가 확정 보상 대상 EntryParticipant의 Event ownership이 일치하지 않습니다.");
+    }
+    const existingEntryParticipantIds = new Set((existingEntryParticipants || []).map(row => row.id));
+    const missingEntryParticipants = entryParticipants.filter(row => !existingEntryParticipantIds.has(row.id));
+    if (missingEntryParticipants.length) {
+      const { error } = await db().from("entry_participants").insert(missingEntryParticipants);
+      if (error) fail(error, "참가 확정 보상 과정에서 EntryParticipant를 복구하지 못했습니다.");
+    }
+  }
   return null;
 }
 
