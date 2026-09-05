@@ -52,6 +52,7 @@ declare
     v_match_id uuid;
     v_match_found boolean;
     v_formed boolean;
+    v_repair_only boolean := false;
     v_deleted_downstream integer := 0;
     v_created_downstream integer := 0;
     v_deleted integer := 0;
@@ -79,9 +80,9 @@ begin
 
     select *
       into v_runtime
-      from ypl_schema_validation.bracket_runtimes
-     where id = p_runtime_id
-       and event_id = p_event_id
+      from ypl_schema_validation.bracket_runtimes as br
+     where br.id = p_runtime_id
+       and br.event_id = p_event_id
      for update;
     if not found then
         raise exception using errcode = 'P0001', message = 'normalized Single runtime을 찾을 수 없습니다.';
@@ -113,8 +114,8 @@ begin
     ) then
         raise exception using errcode = 'P0001', message = 'Event에 foreign-source Match가 있어 winner mutation을 중단했습니다.';
     end if;
-    if exists (select 1 from ypl_schema_validation.results where event_id = p_event_id)
-       or exists (select 1 from ypl_schema_validation.ranking_awards where event_id = p_event_id) then
+    if exists (select 1 from ypl_schema_validation.results as r0 where r0.event_id = p_event_id)
+       or exists (select 1 from ypl_schema_validation.ranking_awards as a0 where a0.event_id = p_event_id) then
         raise exception using errcode = 'P0001', message = 'Result 또는 RankingAward가 있으면 winner mutation을 수행할 수 없습니다.';
     end if;
 
@@ -213,9 +214,9 @@ begin
     end if;
     if exists (
         with slots as (
-            select slot_no, entry_id
-              from ypl_schema_validation.bracket_entry_slots
-             where bracket_runtime_id = p_runtime_id and event_id = p_event_id
+            select s.slot_no, s.entry_id
+              from ypl_schema_validation.bracket_entry_slots as s
+             where s.bracket_runtime_id = p_runtime_id and s.event_id = p_event_id
         )
         select 1
           from generate_series(1, v_bracket_size / 2) as g(match_no)
@@ -238,7 +239,7 @@ begin
                m.source_node_key is null
                or m.source_node_key !~ '^single:r[1-9][0-9]*:m[1-9][0-9]*$'
                or substring(m.source_node_key from '^single:r([0-9]+):m[0-9]+$')::integer > v_max_round
-               or substring(m.source_node_key from '^single:r([0-9]+):m([0-9]+)$')::integer
+               or substring(m.source_node_key from 'm([0-9]+)$')::integer
                     > v_bracket_size / power(2, substring(m.source_node_key from '^single:r([0-9]+):m[0-9]+$')::integer)::integer
            )
     ) then
@@ -298,12 +299,12 @@ begin
         v_node_key := 'single:r1:m' || v_match_no::text;
         select a.entry_id, b.entry_id
           into v_entry_a, v_entry_b
-          from (select entry_id from ypl_schema_validation.bracket_entry_slots
-                 where bracket_runtime_id = p_runtime_id and event_id = p_event_id
-                   and slot_no = (v_match_no * 2) - 1) a
-          full join (select entry_id from ypl_schema_validation.bracket_entry_slots
-                 where bracket_runtime_id = p_runtime_id and event_id = p_event_id
-                   and slot_no = v_match_no * 2) b on true;
+          from (select s.entry_id from ypl_schema_validation.bracket_entry_slots as s
+                 where s.bracket_runtime_id = p_runtime_id and s.event_id = p_event_id
+                   and s.slot_no = (v_match_no * 2) - 1) a
+          full join (select s.entry_id from ypl_schema_validation.bracket_entry_slots as s
+                 where s.bracket_runtime_id = p_runtime_id and s.event_id = p_event_id
+                   and s.slot_no = v_match_no * 2) b on true;
         v_formed := v_entry_a is not null and v_entry_b is not null;
         if not v_formed and v_entry_a is null and v_entry_b is null then
             raise exception using errcode = 'P0001', message = '첫 라운드 double-BYE topology입니다.';
@@ -327,8 +328,8 @@ begin
                and v_existing_winner not in (v_entry_a, v_entry_b) then
                 raise exception using errcode = 'P0001', message = 'persisted Match winner가 양쪽 Entry가 아닙니다.';
             end if;
-        elsif v_formed then
-            raise exception using errcode = 'P0001', message = 'formed first-round Match가 누락되었습니다.';
+            elsif v_formed then
+                raise exception using errcode = 'P0001', message = 'formed first-round Match가 누락되었습니다.';
         end if;
         insert into pg_temp.normalized_single_winner_nodes
             values (v_node_key, 1, v_match_no, v_entry_a, v_entry_b,
@@ -343,12 +344,12 @@ begin
         end loop;
         for v_match_no in 1..v_round_match_count loop
             v_node_key := 'single:r' || v_round::text || ':m' || v_match_no::text;
-            select winner_entry_id into v_entry_a
-              from pg_temp.normalized_single_winner_nodes
-             where source_node_key = 'single:r' || (v_round - 1)::text || ':m' || ((v_match_no * 2) - 1)::text;
-            select winner_entry_id into v_entry_b
-              from pg_temp.normalized_single_winner_nodes
-             where source_node_key = 'single:r' || (v_round - 1)::text || ':m' || (v_match_no * 2)::text;
+            select n.winner_entry_id into v_entry_a
+              from pg_temp.normalized_single_winner_nodes as n
+             where n.source_node_key = 'single:r' || (v_round - 1)::text || ':m' || ((v_match_no * 2) - 1)::text;
+            select n.winner_entry_id into v_entry_b
+              from pg_temp.normalized_single_winner_nodes as n
+             where n.source_node_key = 'single:r' || (v_round - 1)::text || ':m' || (v_match_no * 2)::text;
             v_formed := v_entry_a is not null and v_entry_b is not null;
             select m.id, m.entry_a_id, m.entry_b_id, m.winner_entry_id
               into v_match_id, v_target_match.entry_a_id, v_target_match.entry_b_id, v_existing_winner
@@ -366,7 +367,9 @@ begin
                    and v_existing_winner not in (v_entry_a, v_entry_b) then
                     raise exception using errcode = 'P0001', message = 'downstream Match winner가 양쪽 Entry가 아닙니다.';
                 end if;
-            elsif v_formed then
+            elsif v_formed
+               and not (v_round > v_target_round
+                        and ((v_target_match_no - 1) / power(2, v_round - v_target_round)::integer) + 1 = v_match_no) then
                 raise exception using errcode = 'P0001', message = 'formed downstream Match가 누락되었습니다.';
             end if;
             insert into pg_temp.normalized_single_winner_nodes
@@ -395,72 +398,87 @@ begin
     end if;
 
     if v_target_match.winner_entry_id is not distinct from p_winner_entry_id then
-        return query select p_runtime_id, p_event_id, p_source_node_key,
-                            v_target_match.winner_entry_id, p_winner_entry_id,
-                            0, 0, false;
-        return;
+        if exists (
+            select 1
+              from pg_temp.normalized_single_winner_nodes as n
+             where n.formed
+               and n.normalized_match_id is null
+               and n.round_no > v_target_round
+               and ((v_target_match_no - 1) / power(2, n.round_no - v_target_round)::integer) + 1 = n.match_no
+        ) then
+            v_repair_only := true;
+        else
+            return query select p_runtime_id, p_event_id, p_source_node_key,
+                                v_target_match.winner_entry_id, p_winner_entry_id,
+                                0, 0, false;
+            return;
+        end if;
     end if;
 
     -- Remove only the target node's descendant chain, deepest first. Sibling
     -- subtrees and the target Match itself remain intact.
-    for v_desc_round in reverse v_max_round..(v_target_round + 1) loop
+    if not v_repair_only then
+      for v_desc_round in reverse v_max_round..(v_target_round + 1) loop
         v_round_match_count := v_bracket_size;
         for v_round in 1..v_desc_round loop
             v_round_match_count := v_round_match_count / 2;
         end loop;
         for v_desc_match_no in 1..v_round_match_count loop
-            if ((v_desc_match_no - 1) / power(2, v_desc_round - v_target_round)::integer) + 1 = v_target_match_no then
-                delete from ypl_schema_validation.matches
-                 where event_id = p_event_id
-                   and source = 'normalized_bracket_runtime'
-                   and source_node_key = 'single:r' || v_desc_round::text || ':m' || v_desc_match_no::text;
+            if ((v_target_match_no - 1) / power(2, v_desc_round - v_target_round)::integer) + 1 = v_desc_match_no then
+                delete from ypl_schema_validation.matches as m
+                 where m.event_id = p_event_id
+                   and m.source = 'normalized_bracket_runtime'
+                   and m.source_node_key = 'single:r' || v_desc_round::text || ':m' || v_desc_match_no::text;
                 get diagnostics v_deleted = row_count;
                 v_deleted_downstream := v_deleted_downstream + v_deleted;
             end if;
         end loop;
-    end loop;
+      end loop;
 
-    update ypl_schema_validation.matches
+      update ypl_schema_validation.matches as m
        set winner_entry_id = p_winner_entry_id,
            resolution = case when p_winner_entry_id is null then 'unknown' else 'played' end,
            played_at = case when p_winner_entry_id is null then null else now() end,
            updated_at = now()
-     where id = v_target_match.id
-       and event_id = p_event_id
-       and source = 'normalized_bracket_runtime';
-    if not found then
-        raise exception using errcode = 'P0001', message = 'target Match update ownership이 변경되었습니다.';
+     where m.id = v_target_match.id
+       and m.event_id = p_event_id
+       and m.source = 'normalized_bracket_runtime';
+      if not found then
+          raise exception using errcode = 'P0001', message = 'target Match update ownership이 변경되었습니다.';
+      end if;
     end if;
 
     -- Re-evaluate only the affected chain. A newly formed node receives a new
     -- Match with winner NULL; old descendant winners are never carried forward.
-    update pg_temp.normalized_single_winner_nodes
-       set winner_entry_id = case when source_node_key = p_source_node_key then p_winner_entry_id else winner_entry_id end
-     where source_node_key = p_source_node_key;
+    if not v_repair_only then
+      update pg_temp.normalized_single_winner_nodes as n
+         set winner_entry_id = case when n.source_node_key = p_source_node_key then p_winner_entry_id else n.winner_entry_id end
+       where n.source_node_key = p_source_node_key;
+    end if;
     for v_round in (v_target_round + 1)..v_max_round loop
         v_round_match_count := v_bracket_size;
         for v_desc_round in 1..v_round loop
             v_round_match_count := v_round_match_count / 2;
         end loop;
         for v_match_no in 1..v_round_match_count loop
-            if ((v_match_no - 1) / power(2, v_round - v_target_round)::integer) + 1 <> v_target_match_no then
+            if ((v_target_match_no - 1) / power(2, v_round - v_target_round)::integer) + 1 <> v_match_no then
                 continue;
             end if;
             v_node_key := 'single:r' || v_round::text || ':m' || v_match_no::text;
-            select winner_entry_id into v_entry_a
-              from pg_temp.normalized_single_winner_nodes
-             where source_node_key = 'single:r' || (v_round - 1)::text || ':m' || ((v_match_no * 2) - 1)::text;
-            select winner_entry_id into v_entry_b
-              from pg_temp.normalized_single_winner_nodes
-             where source_node_key = 'single:r' || (v_round - 1)::text || ':m' || (v_match_no * 2)::text;
+            select n.winner_entry_id into v_entry_a
+              from pg_temp.normalized_single_winner_nodes as n
+             where n.source_node_key = 'single:r' || (v_round - 1)::text || ':m' || ((v_match_no * 2) - 1)::text;
+            select n.winner_entry_id into v_entry_b
+              from pg_temp.normalized_single_winner_nodes as n
+             where n.source_node_key = 'single:r' || (v_round - 1)::text || ':m' || (v_match_no * 2)::text;
             v_formed := v_entry_a is not null and v_entry_b is not null;
-            select normalized_match_id into v_match_id
-              from pg_temp.normalized_single_winner_nodes where source_node_key = v_node_key;
+            select n.normalized_match_id into v_match_id
+              from pg_temp.normalized_single_winner_nodes as n where n.source_node_key = v_node_key;
             if not v_formed then
-                update pg_temp.normalized_single_winner_nodes
+                update pg_temp.normalized_single_winner_nodes as n
                    set entry_a_id = v_entry_a, entry_b_id = v_entry_b,
                        winner_entry_id = null, formed = false, normalized_match_id = null
-                 where source_node_key = v_node_key;
+                 where n.source_node_key = v_node_key;
                 continue;
             end if;
             insert into ypl_schema_validation.matches (
@@ -475,16 +493,16 @@ begin
                 'normalized_bracket_runtime', v_node_key, null
             ) returning id into v_match_id;
             v_created_downstream := v_created_downstream + 1;
-            update pg_temp.normalized_single_winner_nodes
+            update pg_temp.normalized_single_winner_nodes as n
                set entry_a_id = v_entry_a, entry_b_id = v_entry_b,
                    winner_entry_id = null, formed = true, normalized_match_id = v_match_id
-             where source_node_key = v_node_key;
+             where n.source_node_key = v_node_key;
         end loop;
     end loop;
 
     return query select p_runtime_id, p_event_id, p_source_node_key,
                         v_target_match.winner_entry_id, p_winner_entry_id,
-                        v_deleted_downstream, v_created_downstream, true;
+                        v_deleted_downstream, v_created_downstream, not v_repair_only;
 end;
 $$;
 

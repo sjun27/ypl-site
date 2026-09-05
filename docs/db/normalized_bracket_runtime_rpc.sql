@@ -727,66 +727,30 @@ begin
     if exists (
         select 1
           from ypl_schema_validation.matches as m0
-         where m0.event_id = p_event_id
-            and (match_kind is distinct from 'bracket'
-              or round_number is distinct from 1
-              or source_node_key is null
-              or source_node_key !~ '^single:r1:m[0-9]+$'
-              or entry_a_id is null or entry_b_id is null)
+          where m0.event_id = p_event_id
+             and (m0.source <> 'normalized_bracket_runtime'
+               or m0.match_kind is distinct from 'bracket'
+               or m0.parent_match_id is not null
+               or m0.round_number is null or m0.round_number < 1
+               or m0.source_node_key is null
+               or m0.source_node_key !~ '^single:r[1-9][0-9]*:m[1-9][0-9]*$'
+               or m0.entry_a_id is null or m0.entry_b_id is null
+               or m0.player_a_id is not null or m0.player_b_id is not null
+               or m0.winner_player_id is not null
+               or (m0.winner_entry_id is not null
+                   and m0.winner_entry_id not in (m0.entry_a_id, m0.entry_b_id))
+               or not exists (
+                   select 1 from ypl_schema_validation.bracket_identity_changes c0
+                    where c0.bracket_runtime_id = p_runtime_id
+                      and c0.event_id = p_event_id
+                      and c0.entry_id = m0.entry_a_id)
+               or not exists (
+                   select 1 from ypl_schema_validation.bracket_identity_changes c1
+                    where c1.bracket_runtime_id = p_runtime_id
+                      and c1.event_id = p_event_id
+                      and c1.entry_id = m0.entry_b_id))
     ) then
-        raise exception using errcode = 'P0001', message = 'runtime Match shape가 Single initial Match contract와 다릅니다.';
-    end if;
-    with slots as (
-        select slot_no, entry_id
-          from ypl_schema_validation.bracket_entry_slots as bes1
-         where bes1.bracket_runtime_id = p_runtime_id
-           and bes1.event_id = p_event_id
-    )
-    select count(*)::integer
-      into v_expected_match_count
-      from generate_series(1, v_bracket_size / 2) as m(match_no)
-      join slots a on a.slot_no = (m.match_no * 2) - 1
-      join slots b on b.slot_no = m.match_no * 2;
-    if (select count(*) from ypl_schema_validation.matches as m0
-         where m0.event_id = p_event_id and m0.source = 'normalized_bracket_runtime') <> v_expected_match_count
-       or exists (
-           with slots as (
-               select slot_no, entry_id
-                  from ypl_schema_validation.bracket_entry_slots as bes1
-                 where bes1.bracket_runtime_id = p_runtime_id
-                   and bes1.event_id = p_event_id
-           ), expected_matches as (
-               select 'single:r1:m' || m.match_no::text as source_node_key,
-                      a.entry_id as entry_a_id, b.entry_id as entry_b_id
-                 from generate_series(1, v_bracket_size / 2) as m(match_no)
-                 join slots a on a.slot_no = (m.match_no * 2) - 1
-                 join slots b on b.slot_no = m.match_no * 2
-           )
-           select source_node_key, entry_a_id, entry_b_id
-             from ypl_schema_validation.matches as m0
-            where m0.event_id = p_event_id and m0.source = 'normalized_bracket_runtime'
-           except
-           select source_node_key, entry_a_id, entry_b_id from expected_matches
-       ) or exists (
-           with slots as (
-               select slot_no, entry_id
-                 from ypl_schema_validation.bracket_entry_slots as bes2
-                where bes2.bracket_runtime_id = p_runtime_id
-                  and bes2.event_id = p_event_id
-           ), expected_matches as (
-               select 'single:r1:m' || m.match_no::text as source_node_key,
-                      a.entry_id as entry_a_id, b.entry_id as entry_b_id
-                 from generate_series(1, v_bracket_size / 2) as m(match_no)
-                 join slots a on a.slot_no = (m.match_no * 2) - 1
-                 join slots b on b.slot_no = m.match_no * 2
-           )
-           select source_node_key, entry_a_id, entry_b_id from expected_matches
-           except
-           select source_node_key, entry_a_id, entry_b_id
-             from ypl_schema_validation.matches as m0
-            where m0.event_id = p_event_id and m0.source = 'normalized_bracket_runtime'
-       ) then
-        raise exception using errcode = 'P0001', message = 'runtime Match가 draw slot의 formed 1R projection과 exact-match하지 않습니다.';
+        raise exception using errcode = 'P0001', message = 'runtime Match shape가 Single canonical Match contract와 다릅니다.';
     end if;
 
     -- Snapshot ownership before deleting the FK parent metadata.

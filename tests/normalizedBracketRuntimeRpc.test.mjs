@@ -119,7 +119,7 @@ test("delete contract is locked, fail-closed, submission-safe, and FK-order awar
   ]) assert.match(del, pattern);
   assert.match(del, /exact ownership|exact-match/i);
   assert.match(del, /is distinct from/i);
-  assert.match(del, /round_number is distinct from 1/i);
+  assert.match(del, /round_number is null[\s\S]*round_number < 1/i);
   assert.match(del, /raise exception/i);
 });
 

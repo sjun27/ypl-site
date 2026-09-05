@@ -30,8 +30,8 @@ test("winner mutation locks Event, runtime, and Match state and applies gates", 
     /topology_kind <> 'single_elimination'/i,
     /projection_version <> 1/i,
     /source <> 'normalized_bracket_runtime'/i,
-    /from ypl_schema_validation\.results where event_id = p_event_id/i,
-    /from ypl_schema_validation\.ranking_awards where event_id = p_event_id/i,
+    /from ypl_schema_validation\.results as r0 where r0\.event_id = p_event_id/i,
+    /from ypl_schema_validation\.ranking_awards as a0 where a0\.event_id = p_event_id/i,
   ]) assert.match(sql, pattern);
 });
 
@@ -113,7 +113,7 @@ test("return contract reports previous/new winner and cascade counts", () => {
     "created_downstream_count integer",
     "changed boolean",
   ]) assert.match(sql, new RegExp(field, "i"));
-  assert.match(sql, /v_deleted_downstream, v_created_downstream, true/i);
+  assert.match(sql, /v_deleted_downstream, v_created_downstream, not v_repair_only/i);
   assert.match(sql, /0, 0, false/i);
 });
 
