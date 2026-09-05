@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  projectNormalizedDoubleEliminationBracket,
   SINGLE_BRACKET_PROJECTION_CONTRACT,
   evaluateSingleEliminationGraph,
   projectNormalizedSingleEliminationBracket,
@@ -357,4 +358,75 @@ test("requires normalized Match source and validates its sides against persisted
     }),
     /deterministic topology/
   );
+});
+
+test("projects normalized Double topology with stable WB/LB/GF/Reset node keys", () => {
+  const base = inputs(4);
+  const matches = [
+    match("double:w:r1:m1", "entry-a", "entry-b", "entry-a"),
+    match("double:w:r1:m2", "entry-c", "entry-d", "entry-c"),
+    match("double:w:r2:m1", "entry-a", "entry-c", "entry-a"),
+    match("double:l:r1:m1", "entry-b", "entry-d", "entry-b"),
+    match("double:l:r2:m1", "entry-b", "entry-c", "entry-b"),
+    match("double:gf:m1", "entry-a", "entry-b", "entry-b"),
+  ];
+  const result = projectNormalizedDoubleEliminationBracket({
+    event: event({ competition_format: "double_elimination" }),
+    runtimeId: RUNTIME_ID,
+    ...base,
+    matches,
+  });
+  assert.equal(result.double, true);
+  assert.deepEqual(result.graph.rounds.map(round => round.map(node => node.id)), [
+    ["double:w:r1:m1", "double:w:r1:m2"],
+    ["double:w:r2:m1"],
+  ]);
+  assert.deepEqual(result.graph.lb.map(round => round.map(node => node.id)), [
+    ["double:l:r1:m1"],
+    ["double:l:r2:m1"],
+  ]);
+  assert.deepEqual([result.graph.gf.a, result.graph.gf.b], [
+    { win: "double:w:r2:m1" },
+    { win: "double:l:r2:m1" },
+  ]);
+  assert.equal(result.graph.gf.winner, "b");
+  assert.deepEqual([result.graph.reset.a, result.graph.reset.b], [
+    { win: "double:w:r2:m1" },
+    { win: "double:l:r2:m1" },
+  ]);
+  assert.equal(result.graph.reset.winner, null);
+});
+
+test("projects Team Entry participants without creating per-player bracket entries", () => {
+  const teamEvent = event({ id: "event-team-1", name: "Team Single", is_team_event: true });
+  const entries = [
+    { id: "team-entry-a", event_id: teamEvent.id, entry_type: "team", display_name: "Alpha", status: "active" },
+    { id: "team-entry-b", event_id: teamEvent.id, entry_type: "team", display_name: "Beta", status: "active" },
+  ];
+  const entryParticipants = [
+    ["a1", "team-entry-a", "reg-a1", "player-a1", 1, "A captain"],
+    ["a2", "team-entry-a", "reg-a2", "player-a2", 2, "A member"],
+    ["b1", "team-entry-b", "reg-b1", "player-b1", 1, "B captain"],
+    ["b2", "team-entry-b", "reg-b2", "player-b2", 2, "B member"],
+  ].map(([id, entryId, registrationId, playerId, memberOrder, registration_name]) => ({
+    id, event_id: teamEvent.id, entry_id: entryId, registration_id: registrationId,
+    player_id: playerId, member_order: memberOrder, role: memberOrder === 1 ? "captain" : null,
+    registration_name,
+  }));
+  const entrySlots = [1, 2].map((slot_no, index) => ({
+    bracket_runtime_id: "runtime-team-1", event_id: teamEvent.id, stage_kind: "elimination", stage_no: 1,
+    pool_no: 0, slot_no, entry_id: entries[index].id,
+  }));
+  const result = projectNormalizedSingleEliminationBracket({
+    event: teamEvent,
+    runtimeId: "runtime-team-1",
+    entries,
+    entryParticipants,
+    entrySlots,
+    matches: [],
+  });
+  assert.equal(result.mode, "team");
+  assert.deepEqual(result.participants[0].members, ["A captain", "A member"]);
+  assert.equal(result.participants[0].memberIdentities[0].role, "captain");
+  assert.equal(result.graph.rounds[0][0].a.pid, "team-entry-a");
 });

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { buildNormalizedSingleCreateAttempt, completeApplicationEvent, compensateFinalSubmissionReleaseFailure, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, createNormalizedSingleBracketRuntime, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, deleteNormalizedSingleBracketRuntime, fetchNormalizedSingleBracketRuntime, freezeEventFinalSubmissions, getEvent, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, isFinalSubmissionRestoreAllowed, isRecordApplyCompletionConfirmed, listEventRegistrationSubmissionStatuses, listEventRegistrations, listNormalizedSingleBracketRuntimes, listSubmissionEvents, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventFinalSubmissions, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, setNormalizedSingleBracketWinner, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
+import { buildNormalizedRuntimeCreateAttempt, buildNormalizedSingleCreateAttempt, completeApplicationEvent, compensateFinalSubmissionReleaseFailure, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, createNormalizedBracketRuntime, createNormalizedSingleBracketRuntime, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, deleteNormalizedBracketRuntime, deleteNormalizedSingleBracketRuntime, fetchNormalizedBracketRuntime, fetchNormalizedSingleBracketRuntime, freezeEventFinalSubmissions, getEvent, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, isFinalSubmissionRestoreAllowed, isRecordApplyCompletionConfirmed, listEventRegistrationSubmissionStatuses, listEventRegistrations, listNormalizedBracketRuntimes, listNormalizedSingleBracketRuntimes, listSubmissionEvents, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventFinalSubmissions, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, setNormalizedSingleBracketWinner, syncEventBracketMatches, syncNormalizedBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
 import { buildDefaultTeamMatchLineups, buildTeamMatchSeries, getTeamMatchLineupOptions, getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
 import { executeBracketDeletionLifecycle, preserveBracketLifecycleMetadata, validateBracketParticipantConfirmation } from "../services/bracketLifecycle.js";
 import { buildBracketSubmissionStatusModel } from "../services/teamBuilderCore.js";
@@ -991,7 +991,7 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=
   };
   const pickNormalized=async(matchId,side)=>{
     if(locked||matchMutationBusyRef.current)return;
-    const match=(b.graph?.rounds||[]).flat().find(row=>row.id===matchId);
+    const match=collectGraphMatches(b.graph).find(row=>row.id===matchId);
     if(!match||!b.eventId||!b.projection?.runtimeId)return;
     const current=evalGraph(b.graph);
     const entryId=side==="a"?current.sp(match.a):current.sp(match.b);
@@ -1000,12 +1000,16 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=
     matchMutationBusyRef.current=true;
     setMatchMutationBusy(true);
     try{
-      await setNormalizedSingleBracketWinner({
-        runtimeId:b.projection.runtimeId,
-        eventId:b.eventId,
-        sourceNodeKey:matchId,
-        winnerEntryId,
-      });
+      if (!b.double && !teamMode) {
+        await setNormalizedSingleBracketWinner({
+          runtimeId:b.projection.runtimeId,
+          eventId:b.eventId,
+          sourceNodeKey:matchId,
+          winnerEntryId,
+        });
+      } else {
+        await syncNormalizedBracketMatches(b.eventId, withPick(b, matchId, side));
+      }
       await refreshNormalized?.();
       flash(winnerEntryId?"승자 저장 ✓":"승자 취소 ✓");
     }catch(error){
@@ -1022,7 +1026,29 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=
     void persistBracketMutation(withPick(b,matchId,side));
   };
   const openTeam=(m,pa,pb)=>{ if(locked)return; const A=(b.participants||[]).find(p=>p.id===pa),B=(b.participants||[]).find(p=>p.id===pb); if(!A||!B)return; setSeries({m,A,B}); };
-  const saveSeries=async(sObj,winnerSide)=>{ if(locked)return; const saved=await persistBracketMutation(withSeries(b,series.m.id,sObj,winnerSide)); if(saved)setSeries(null); };
+  const saveSeries=async(sObj,winnerSide)=>{
+    if(locked)return;
+    if(normalizedRuntime){
+      if(matchMutationBusyRef.current)return;
+      matchMutationBusyRef.current=true;
+      setMatchMutationBusy(true);
+      try{
+        await syncNormalizedBracketMatches(b.eventId,withSeries(b,series.m.id,sObj,winnerSide));
+        await refreshNormalized?.();
+        setSeries(null);
+        flash("팀전 결과 저장 ✓");
+      }catch(error){
+        await refreshNormalized?.();
+        flash(`팀전 결과 저장 실패: ${error?.message||"알 수 없는 오류"}`);
+      }finally{
+        matchMutationBusyRef.current=false;
+        setMatchMutationBusy(false);
+      }
+      return;
+    }
+    const saved=await persistBracketMutation(withSeries(b,series.m.id,sObj,winnerSide));
+    if(saved)setSeries(null);
+  };
   const makeKnockout=async()=>{
     if(locked)return;
     const adv=[];
@@ -1961,7 +1987,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   const [normalizedLoadError,setNormalizedLoadError]=useState("");
   const loadNormalized=async()=>{
     try{
-      const rows=await listNormalizedSingleBracketRuntimes();
+      const rows=await listNormalizedBracketRuntimes();
       setNormalizedBrackets(rows.map(row=>row.bracket));
       setNormalizedLoadError("");
       return rows;
@@ -1982,9 +2008,18 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   const open=list.find(b=>b.id===openId);
   const create=async(b)=>{
     const normalizedCandidate=Boolean(
-      b.eventId&&b.mode==="single"&&b.format==="elim"&&!b.double
+      b.eventId&&b.format==="elim"&&(b.mode==="single"||b.mode==="team")
     );
     if(normalizedCandidate){
+      if(b.eventId&&list.some(existing=>existing.eventId===b.eventId)){
+        flash("이 Event에 연결된 대진표가 이미 있습니다.");
+        return false;
+      }
+
+      // The existing Single RPC owns identity creation. Team and Double use
+      // the confirmed Entry/EntryParticipant graph, then persist only the
+      // runtime draw and identity ownership through the generic RPC.
+      if(b.mode==="single"&&!b.double){
       try{
         const attempt=b.normalizedAttempt||buildNormalizedSingleCreateAttempt(b.participants||[]);
         await createNormalizedSingleBracketRuntime({
@@ -2006,6 +2041,92 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
       }catch(error){
         await loadNormalized();
         flash(`normalized 대진표 생성 실패: ${error?.message||"알 수 없는 오류"}`);
+        return false;
+      }
+      }
+
+      let confirmation=null;
+      let createdRuntime=false;
+      let runtimeId=null;
+      try{
+        confirmation=b.mode==="team"
+          ? await confirmEventTeamsForBracket(b.eventId,b.participants||[])
+          : await confirmEventParticipantsForBracket(b.eventId,b.participants||[]);
+        const confirmedParticipants=confirmation.participants||[];
+        const identityChangeByEntryParticipantId=new Map((confirmation.identityChanges||[]).map(change=>[change.entryParticipantId,change]));
+        const withChange=(member, base)=>{
+          const change=identityChangeByEntryParticipantId.get(member.entryParticipantId)||{};
+          return {
+            ...base,
+            player_was_created:Boolean(change.playerWasCreated),
+            registration_was_created:Boolean(change.registrationWasCreated),
+            registration_player_was_changed:Boolean(change.registrationPlayerWasLinked),
+            previous_registration_player_id:change.previousRegistrationPlayerId||null,
+            entry_was_created:Boolean(change.entryWasCreated),
+            entry_participant_was_created:true,
+          };
+        };
+        const runtimeParticipants=b.mode==="team"
+          ? confirmedParticipants.flatMap(team=>(team.memberIdentities||[]).map(member=>({
+              ...withChange(member,{
+                participant_key:`${team.id}:${member.entryParticipantId}`,
+                display_name:team.name,
+                entry_type:"team",
+                player_id:member.playerId,
+                registration_id:member.registrationId,
+                entry_id:team.entryId,
+                entry_participant_id:member.entryParticipantId,
+                member_order:member.memberOrder,
+                role:member.role,
+              }),
+            })))
+          : confirmedParticipants.map(participant=>({
+              ...withChange(participant,{
+                participant_key:participant.id,
+                display_name:participant.name,
+                entry_type:"individual",
+                player_id:participant.playerId,
+                registration_id:participant.registrationId,
+                entry_id:participant.entryId,
+                entry_participant_id:participant.entryParticipantId,
+                member_order:1,
+              }),
+            }));
+        const attempt=buildNormalizedRuntimeCreateAttempt(confirmedParticipants);
+        runtimeId=attempt.runtimeId;
+        await createNormalizedBracketRuntime({
+          runtimeId:attempt.runtimeId,
+          eventId:b.eventId,
+          topologyKind:b.double?"double_elimination":"single_elimination",
+          participants:runtimeParticipants,
+          slots:attempt.slots,
+        });
+        createdRuntime=true;
+        const loaded=await fetchNormalizedBracketRuntime(b.eventId,attempt.runtimeId);
+        if(!loaded) throw new Error("생성된 normalized bracket runtime을 다시 읽지 못했습니다.");
+        setNormalizedBrackets(previous=>[
+          ...previous.filter(row=>row.eventId!==b.eventId),
+          loaded.bracket,
+        ]);
+        setOpenId(loaded.bracket.id);
+        setDrawId(null);
+        flash("normalized 대회 생성 ✓");
+        return true;
+      }catch(error){
+        let cleanupError=null;
+        if(createdRuntime){
+          try{ await deleteNormalizedBracketRuntime({runtimeId,eventId:b.eventId}); }
+          catch(runtimeError){ cleanupError=runtimeError; }
+        }
+        if(confirmation&&!cleanupError){
+          try{ await rollbackEventParticipantConfirmation(b.eventId,confirmation.identityChanges); }
+          catch(rollbackError){ cleanupError=rollbackError; }
+        }
+        await refresh?.();
+        await loadNormalized();
+        flash(cleanupError
+          ? `normalized 대진표 생성 실패 후 참가 확정 원복에도 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${cleanupError?.message||"알 수 없는 오류"}`
+          : `normalized 대진표 생성 실패로 참가 확정을 원복했습니다: ${error?.message||"알 수 없는 오류"}`);
         return false;
       }
     }
@@ -2136,7 +2257,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
 
       if(b.projection?.source==="normalized"){
         try{
-          await deleteNormalizedSingleBracketRuntime({
+          await deleteNormalizedBracketRuntime({
             runtimeId:b.projection.runtimeId,
             eventId:b.eventId,
           });

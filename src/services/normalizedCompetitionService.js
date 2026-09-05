@@ -24,7 +24,10 @@ import { isInterruptedBracketCleanupState, validateBracketParticipantConfirmatio
 import { buildSubmissionStatusRows, selectSubmissionRegistration } from "./teamBuilderCore.js";
 import { buildTeamSnapshotSubmission } from "./teamSubmission.js";
 import { normalizeFinalSubmissionFreezeSnapshot } from "./finalSubmissionLifecycle.js";
-import { projectNormalizedSingleEliminationBracket } from "./bracketProjection.js";
+import {
+  projectNormalizedDoubleEliminationBracket,
+  projectNormalizedSingleEliminationBracket,
+} from "./bracketProjection.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -46,11 +49,15 @@ export function normalizedDbAvailable() {
   return Boolean(client);
 }
 
-// P2-7 Single runtime is intentionally enabled only in the Test normalized
-// schema. Production remains on the legacy ypl_data_v4 adapter until a later
-// migration/cutover explicitly changes this boundary.
+// P2-7 normalized bracket runtimes are intentionally enabled only in the Test
+// normalized schema. Production remains on the legacy ypl_data_v4 adapter
+// until an explicit migration/cutover changes this boundary.
 export function normalizedSingleBracketRuntimeEnabled() {
   return Boolean(client && DATA_SCHEMA === "ypl_schema_validation");
+}
+
+export function normalizedBracketRuntimeEnabled() {
+  return normalizedSingleBracketRuntimeEnabled();
 }
 
 const NORMALIZED_SINGLE_RUNTIME_SELECT = `
@@ -66,8 +73,8 @@ const NORMALIZED_SINGLE_PARTICIPANT_SELECT = `
   id, event_id, entry_id, registration_id, player_id, member_order, role
 `;
 
-async function readNormalizedSingleRuntimeFacts(eventId, runtimeId = null) {
-  if (!normalizedSingleBracketRuntimeEnabled()) return null;
+async function readNormalizedBracketRuntimeFacts(eventId, runtimeId = null) {
+  if (!normalizedBracketRuntimeEnabled()) return null;
   const runtimeQuery = db().from("bracket_runtimes").select(NORMALIZED_SINGLE_RUNTIME_SELECT);
   const { data: runtimeRows, error: runtimeError } = await (runtimeId
     ? runtimeQuery.eq("id", runtimeId).eq("event_id", eventId)
@@ -88,14 +95,36 @@ async function readNormalizedSingleRuntimeFacts(eventId, runtimeId = null) {
   const failed = [slotsResult, entriesResult, participantsResult, matchesResult].find(result => result.error);
   if (failed) fail(failed.error, "normalized bracket canonical facts를 불러오지 못했습니다.");
 
-  if (runtime.topology_kind !== "single_elimination" || runtime.projection_version !== 1) {
-    throw new Error("지원하지 않는 normalized Single runtime topology/version입니다.");
+  if (!["single_elimination", "double_elimination"].includes(runtime.topology_kind) || runtime.projection_version !== 1) {
+    throw new Error("지원하지 않는 normalized bracket runtime topology/version입니다.");
   }
-  const bracket = projectNormalizedSingleEliminationBracket({
+  const registrationIds = [...new Set((participantsResult.data || []).map(row => row.registration_id).filter(Boolean))];
+  const { data: registrations, error: registrationsError } = registrationIds.length
+    ? await db().from("event_registrations").select("id, registration_name").eq("event_id", eventId).in("id", registrationIds)
+    : { data: [], error: null };
+  if (registrationsError) fail(registrationsError, "normalized bracket 참가자 이름을 불러오지 못했습니다.");
+  if ((matchesResult.data || []).some(row => row?.source !== "normalized_bracket_runtime")) {
+    throw new Error("normalized runtime에 foreign-source Match가 있어 legacy fallback을 중단했습니다.");
+  }
+  const registrationNames = new Map((registrations || []).map(row => [row.id, row.registration_name]));
+  const entryParticipants = (participantsResult.data || []).map(row => ({
+    ...row,
+    registration_name: registrationNames.get(row.registration_id) || null,
+  }));
+  const bracket = runtime.topology_kind === "double_elimination"
+    ? projectNormalizedDoubleEliminationBracket({
+      event,
+      runtimeId: runtime.id,
+      entries: entriesResult.data || [],
+      entryParticipants,
+      entrySlots: slotsResult.data || [],
+      matches: matchesResult.data || [],
+    })
+    : projectNormalizedSingleEliminationBracket({
     event,
     runtimeId: runtime.id,
     entries: entriesResult.data || [],
-    entryParticipants: participantsResult.data || [],
+    entryParticipants,
     entrySlots: slotsResult.data || [],
     matches: matchesResult.data || [],
   });
@@ -107,22 +136,30 @@ async function readNormalizedSingleRuntimeFacts(eventId, runtimeId = null) {
     event,
     runtime,
     entries: entriesResult.data || [],
-    entryParticipants: participantsResult.data || [],
+    entryParticipants,
     entrySlots: slotsResult.data || [],
     matches: matchesResult.data || [],
   };
 }
 
 export async function fetchNormalizedSingleBracketRuntime(eventId, runtimeId = null) {
-  return readNormalizedSingleRuntimeFacts(eventId, runtimeId);
+  return readNormalizedBracketRuntimeFacts(eventId, runtimeId);
+}
+
+export async function fetchNormalizedBracketRuntime(eventId, runtimeId = null) {
+  return readNormalizedBracketRuntimeFacts(eventId, runtimeId);
 }
 
 export async function listNormalizedSingleBracketRuntimes() {
-  if (!normalizedSingleBracketRuntimeEnabled()) return [];
+  if (!normalizedBracketRuntimeEnabled()) return [];
   const { data, error } = await db().from("bracket_runtimes").select("id, event_id").order("created_at");
   if (error) fail(error, "normalized bracket runtime 목록을 불러오지 못했습니다.");
-  const rows = await Promise.all((data || []).map(row => readNormalizedSingleRuntimeFacts(row.event_id, row.id)));
+  const rows = await Promise.all((data || []).map(row => readNormalizedBracketRuntimeFacts(row.event_id, row.id)));
   return rows.filter(Boolean);
+}
+
+export async function listNormalizedBracketRuntimes() {
+  return listNormalizedSingleBracketRuntimes();
 }
 
 function databaseUuid() {
@@ -167,6 +204,27 @@ export function buildNormalizedSingleCreateAttempt(participants = []) {
   return { runtimeId: databaseUuid(), participants: input, slots };
 }
 
+export function buildNormalizedRuntimeCreateAttempt(participants = [], { runtimeId = databaseUuid() } = {}) {
+  const actual = (participants || []).filter(Boolean);
+  if (actual.length < 2) throw new Error("normalized bracket에는 참가자 또는 팀이 2개 이상 필요합니다.");
+  const size = nextPowerOfTwo(actual.length);
+  const shuffled = [...actual].sort(() => Math.random() - 0.5);
+  const matchOrder = Array.from({ length: size / 2 }, (_, index) => index)
+    .sort(() => Math.random() - 0.5);
+  const byeMatches = new Set(matchOrder.slice(0, size - actual.length));
+  const slots = [];
+  let cursor = 0;
+  for (let matchIndex = 0; matchIndex < size / 2; matchIndex += 1) {
+    const slotNo = matchIndex * 2 + 1;
+    slots.push({ slot_no: slotNo, entry_id: shuffled[cursor++].entryId || shuffled[cursor - 1].entry_id });
+    if (!byeMatches.has(matchIndex)) {
+      const next = shuffled[cursor++];
+      slots.push({ slot_no: slotNo + 1, entry_id: next.entryId || next.entry_id });
+    }
+  }
+  return { runtimeId, participants: actual, slots };
+}
+
 export async function createNormalizedSingleBracketRuntime({ runtimeId, eventId, participants, slots } = {}) {
   const { data, error } = await db().rpc("create_normalized_single_bracket_runtime", {
     p_runtime_id: runtimeId,
@@ -175,6 +233,18 @@ export async function createNormalizedSingleBracketRuntime({ runtimeId, eventId,
     p_slots: slots,
   });
   if (error) fail(error, "normalized Single bracket을 생성하지 못했습니다.");
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export async function createNormalizedBracketRuntime({ runtimeId, eventId, topologyKind, participants, slots } = {}) {
+  const { data, error } = await db().rpc("create_normalized_bracket_runtime", {
+    p_runtime_id: runtimeId,
+    p_event_id: eventId,
+    p_topology_kind: topologyKind,
+    p_participants: participants,
+    p_slots: slots,
+  });
+  if (error) fail(error, "normalized bracket을 생성하지 못했습니다.");
   return Array.isArray(data) ? data[0] || null : data || null;
 }
 
@@ -195,6 +265,15 @@ export async function deleteNormalizedSingleBracketRuntime({ runtimeId, eventId 
     p_event_id: eventId,
   });
   if (error) fail(error, "normalized Single bracket을 삭제하지 못했습니다.");
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export async function deleteNormalizedBracketRuntime({ runtimeId, eventId } = {}) {
+  const { data, error } = await db().rpc("delete_normalized_bracket_runtime", {
+    p_runtime_id: runtimeId,
+    p_event_id: eventId,
+  });
+  if (error) fail(error, "normalized bracket을 삭제하지 못했습니다.");
   return Array.isArray(data) ? data[0] || null : data || null;
 }
 
@@ -293,12 +372,12 @@ function sameRuntimeMatchSnapshot(left, right) {
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
-async function readEventRuntimeMatchesNow(eventId) {
+async function readEventRuntimeMatchesNow(eventId, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   const { data, error } = await db()
     .from("matches")
     .select(EVENT_RUNTIME_MATCH_SELECT)
     .eq("event_id", eventId)
-    .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE);
+    .eq("source", source);
 
   if (error) fail(error, "기존 normalized Match를 확인하지 못했습니다.");
   return data || [];
@@ -314,14 +393,14 @@ async function readEventAllMatchesNow(eventId) {
   return data || [];
 }
 
-async function updateEventRuntimeMatchesNow(eventId, updates, now) {
+async function updateEventRuntimeMatchesNow(eventId, updates, now, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   for (const update of updates) {
     const { data, error } = await db()
       .from("matches")
       .update({ ...update.payload, updated_at: now })
       .eq("id", update.id)
       .eq("event_id", eventId)
-      .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+      .eq("source", source)
       .select("id")
       .maybeSingle();
 
@@ -330,7 +409,7 @@ async function updateEventRuntimeMatchesNow(eventId, updates, now) {
   }
 }
 
-async function insertEventRuntimeMatchesNow(eventId, rows, now, preserveIds = false) {
+async function insertEventRuntimeMatchesNow(eventId, rows, now, preserveIds = false, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   if (!rows.length) return;
   const payloads = rows.map(row => {
     const { id, ...values } = row;
@@ -338,7 +417,7 @@ async function insertEventRuntimeMatchesNow(eventId, rows, now, preserveIds = fa
       ...values,
       ...(preserveIds && id ? { id } : {}),
       event_id: eventId,
-      source: LEGACY_BRACKET_RUNTIME_SOURCE,
+      source,
       updated_at: now,
     };
   });
@@ -354,13 +433,13 @@ async function insertEventRuntimeMatchesNow(eventId, rows, now, preserveIds = fa
   }
 }
 
-async function deleteEventRuntimeMatchIdsNow(eventId, ids) {
+async function deleteEventRuntimeMatchIdsNow(eventId, ids, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   if (!ids.length) return;
   const { data, error } = await db()
     .from("matches")
     .delete()
     .eq("event_id", eventId)
-    .eq("source", LEGACY_BRACKET_RUNTIME_SOURCE)
+    .eq("source", source)
     .in("id", ids)
     .select("id");
 
@@ -370,26 +449,26 @@ async function deleteEventRuntimeMatchIdsNow(eventId, ids) {
   }
 }
 
-async function deleteEventRuntimeMatchRowsNow(eventId, rows) {
+async function deleteEventRuntimeMatchRowsNow(eventId, rows, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   const children = rows.filter(row => row?.id && row.match_kind !== "bracket").map(row => row.id);
   const parents = rows.filter(row => row?.id && row.match_kind === "bracket").map(row => row.id);
-  await deleteEventRuntimeMatchIdsNow(eventId, children);
-  await deleteEventRuntimeMatchIdsNow(eventId, parents);
+  await deleteEventRuntimeMatchIdsNow(eventId, children, source);
+  await deleteEventRuntimeMatchIdsNow(eventId, parents, source);
 }
 
-async function replaceEventRuntimeMatchesNow(eventId, rows) {
+async function replaceEventRuntimeMatchesNow(eventId, rows, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   const snapshot = Array.isArray(rows) ? rows : [];
-  const currentRows = await readEventRuntimeMatchesNow(eventId);
-  await deleteEventRuntimeMatchRowsNow(eventId, currentRows);
+  const currentRows = await readEventRuntimeMatchesNow(eventId, source);
+  await deleteEventRuntimeMatchRowsNow(eventId, currentRows, source);
 
   const now = new Date().toISOString();
   const parents = snapshot.filter(row => row.match_kind === "bracket");
   const children = snapshot.filter(row => row.match_kind !== "bracket");
-  await insertEventRuntimeMatchesNow(eventId, parents, now, true);
-  await insertEventRuntimeMatchesNow(eventId, children, now, true);
+  await insertEventRuntimeMatchesNow(eventId, parents, now, true, source);
+  await insertEventRuntimeMatchesNow(eventId, children, now, true, source);
 }
 
-async function syncEventBracketMatchesNow(eventId, bracket) {
+async function syncEventBracketMatchesNow(eventId, bracket, source = LEGACY_BRACKET_RUNTIME_SOURCE) {
   const identityState = bracketMatchIdentityState(eventId, bracket);
   if (!identityState.eligible) {
     return { skipped: true, reason: identityState.reason, inserted: 0, updated: 0, deleted: 0 };
@@ -400,9 +479,15 @@ async function syncEventBracketMatchesNow(eventId, bracket) {
   if (Boolean(event.is_team_event) !== (bracket.mode === "team")) {
     throw new Error("Event의 팀전 구분과 대진표 모드가 일치하지 않습니다.");
   }
+  if (source === "normalized_bracket_runtime") {
+    const allRows = await readEventAllMatchesNow(eventId);
+    if (allRows.some(row => row?.source !== source)) {
+      throw new Error("normalized runtime에 foreign-source Match가 있어 동기화를 중단했습니다.");
+    }
+  }
 
   const desiredRows = buildEventBracketMatchSnapshot(bracket);
-  const previousRows = await readEventRuntimeMatchesNow(eventId);
+  const previousRows = await readEventRuntimeMatchesNow(eventId, source);
   const now = new Date().toISOString();
   const desiredParents = desiredRows.filter(row => row.match_kind === "bracket");
   const desiredChildren = desiredRows.filter(row => row.match_kind !== "bracket");
@@ -411,18 +496,18 @@ async function syncEventBracketMatchesNow(eventId, bracket) {
   const parentPlan = buildBracketMatchSyncPlan(existingParents, desiredParents, now);
 
   try {
-    await updateEventRuntimeMatchesNow(eventId, parentPlan.updates, now);
-    await insertEventRuntimeMatchesNow(eventId, parentPlan.inserts, now);
+    await updateEventRuntimeMatchesNow(eventId, parentPlan.updates, now, source);
+    await insertEventRuntimeMatchesNow(eventId, parentPlan.inserts, now, false, source);
 
-    const currentParents = (await readEventRuntimeMatchesNow(eventId))
+    const currentParents = (await readEventRuntimeMatchesNow(eventId, source))
       .filter(row => row.match_kind === "bracket");
     const resolvedChildren = resolveBracketMatchParentIds(desiredChildren, currentParents);
     const childPlan = buildBracketMatchSyncPlan(existingChildren, resolvedChildren, now);
 
-    await deleteEventRuntimeMatchIdsNow(eventId, childPlan.deleteIds);
-    await updateEventRuntimeMatchesNow(eventId, childPlan.updates, now);
-    await insertEventRuntimeMatchesNow(eventId, childPlan.inserts, now);
-    await deleteEventRuntimeMatchIdsNow(eventId, parentPlan.deleteIds);
+    await deleteEventRuntimeMatchIdsNow(eventId, childPlan.deleteIds, source);
+    await updateEventRuntimeMatchesNow(eventId, childPlan.updates, now, source);
+    await insertEventRuntimeMatchesNow(eventId, childPlan.inserts, now, false, source);
+    await deleteEventRuntimeMatchIdsNow(eventId, parentPlan.deleteIds, source);
 
     return {
       skipped: false,
@@ -433,7 +518,7 @@ async function syncEventBracketMatchesNow(eventId, bracket) {
     };
   } catch (error) {
     try {
-      await replaceEventRuntimeMatchesNow(eventId, previousRows);
+      await replaceEventRuntimeMatchesNow(eventId, previousRows, source);
     } catch (restoreError) {
       throw new Error(
         `${error?.message || "normalized Match 동기화에 실패했습니다."} (이전 Match snapshot 복구 실패: ${restoreError?.message || "알 수 없는 오류"})`
@@ -446,6 +531,11 @@ async function syncEventBracketMatchesNow(eventId, bracket) {
 export async function syncEventBracketMatches(eventId, bracket) {
   if (!eventId) return { skipped: true, reason: "event_unlinked", inserted: 0, updated: 0, deleted: 0 };
   return queueEventMatchMutation(eventId, () => syncEventBracketMatchesNow(eventId, bracket));
+}
+
+export async function syncNormalizedBracketMatches(eventId, bracket) {
+  if (!eventId) return { skipped: true, reason: "event_unlinked", inserted: 0, updated: 0, deleted: 0 };
+  return queueEventMatchMutation(eventId, () => syncEventBracketMatchesNow(eventId, bracket, "normalized_bracket_runtime"));
 }
 
 export async function deleteEventBracketMatches(eventId, expectedRows = null) {
