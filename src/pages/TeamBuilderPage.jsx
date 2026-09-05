@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Modal, Reveal } from "../components/index.js";
 import { CUP_RULES, KO, REGULATIONS, TYPE_OPTIONS } from "../data/index.js";
-import { championsData, findSubmissionRegistration, getEvent } from "../services/index.js";
+import { championsData, findSubmissionRegistration, getEvent, getSubmissionWriteGate, submitEventTeamSnapshot } from "../services/index.js";
 import {
   ALIGNMENTS,
   DRAFT_SAVE_DELAY_MS,
@@ -42,6 +42,7 @@ import {
   spriteUrl,
   validateSubmissionEligibility,
   validateTeam,
+  resolveEventRuleSelection,
 } from "../services/teamBuilderCore.js";
 import "../team-builder.css";
 
@@ -303,12 +304,18 @@ function OfficialSubmissionPanel({
   lookupError,
   registration,
   eligibility,
+  submissionBusy,
+  submissionError,
+  onSubmit,
 }) {
   if (!eventId) return null;
+  const eventGate = eventContext ? getSubmissionWriteGate(eventContext) : null;
   const state = eventContextError || eventContextStatus === "error"
     ? "invalid"
     : !eventContext || eventContextStatus !== "ready"
       ? "incomplete"
+      : eventGate && !eventGate.allowed
+        ? "invalid"
       : !registration
         ? "incomplete"
         : eligibility?.eligible ? "valid" : "invalid";
@@ -320,10 +327,15 @@ function OfficialSubmissionPanel({
   const icon = state === "valid" ? "✓" : state === "invalid" ? "×" : "!";
   const messages = [
     ...(eventContextError ? [eventContextError] : []),
+    ...(eventGate && !eventGate.allowed && !eligibility?.errors?.includes(eventGate.error) ? [eventGate.error] : []),
     ...(lookupError ? [lookupError] : []),
     ...(eligibility?.errors || []),
     ...(eligibility?.warnings || []),
+    ...(submissionError ? [submissionError] : []),
   ];
+  const latestSubmission = registration?.latestSubmission || null;
+  const submittedAt = latestSubmission?.submitted_at || latestSubmission?.submittedAt || null;
+  const formatSubmissionTime = value => value ? new Date(value).toLocaleString("ko-KR", { dateStyle: "short", timeStyle: "short" }) : "";
   return (
     <div className={`tb-validation official-submission ${state}`}>
       <div className="tb-validation-head">
@@ -350,8 +362,13 @@ function OfficialSubmissionPanel({
         />
         <button type="button" className="btn btn-ghost btn-sm" onClick={onLookup} disabled={lookupBusy || !registrationName.trim()}>{lookupBusy ? "확인 중…" : "신청자 확인"}</button>
       </div>
-      {messages.length > 0 && <ul>{messages.slice(0, 8).map((message, index) => <li className={eligibility?.errors?.includes(message) || lookupError === message || eventContextError === message ? "error" : "incomplete"} key={`${message}-${index}`}>{message}</li>)}</ul>}
-      {state === "valid" && <div className="tb-field-meta">실제 제출 저장은 다음 단계에서 연결됩니다. 현재는 제출 준비 상태만 확인합니다.</div>}
+      {messages.length > 0 && <ul>{messages.slice(0, 8).map((message, index) => <li className={eligibility?.errors?.includes(message) || lookupError === message || eventContextError === message || submissionError === message ? "error" : "incomplete"} key={`${message}-${index}`}>{message}</li>)}</ul>}
+      {state === "valid" && <div className="tb-official-submit">
+        <button type="button" className="btn tb-main-btn" onClick={onSubmit} disabled={submissionBusy}>
+          {submissionBusy ? "제출 중…" : latestSubmission ? "다시 제출하기" : "파티 제출하기"}
+        </button>
+        {submittedAt && <span className="tb-field-meta">제출 완료 시각 {formatSubmissionTime(submittedAt)}</span>}
+      </div>}
     </div>
   );
 }
@@ -390,6 +407,8 @@ export default function TeamBuilderPage() {
   const [registration, setRegistration] = useState(null);
   const [registrationLookupError, setRegistrationLookupError] = useState("");
   const [registrationLookupBusy, setRegistrationLookupBusy] = useState(false);
+  const [submissionBusy, setSubmissionBusy] = useState(false);
+  const [submissionError, setSubmissionError] = useState("");
   const draftTimerRef = useRef(null);
   const restoringDraftRef = useRef(false);
   const unrestoredDraftExistsRef = useRef(false);
@@ -595,10 +614,11 @@ export default function TeamBuilderPage() {
 
   const submissionEligibility = useMemo(() => {
     if (!eventId || !registration || eventContextError || !eventContext) return null;
-    if (!['open', 'running'].includes(eventContext.status) || eventContext.record_applied_at) {
-      return { eligible: false, errors: ["현재 파티를 제출할 수 없는 Event입니다."], warnings: [] };
+    const gate = getSubmissionWriteGate(eventContext);
+    if (!gate.allowed) {
+      return { eligible: false, errors: [gate.error], warnings: [] };
     }
-    return validateSubmissionEligibility({
+    const eligibility = validateSubmissionEligibility({
       team,
       regulation,
       regulationId,
@@ -609,12 +629,16 @@ export default function TeamBuilderPage() {
       legalItems,
       displayPokemon,
     });
+    return gate.warning
+      ? { ...eligibility, warnings: [...eligibility.warnings, gate.warning] }
+      : eligibility;
   }, [eventId, registration, eventContext, eventContextError, team, regulation, regulationId, cupRuleId, assignedTypeId, detailData, detailStatus, legalItems, displayPokemon]);
 
   const lookupSubmissionRegistration = useCallback(async () => {
     if (!eventId || !registrationName.trim()) return;
     setRegistrationLookupBusy(true);
     setRegistrationLookupError("");
+    setSubmissionError("");
     setRegistration(null);
     try {
       const result = await findSubmissionRegistration(eventId, registrationName);
@@ -631,6 +655,38 @@ export default function TeamBuilderPage() {
       setRegistrationLookupBusy(false);
     }
   }, [eventId, registrationName]);
+
+  const submitCurrentTeam = useCallback(async () => {
+    if (!eventContext || !registration || !submissionEligibility?.eligible || submissionBusy) return;
+    setSubmissionBusy(true);
+    setSubmissionError("");
+    try {
+      const saved = await submitEventTeamSnapshot({
+        eventId,
+        registrationId: registration.registration.id,
+        registrationName,
+        registrationSource: registration.registration.registration_source,
+        eligibility: submissionEligibility,
+        team,
+        regulationId,
+        cupRuleId,
+        cupRuleSettings: { assignedType: cupRule.kind === "monotype" ? assignedTypeId : "" },
+        detailData,
+      });
+      setRegistration(current => current ? { ...current, latestSubmission: {
+        id: saved.submission_id,
+        registration_id: registration.registration.id,
+        snapshot_id: saved.snapshot_id,
+        revision: saved.revision,
+        submitted_at: saved.submittedAt,
+        source: "team_builder",
+      } } : current);
+    } catch (error) {
+      setSubmissionError(error?.message || "파티 제출을 저장하지 못했습니다.");
+    } finally {
+      setSubmissionBusy(false);
+    }
+  }, [eventContext, registration, submissionEligibility, submissionBusy, eventId, registrationName, team, regulationId, cupRuleId, cupRule.kind, assignedTypeId, detailData]);
 
   const eligiblePool = useMemo(() => {
     const base = regulation?.pokemon || [];
@@ -726,19 +782,7 @@ export default function TeamBuilderPage() {
   }, [assignedTypeId, team, regulation, cupRuleId, regulationId, detailData, requestRuleChange]);
 
   const eventRuleSelection = useMemo(() => {
-    if (!eventContext) return null;
-    const nextRegulationId = String(eventContext.regulation_id || "");
-    const nextCupRuleId = String(eventContext.cup_rule_id || "none");
-    if (!REGULATIONS[nextRegulationId]) return { error: "Event의 Regulation을 현재 Team Builder에서 확인할 수 없습니다." };
-    if (!CUP_RULES[nextCupRuleId]) return { error: "Event의 Cup Rule을 현재 Team Builder에서 확인할 수 없습니다." };
-    const settings = eventContext.cup_rule_settings && typeof eventContext.cup_rule_settings === "object"
-      ? eventContext.cup_rule_settings : {};
-    const nextAssignedTypeId = CUP_RULES[nextCupRuleId].kind === "monotype"
-      ? String(settings.assignedTypeId || settings.assignedType || "") : "";
-    if (CUP_RULES[nextCupRuleId].kind === "monotype" && !TYPE_OPTIONS.some(type => type.id === nextAssignedTypeId)) {
-      return { error: "Event의 모노타입 배정 타입을 확인할 수 없습니다." };
-    }
-    return { regulationId: nextRegulationId, cupRuleId: nextCupRuleId, assignedTypeId: nextAssignedTypeId };
+    return resolveEventRuleSelection(eventContext);
   }, [eventContext]);
 
   useEffect(() => {
@@ -746,7 +790,9 @@ export default function TeamBuilderPage() {
       if (eventRuleSelection?.error) setEventContextError(eventRuleSelection.error);
       return;
     }
-    const { regulationId: nextRegulationId, cupRuleId: nextCupRuleId, assignedTypeId: nextAssignedTypeId } = eventRuleSelection;
+    const { regulationId: nextRegulationId, cupRuleId: nextCupRuleId } = eventRuleSelection;
+    const nextAssignedTypeId = CUP_RULES[nextCupRuleId].kind === "monotype"
+      && TYPE_OPTIONS.some(type => type.id === assignedTypeId) ? assignedTypeId : "";
     if (regulationId === nextRegulationId && cupRuleId === nextCupRuleId && assignedTypeId === nextAssignedTypeId) return;
     const nextRegulation = REGULATIONS[nextRegulationId];
     const removedMembers = membersRemovedByRuleChange({
@@ -1102,7 +1148,7 @@ export default function TeamBuilderPage() {
           </label>
           {cupRule.kind === "monotype" && <label className="tb-field">
             <span>배정 타입{eventId ? " · Event 기준" : ""}</span>
-            <select className="tb-select" value={assignedTypeId} onChange={event => switchCupRuleType(event.target.value)} disabled={Boolean(eventId)}>
+            <select className="tb-select" value={assignedTypeId} onChange={event => switchCupRuleType(event.target.value)}>
               <option value="">타입을 선택하세요</option>
               {TYPE_OPTIONS.map(type => <option key={type.id} value={type.id}>{type.korean} ({type.english})</option>)}
             </select>
@@ -1125,12 +1171,15 @@ export default function TeamBuilderPage() {
           regulationName={regulation.name}
           cupRuleSummary={currentCupRuleSummary}
           registrationName={registrationName}
-          onRegistrationNameChange={value => { setRegistrationName(value); setRegistration(null); setRegistrationLookupError(""); }}
+          onRegistrationNameChange={value => { setRegistrationName(value); setRegistration(null); setRegistrationLookupError(""); setSubmissionError(""); }}
           onLookup={lookupSubmissionRegistration}
           lookupBusy={registrationLookupBusy}
           lookupError={registrationLookupError}
           registration={registration}
           eligibility={submissionEligibility}
+          submissionBusy={submissionBusy}
+          submissionError={submissionError}
+          onSubmit={submitCurrentTeam}
         />
       </Reveal>
 
@@ -1156,7 +1205,7 @@ export default function TeamBuilderPage() {
             {query && <button className="tb-clear" onClick={() => setQuery("")} aria-label="검색어 지우기">×</button>}
           </div>
           {cupRule.kind === "monotype" && !assignedTypeId ? (
-            <div className="tb-pool-empty">모노타입 챌린지의 배정 타입을 먼저 선택해 주세요.</div>
+            <div className="tb-pool-empty">모노타입 챌린지의 타입을 선택해 주세요.</div>
           ) : cupRule.kind === "monotype" && !detailData && detailStatus === "loading" ? (
             <div className="tb-pool-empty">포켓몬 타입 데이터를 불러오는 중입니다.</div>
           ) : cupRule.kind === "monotype" && !detailData ? (

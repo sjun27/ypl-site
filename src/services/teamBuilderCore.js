@@ -1,4 +1,4 @@
-import { CUP_RULES, TYPE_OPTIONS, KO } from "../data/index.js";
+import { CUP_RULES, REGULATIONS, TYPE_OPTIONS, KO } from "../data/index.js";
 import { toID } from "./championsData.js";
 
 export const STAT_KEYS = ["hp", "atk", "def", "spa", "spd", "spe"];
@@ -568,6 +568,21 @@ export function pokemonMatchesCupRule({ pokemon, cupRuleId, assignedTypeId, deta
   return true;
 }
 
+export function resolveEventRuleSelection(eventContext) {
+  if (!eventContext) return null;
+
+  const regulationId = String(eventContext.regulation_id || "");
+  const cupRuleId = String(eventContext.cup_rule_id || "none");
+  if (!REGULATIONS[regulationId]) {
+    return { error: "Event의 Regulation을 현재 Team Builder에서 확인할 수 없습니다." };
+  }
+  if (!CUP_RULES[cupRuleId]) {
+    return { error: "Event의 Cup Rule을 현재 Team Builder에서 확인할 수 없습니다." };
+  }
+
+  return { regulationId, cupRuleId };
+}
+
 export function resolveAlignment(value) {
   const normalized = String(value || "").trim().toLowerCase();
   const compact = toID(normalized);
@@ -593,7 +608,7 @@ export function validateTeam({ team, regulation, regulationId, cupRuleId, assign
   const display = pokemon => displayPokemon?.(pokemon) || pokemon?.name || "";
 
   if (cupRule.kind === "monotype" && !assignedType) {
-    incomplete.push("모노타입 챌린지의 배정 타입을 선택해 주세요.");
+    incomplete.push("모노타입 챌린지의 타입을 선택해 주세요.");
   }
 
   if (cupRule.kind === "monotype" && assignedType && detailData) {
@@ -746,7 +761,7 @@ export function validateSubmissionEligibility({
 
   const cupRule = CUP_RULES[cupRuleId] || CUP_RULES.none;
   if (cupRule.kind === "monotype" && !assignedTypeId) {
-    errors.push("모노타입 공식 제출의 배정 타입을 확인할 수 없습니다.");
+    errors.push("모노타입 챌린지의 타입을 선택해 주세요.");
   }
 
   if (members.length > 0 && members.length < maxTeamSize) {

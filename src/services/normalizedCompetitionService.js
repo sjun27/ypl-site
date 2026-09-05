@@ -22,6 +22,7 @@ import {
 } from "./bracketTeamParticipants.js";
 import { isInterruptedBracketCleanupState, validateBracketParticipantConfirmation } from "./bracketLifecycle.js";
 import { buildSubmissionStatusRows, selectSubmissionRegistration } from "./teamBuilderCore.js";
+import { buildTeamSnapshotSubmission } from "./teamSubmission.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -1080,9 +1081,75 @@ export async function findSubmissionRegistration(eventId, registrationName) {
   const selected = selectSubmissionRegistration(data || [], name);
   if (!selected) return null;
 
+  const { data: latestSubmission, error: latestSubmissionError } = await db()
+    .from("registration_submissions")
+    .select("id, registration_id, snapshot_id, revision, submitted_at, source")
+    .eq("registration_id", selected.id)
+    .order("revision", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (latestSubmissionError) fail(latestSubmissionError, "기존 파티 제출 상태를 확인하지 못했습니다.");
+
   return {
     event,
     registration: selected,
+    latestSubmission: latestSubmission || null,
+  };
+}
+
+export async function submitEventTeamSnapshot({
+  eventId,
+  registrationId,
+  registrationName,
+  registrationSource = "application",
+  eligibility,
+  team,
+  regulationId,
+  cupRuleId,
+  cupRuleSettings,
+  detailData,
+  now = new Date(),
+} = {}) {
+  const event = await getEvent(eventId);
+  if (!event) throw new Error("연결된 Event를 찾을 수 없습니다.");
+
+  const payload = buildTeamSnapshotSubmission({
+    event,
+    registration: {
+      id: registrationId,
+      event_id: eventId,
+      registration_name: String(registrationName || "").trim(),
+      registration_source: registrationSource,
+    },
+    registrationName,
+    eligibility,
+    team,
+    regulationId,
+    cupRuleId,
+    cupRuleSettings,
+    detailData,
+    now,
+  });
+
+  const { data, error } = await db().rpc("submit_registration_team_snapshot", {
+    p_event_id: payload.eventId,
+    p_registration_id: payload.registrationId,
+    p_registration_name: payload.registrationName,
+    p_snapshot: payload.snapshot,
+    p_members: payload.members,
+  });
+
+  if (error) fail(error, "파티 제출을 저장하지 못했습니다.");
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row?.submission_id || !row?.snapshot_id || !row?.revision) {
+    throw new Error("파티 제출 저장 결과를 확인하지 못했습니다.");
+  }
+  return {
+    ...row,
+    submittedAt: row.submitted_at || payload.submittedAt,
+    late: payload.late,
+    warning: payload.warning,
   };
 }
 

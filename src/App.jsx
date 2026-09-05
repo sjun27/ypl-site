@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { loadSiteData, saveSiteData, submitEventApplication } from "./services/index.js";
+import { loadSiteData, saveSiteData, readInitialAppView, submitEventApplication } from "./services/index.js";
 import { AboutPage, BoardPage, BracketsPage, ChampionsPage, HomePage, NewsPage, RecordsPage, TeamBuilderPage, TitlesPage } from "./pages/index.js";
 import { SiteHeader } from "./components/index.js";
 import { AdminModeBar, AdminModalHost } from "./admin/index.js";
@@ -939,6 +939,8 @@ html{overflow-y:scroll;scrollbar-gutter:stable;}
 .ann-link,.ann-apply{background:var(--ac-fill);color:#FFFFFF;border:1px solid var(--ac-fill);
   border-radius:8px;font-weight:600;}
 .ann-link:hover,.ann-apply:hover{background:var(--ac-fill);}
+.ypl .ann-apply.ann-submit{background:var(--s-soft2);color:var(--ac-text);border-color:var(--ln-3);}
+.ypl .ann-apply.ann-submit:hover{background:var(--s-fill);color:var(--ac-text);border-color:var(--ln-3);box-shadow:none;}
 
 /* ── 내비게이션 ── */
 .nav{background:var(--s-card);border-bottom:1px solid var(--line);backdrop-filter:none;box-shadow:none;}
@@ -1556,7 +1558,7 @@ function normTeam(team){ return (team||[]).map(m=> typeof m==="string"?{name:m,i
 
 /* ============================== 앱 ============================== */
 export default function App() {
-  const [data,setData]=useState(null); const [view,setView]=useState("home");
+  const [data,setData]=useState(null); const [view,setView]=useState(()=>readInitialAppView(window.location.search));
   const [admin,setAdmin]=useState(false); const [toast,setToast]=useState(""); const [modal,setModal]=useState(null);
   const [scrolled,setScrolled]=useState(false);
   const [menuOpen,setMenuOpen]=useState(false);
@@ -1576,7 +1578,24 @@ export default function App() {
   });
   useEffect(()=>{ try{ localStorage.setItem("ypl-theme", dark?"dark":"light"); }catch(e){} },[dark]);
   useEffect(()=>{let last=null,raf=0;const f=()=>{if(raf)return;raf=requestAnimationFrame(()=>{raf=0;const v=window.scrollY>20;if(v!==last){last=v;setScrolled(v);}});};f();window.addEventListener("scroll",f,{passive:true});return()=>{window.removeEventListener("scroll",f);if(raf)cancelAnimationFrame(raf);};},[]);
-  const go=useCallback((v)=>{setView(v);setMenuOpen(false);window.scrollTo({top:0,behavior:"smooth"});},[]);
+  useEffect(()=>{
+    const onPopState=()=>setView(readInitialAppView(window.location.search));
+    window.addEventListener("popstate",onPopState);
+    return ()=>window.removeEventListener("popstate",onPopState);
+  },[]);
+  const go=useCallback((v, options={})=>{
+    if(v==="builder"&&options.eventId){
+      const url=new URL(window.location.href);
+      url.search=`view=builder&eventId=${encodeURIComponent(options.eventId)}`;
+      window.history.pushState({view:"builder",eventId:options.eventId},"",url);
+    }else if(v!=="builder"&&new URLSearchParams(window.location.search).get("view")==="builder"){
+      const url=new URL(window.location.href);
+      url.searchParams.delete("view");
+      url.searchParams.delete("eventId");
+      window.history.pushState({},"",url);
+    }
+    setView(v);setMenuOpen(false);window.scrollTo({top:0,behavior:"smooth"});
+  },[]);
   const flash=useCallback((m)=>{setToast(m);setTimeout(()=>setToast(""),1800);},[]);
   const save=useCallback(async(next)=>{setData(next);const ok=await saveSiteData(next);flash(ok?"저장됨 ✓":"메모리에만 반영됨");return ok;},[flash]);
   const submitForm=useCallback(async(annId,payload)=>{
@@ -1657,7 +1676,7 @@ export default function App() {
       <div className="wrap"><div className="page" key={view}>
         {view==="home"&&<HomePage data={data} go={go} admin={admin}/>}
         {view==="about"&&<AboutPage/>}
-        {view==="news"&&<NewsPage data={data} admin={admin} setModal={setModal} save={save} submitForm={submitForm} refresh={refresh}/>}
+        {view==="news"&&<NewsPage data={data} admin={admin} setModal={setModal} save={save} submitForm={submitForm} refresh={refresh} go={go}/>}
         {view==="board"&&<BoardPage data={data} admin={admin} save={save} flash={flash}/>}
         {view==="records"&&<RecordsPage data={data} admin={admin} setModal={setModal} save={save}/>}
         {view==="bracket"&&<BracketsPage data={data} admin={admin} save={save} flash={flash} refresh={refresh}/>}

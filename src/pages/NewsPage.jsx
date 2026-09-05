@@ -1,11 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { Dropdown, ListSearch, Modal, Pager, Reveal } from "../components/index.js";
-import { listEventApplications } from "../services/index.js";
+import { builderRouteSearch, listEventApplications } from "../services/index.js";
 
 function fmtDT(iso){ try{ const d=new Date(iso); const p=(n)=>String(n).padStart(2,"0"); return `${d.getFullYear()}.${p(d.getMonth()+1)}.${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; }catch{ return ""; } }
 
 const PAGE_SIZE=10;
-export default function NewsPage({ data, admin, setModal, save, submitForm, refresh }) {
+export default function NewsPage({ data, admin, setModal, save, submitForm, refresh, go }) {
   const [q,setQ]=useState(""); const [page,setPage]=useState(1);
   const [fill,setFill]=useState(null); const [respId,setRespId]=useState(null);
   const [eventResponses,setEventResponses]=useState({});
@@ -68,8 +68,9 @@ export default function NewsPage({ data, admin, setModal, save, submitForm, refr
             {a.link&&<a className="ann-link" href={href(a.link)} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>{a.linkLabel||"링크 바로가기"} ↗</a>}
             {a.link2&&<a className="ann-link alt" href={href(a.link2)} target="_blank" rel="noopener noreferrer" onClick={e=>e.stopPropagation()}>{a.link2Label||"링크 바로가기"} ↗</a>}
           </div>}
-          {hasForm&&<div className="ann-formbtns">
-            <button className="ann-apply" onClick={e=>{e.stopPropagation();setFill(a.id);}}>📝 {a.form.buttonLabel||"참가 신청하기"}</button>
+          {(hasForm||a.form?.eventId)&&<div className="ann-formbtns">
+            {hasForm&&<button className="ann-apply" onClick={e=>{e.stopPropagation();setFill(a.id);}}>📝 {a.form.buttonLabel||"참가 신청하기"}</button>}
+            {a.form?.eventId&&<button className="ann-apply ann-submit" onClick={e=>{e.stopPropagation();if(go)go("builder",{eventId:a.form.eventId});else window.location.search=builderRouteSearch(a.form.eventId,window.location.search);}}>파티 제출</button>}
             {admin&&<button className="ann-resp" onClick={e=>{e.stopPropagation();setRespId(a.id);}}>응답 보기 <span className="rc">{a.form.eventId?(eventResponses[a.id]||[]).length:(a.form.responses||[]).length}</span></button>}
           </div>}
           {hasForm&&(a.form.fields||[]).some(f=>f.public)&&<PublicResponses ann={a} onRefresh={doRefresh} updatedAt={seen}/>}

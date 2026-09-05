@@ -132,6 +132,8 @@
 .tb-official-lookup{display:flex;align-items:center;gap:8px;margin:12px 0 0 43px;}
 .tb-official-lookup .tb-input{flex:1;min-width:0;}
 .tb-validation.official-submission ul{margin-top:10px;}
+.tb-official-submit{display:flex;align-items:center;gap:10px;margin:12px 0 0 43px;flex-wrap:wrap;}
+.tb-official-submit .tb-field-meta{margin-top:0;}
 .tb-validation-head{display:flex;align-items:center;gap:12px;}
 .tb-validation-icon{width:31px;height:31px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--s-soft);font-size:15px;font-weight:800;color:var(--muted);flex:none;}
 .tb-validation.valid .tb-validation-icon{background:rgba(36,163,108,.12);color:#18734a;}

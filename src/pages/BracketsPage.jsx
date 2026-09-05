@@ -905,11 +905,15 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=
     let cancelled=false;
     setSubmissionStatusBusy(true);
     setSubmissionStatusError("");
-    listEventRegistrationSubmissionStatuses(b.eventId)
-      .then(rows=>{ if(!cancelled) setSubmissionStatuses(rows||[]); })
+    const loadStatuses=()=>listEventRegistrationSubmissionStatuses(b.eventId)
+      .then(rows=>{ if(!cancelled){ setSubmissionStatuses(rows||[]); setSubmissionStatusError(""); } })
       .catch(error=>{ if(!cancelled) setSubmissionStatusError(error?.message||"파티 제출 현황을 불러오지 못했습니다."); })
       .finally(()=>{ if(!cancelled) setSubmissionStatusBusy(false); });
-    return ()=>{ cancelled=true; };
+    loadStatuses();
+    const interval=setInterval(()=>{ if(!document.hidden) loadStatuses(); },10000);
+    const onFocus=()=>loadStatuses();
+    window.addEventListener("focus",onFocus);
+    return ()=>{ cancelled=true; clearInterval(interval); window.removeEventListener("focus",onFocus); };
   },[b.eventId,data,submissionStatusReloadKey]);
   const submissionStatusModel=buildBracketSubmissionStatusModel(b,submissionStatuses);
   const savePartyFn=async(parts)=>{

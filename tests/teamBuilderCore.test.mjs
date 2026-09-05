@@ -15,6 +15,7 @@ import {
   buildBracketSubmissionStatusModel,
   buildSubmissionStatusRows,
   selectSubmissionRegistration,
+  resolveEventRuleSelection,
   validateSubmissionEligibility,
   validateTeam,
 } from "../src/services/teamBuilderCore.js";
@@ -49,6 +50,37 @@ const detailData = {
   moves: { tackle: { id: "tackle", name: "Tackle", category: "Physical", type: "Normal", basePower: 40, accuracy: 100, pp: 35 } },
   items: { leftovers: { id: "leftovers", name: "Leftovers", isNonstandard: null } },
 };
+
+test("Event rule resolver applies canonical regulation and cup rule even when settings are empty", () => {
+  assert.deepEqual(resolveEventRuleSelection({
+    regulation_id: "m-b",
+    cup_rule_id: "monotype-challenge",
+    cup_rule_settings: {},
+  }), {
+    regulationId: "m-b",
+    cupRuleId: "monotype-challenge",
+  });
+});
+
+test("Event rule resolver leaves monotype assigned type to the local Team Builder state", () => {
+  assert.deepEqual(resolveEventRuleSelection({
+    regulation_id: "m-b",
+    cup_rule_id: "monotype-challenge",
+    cup_rule_settings: { assignedType: "fire" },
+  }), {
+    regulationId: "m-b",
+    cupRuleId: "monotype-challenge",
+  });
+});
+
+test("Event rule resolver fails closed for unsupported cup rules", () => {
+  const result = resolveEventRuleSelection({
+    regulation_id: "m-b",
+    cup_rule_id: "unsupported-test-rule",
+    cup_rule_settings: {},
+  });
+  assert.match(result.error, /Cup Rule/);
+});
 
 function teamOf(...names) {
   return names.map(name => {
