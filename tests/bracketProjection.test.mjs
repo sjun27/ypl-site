@@ -8,6 +8,7 @@ import {
 } from "../src/services/bracketProjection.js";
 
 const EVENT_ID = "event-single-1";
+const RUNTIME_ID = "runtime-single-1";
 
 function event(overrides = {}) {
   return {
@@ -20,7 +21,7 @@ function event(overrides = {}) {
   };
 }
 
-function inputs(count, { seedOffset = 0 } = {}) {
+function inputs(count, { seedOffset = 0, slotEntryIds } = {}) {
   const entries = Array.from({ length: count }, (_, index) => {
     const id = `entry-${String.fromCharCode(97 + index)}`;
     return {
@@ -41,7 +42,34 @@ function inputs(count, { seedOffset = 0 } = {}) {
     member_order: 1,
     role: null,
   }));
-  return { entries, entryParticipants };
+  const size = 2 ** Math.ceil(Math.log2(count));
+  const slotIds = slotEntryIds ? [...slotEntryIds] : Array(size).fill(null);
+  if (!slotEntryIds) {
+    const byeCount = size - count;
+    let entryIndex = 0;
+    for (let matchIndex = 0; matchIndex < size / 2; matchIndex += 1) {
+      if (matchIndex < byeCount) {
+        slotIds[matchIndex * 2] = entries[entryIndex].id;
+        entryIndex += 1;
+      } else {
+        slotIds[matchIndex * 2] = entries[entryIndex].id;
+        slotIds[matchIndex * 2 + 1] = entries[entryIndex + 1].id;
+        entryIndex += 2;
+      }
+    }
+  }
+  const entrySlots = slotIds
+    .map((entryId, index) => entryId ? {
+      bracket_runtime_id: RUNTIME_ID,
+      event_id: EVENT_ID,
+      stage_kind: "elimination",
+      stage_no: 1,
+      pool_no: 0,
+      slot_no: index + 1,
+      entry_id: entryId,
+    } : null)
+    .filter(Boolean);
+  return { entries, entryParticipants, entrySlots };
 }
 
 function match(nodeKey, entryA, entryB, winner = null, overrides = {}) {
@@ -61,11 +89,13 @@ function match(nodeKey, entryA, entryB, winner = null, overrides = {}) {
 }
 
 function project(count, matches = [], options = {}) {
-  const { entries, entryParticipants } = inputs(count, options);
+  const { entries, entryParticipants, entrySlots } = inputs(count, options);
   return projectNormalizedSingleEliminationBracket({
     event: event(),
+    runtimeId: RUNTIME_ID,
     entries,
     entryParticipants,
+    entrySlots,
     matches,
   });
 }
@@ -91,15 +121,18 @@ test("projects 2 entries into one deterministic match", () => {
 });
 
 test("projects 3 entries with one deterministic BYE", () => {
-  const result = project(3);
+  const result = project(3, [], {
+    slotEntryIds: ["entry-a", "entry-b", "entry-c", null],
+  });
   const firstRound = result.graph.rounds[0];
   assert.equal(result.graph.size, 4);
   assert.equal(result.graph.byes, 1);
   assert.deepEqual(firstRound[0].a, { pid: "entry-a" });
-  assert.deepEqual(firstRound[0].b, { bye: true });
-  assert.equal(firstRound[0].winner, "a");
-  assert.deepEqual(firstRound[1].a, { pid: "entry-b" });
-  assert.deepEqual(firstRound[1].b, { pid: "entry-c" });
+  assert.deepEqual(firstRound[0].b, { pid: "entry-b" });
+  assert.equal(firstRound[0].winner, null);
+  assert.deepEqual(firstRound[1].a, { pid: "entry-c" });
+  assert.deepEqual(firstRound[1].b, { bye: true });
+  assert.equal(firstRound[1].winner, "a");
   assert.deepEqual(result.graph.rounds[1][0].a, { win: "single:r1:m1" });
   assert.deepEqual(result.graph.rounds[1][0].b, { win: "single:r1:m2" });
 });
@@ -124,14 +157,18 @@ test("same normalized facts produce byte-for-byte equivalent topology despite in
   const base = inputs(6);
   const first = projectNormalizedSingleEliminationBracket({
     event: event(),
+    runtimeId: RUNTIME_ID,
     entries: base.entries,
     entryParticipants: base.entryParticipants,
+    entrySlots: base.entrySlots,
     matches: [],
   });
   const second = projectNormalizedSingleEliminationBracket({
     event: event(),
+    runtimeId: RUNTIME_ID,
     entries: [...base.entries].reverse(),
     entryParticipants: [...base.entryParticipants].reverse(),
+    entrySlots: [...base.entrySlots].reverse(),
     matches: [],
   });
   assert.deepEqual(second, first);
@@ -225,3 +262,99 @@ test("returns the legacy UI-compatible adapter shape without reading a legacy gr
   assert.equal(result.projection.seedUsedAsSlot, false);
 });
 
+test("uses persisted draw slots even when they differ from Entry-id order", () => {
+  const result = project(3, [], {
+    slotEntryIds: ["entry-b", "entry-c", "entry-a", null],
+  });
+  assert.deepEqual(result.graph.rounds[0].map(node => [node.a, node.b]), [
+    [{ pid: "entry-b" }, { pid: "entry-c" }],
+    [{ pid: "entry-a" }, { bye: true }],
+  ]);
+});
+
+test("reproduces the B2B3 A/B/C draw regardless of Entry array order", () => {
+  const base = inputs(3, { slotEntryIds: ["entry-a", "entry-b", "entry-c", null] });
+  const result = projectNormalizedSingleEliminationBracket({
+    event: event(),
+    runtimeId: RUNTIME_ID,
+    entries: [base.entries[2], base.entries[0], base.entries[1]],
+    entryParticipants: [base.entryParticipants[2], base.entryParticipants[0], base.entryParticipants[1]],
+    entrySlots: [...base.entrySlots].reverse(),
+    matches: [],
+  });
+  assert.deepEqual(result.graph.rounds[0].map(node => [node.a, node.b]), [
+    [{ pid: "entry-a" }, { pid: "entry-b" }],
+    [{ pid: "entry-c" }, { bye: true }],
+  ]);
+});
+
+test("rejects a missing persisted slot set instead of falling back to Entry ids", () => {
+  const base = inputs(2);
+  assert.throws(
+    () => projectNormalizedSingleEliminationBracket({
+      event: event(),
+      runtimeId: RUNTIME_ID,
+      entries: base.entries,
+      entryParticipants: base.entryParticipants,
+      matches: [],
+    }),
+    /persisted entrySlots/
+  );
+});
+
+test("rejects malformed persisted slots", () => {
+  const base = inputs(3);
+  const cases = [
+    ["missing Entry", base.entrySlots.slice(0, 2), /정확히 하나/],
+    ["duplicate Entry", [...base.entrySlots, { ...base.entrySlots[0], slot_no: 4 }], /중복/],
+    ["duplicate slot", [...base.entrySlots, { ...base.entrySlots[2], entry_id: "entry-c", slot_no: 2 }], /중복/],
+    ["out of range", base.entrySlots.map(row => row.entry_id === "entry-c" ? { ...row, slot_no: 5 } : row), /범위를/],
+    ["unknown Entry", [...base.entrySlots.slice(0, 2), { ...base.entrySlots[2], entry_id: "entry-unknown" }], /일치하지/],
+    ["wrong stage", base.entrySlots.map(row => ({ ...row, stage_kind: "group" })), /일치하지/],
+    ["wrong stage number", base.entrySlots.map(row => ({ ...row, stage_no: 2 })), /일치하지/],
+    ["wrong pool", base.entrySlots.map(row => ({ ...row, pool_no: 1 })), /일치하지/],
+    ["foreign event", base.entrySlots.map(row => ({ ...row, event_id: "other-event" })), /일치하지/],
+    ["foreign runtime", base.entrySlots.map(row => ({ ...row, bracket_runtime_id: "other-runtime" })), /일치하지/],
+  ];
+  for (const [, entrySlots, pattern] of cases) {
+    assert.throws(
+      () => projectNormalizedSingleEliminationBracket({
+        event: event(),
+        runtimeId: RUNTIME_ID,
+        entries: base.entries,
+        entryParticipants: base.entryParticipants,
+        entrySlots,
+        matches: [],
+      }),
+      pattern
+    );
+  }
+});
+
+test("rejects a first-round double-BYE draw", () => {
+  const base = inputs(5, { slotEntryIds: ["entry-a", "entry-b", null, null, "entry-c", "entry-d", "entry-e", null] });
+  assert.throws(
+    () => projectNormalizedSingleEliminationBracket({
+      event: event(),
+      runtimeId: RUNTIME_ID,
+      entries: base.entries,
+      entryParticipants: base.entryParticipants,
+      entrySlots: base.entrySlots,
+      matches: [],
+    }),
+    /double-BYE/
+  );
+});
+
+test("requires normalized Match source and validates its sides against persisted topology", () => {
+  assert.throws(
+    () => project(2, [match("single:r1:m1", "entry-a", "entry-b", null, { source: "legacy" })]),
+    /source.*일치하지 않습니다/
+  );
+  assert.throws(
+    () => project(3, [match("single:r1:m1", "entry-b", "entry-a")], {
+      slotEntryIds: ["entry-a", "entry-b", "entry-c", null],
+    }),
+    /deterministic topology/
+  );
+});

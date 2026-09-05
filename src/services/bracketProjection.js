@@ -8,10 +8,9 @@
  *
  * Important boundary:
  * - Entry.seed is a seeding fact, not a bracket slot in this contract.
- * - There is no persisted draw-slot fact in the current normalized schema.
- * - Until Phase B chooses a persistent slot representation, the projection
- *   uses a canonical Entry-id order and deterministic BYE placement. This is
- *   reload-stable, but it must not be described as preserving an operator draw.
+ * - bracket_entry_slots is the canonical persisted operator draw.
+ * - Missing slot rows are deterministic BYEs; future nodes remain projection
+ *   facts and are not persisted Match rows.
  */
 
 export const SINGLE_BRACKET_PROJECTION_VERSION = 1;
@@ -25,6 +24,7 @@ export const SINGLE_BRACKET_PROJECTION_CONTRACT = Object.freeze({
   },
   persistentFacts: Object.freeze({
     event: ["id", "name", "is_team_event", "competition_format", "status"],
+    runtime: ["id", "event_id", "topology_kind", "projection_version"],
     entry: ["id", "event_id", "entry_type", "display_name", "status", "seed"],
     entryParticipant: [
       "id",
@@ -35,10 +35,20 @@ export const SINGLE_BRACKET_PROJECTION_CONTRACT = Object.freeze({
       "member_order",
       "role",
     ],
+    entrySlot: [
+      "bracket_runtime_id",
+      "event_id",
+      "stage_kind",
+      "stage_no",
+      "pool_no",
+      "slot_no",
+      "entry_id",
+    ],
     match: [
       "id",
       "event_id",
       "match_kind",
+      "source",
       "source_node_key",
       "entry_a_id",
       "entry_b_id",
@@ -158,32 +168,55 @@ function normalizeEntryParticipants(eventId, entries, entryParticipants) {
   });
 }
 
-function buildFirstRoundSlots(entries, size) {
-  const matchCount = size / 2;
-  const byeCount = size - entries.length;
-  const slots = [];
-  let entryIndex = 0;
-
-  // BYEs are assigned to the first canonical matches. This avoids a double-BYE
-  // match for odd participant counts while remaining independent of input order.
-  for (let matchIndex = 0; matchIndex < matchCount; matchIndex += 1) {
-    if (matchIndex < byeCount) {
-      slots.push([
-        { pid: entries[entryIndex].id },
-        { bye: true },
-      ]);
-      entryIndex += 1;
-      continue;
-    }
-
-    slots.push([
-      { pid: entries[entryIndex].id },
-      { pid: entries[entryIndex + 1].id },
-    ]);
-    entryIndex += 2;
+function normalizeEntrySlots(eventId, runtimeId, entries, entrySlots, size) {
+  if (!Array.isArray(entrySlots) || entrySlots.length === 0) {
+    fail("normalized Single projection에는 persisted entrySlots가 필요합니다.");
   }
 
-  if (entryIndex !== entries.length) fail("deterministic first-round slot 계산이 참가자 수와 일치하지 않습니다.");
+  const entryIds = new Set(entries.map(entry => entry.id));
+  const seenEntries = new Set();
+  const seenSlots = new Set();
+  const slotByNo = new Array(size + 1).fill(null);
+
+  for (const row of entrySlots) {
+    if (!row || typeof row !== "object") fail("bracket_entry_slots row가 올바르지 않습니다.");
+    const entryId = requireText(row.entry_id, "bracket_entry_slots entry_id");
+    requireSame(row.bracket_runtime_id, runtimeId, `Entry '${entryId}'의 bracket runtime ownership`);
+    requireSame(row.event_id, eventId, `Entry '${entryId}'의 Event ownership`);
+    requireSame(row.stage_kind, "elimination", `Entry '${entryId}'의 stage_kind`);
+    requireSame(row.stage_no, 1, `Entry '${entryId}'의 stage_no`);
+    requireSame(row.pool_no, 0, `Entry '${entryId}'의 pool_no`);
+
+    if (!Number.isInteger(row.slot_no) || row.slot_no < 1 || row.slot_no > size) {
+      fail(`Entry '${entryId}'의 slot_no가 bracket 범위를 벗어났습니다.`);
+    }
+    if (!entryIds.has(entryId)) fail(`bracket_entry_slots의 Entry '${entryId}'가 projection Entry와 일치하지 않습니다.`);
+    if (seenEntries.has(entryId)) fail(`Entry '${entryId}'의 slot row가 중복되어 있습니다.`);
+    if (seenSlots.has(row.slot_no)) fail(`slot_no '${row.slot_no}'가 중복되어 있습니다.`);
+
+    seenEntries.add(entryId);
+    seenSlots.add(row.slot_no);
+    slotByNo[row.slot_no] = entryId;
+  }
+
+  if (seenEntries.size !== entries.length) {
+    fail("active Entry마다 정확히 하나의 persisted slot row가 필요합니다.");
+  }
+
+  const slots = [];
+  let byeCount = 0;
+  for (let matchIndex = 0; matchIndex < size / 2; matchIndex += 1) {
+    const left = slotByNo[matchIndex * 2 + 1];
+    const right = slotByNo[matchIndex * 2 + 2];
+    if (!left) byeCount += 1;
+    if (!right) byeCount += 1;
+    if (!left && !right) fail(`first-round node m${matchIndex + 1}에 double-BYE가 있습니다.`);
+    slots.push([
+      left ? { pid: left } : { bye: true },
+      right ? { pid: right } : { bye: true },
+    ]);
+  }
+
   return { slots, byeCount };
 }
 
@@ -197,6 +230,7 @@ function normalizeMatches(eventId, generatedNodeKeys, matches, entryIds) {
     const id = requireText(row.id, "Match id");
     requireSame(row.event_id, eventId, `Match '${id}'의 Event ownership`);
     requireSame(row.match_kind, "bracket", `Match '${id}'의 match_kind`);
+    requireSame(row.source, "normalized_bracket_runtime", `Match '${id}'의 source`);
     const key = requireText(row.source_node_key, `Match '${id}' source_node_key`);
     if (!allowedKeys.has(key)) fail(`알 수 없는 Single bracket node key '${key}'입니다.`);
     if (byNodeKey.has(key)) fail(`Match node key '${key}'가 중복되어 있습니다.`);
@@ -278,9 +312,9 @@ export function evaluateSingleEliminationGraph(graph) {
   return graphWinnerState(graph);
 }
 
-function buildGraph(entries, matchByNodeKey) {
+function buildGraph(entries, matchByNodeKey, firstRoundSlots) {
   const size = nextPowerOfTwo(entries.length);
-  const { slots, byeCount } = buildFirstRoundSlots(entries, size);
+  const { slots, byeCount } = firstRoundSlots;
   const rounds = [];
   const generatedNodeKeys = [];
   let previousRound = [];
@@ -385,11 +419,14 @@ function buildParticipants(entries, entryParticipants) {
  */
 export function projectNormalizedSingleEliminationBracket({
   event,
+  runtimeId,
   entries = [],
   entryParticipants = [],
+  entrySlots,
   matches = [],
 } = {}) {
   const normalizedEvent = normalizeEvent(event);
+  const normalizedRuntimeId = requireText(runtimeId, "bracket runtime id");
   const normalizedEntries = normalizeEntries(normalizedEvent.id, entries);
   const normalizedParticipants = normalizeEntryParticipants(
     normalizedEvent.id,
@@ -397,6 +434,13 @@ export function projectNormalizedSingleEliminationBracket({
     entryParticipants
   );
   const size = nextPowerOfTwo(normalizedEntries.length);
+  const firstRoundSlots = normalizeEntrySlots(
+    normalizedEvent.id,
+    normalizedRuntimeId,
+    normalizedEntries,
+    entrySlots,
+    size
+  );
   const generatedNodeKeys = [];
   for (let roundSize = size / 2, roundNumber = 1; roundSize >= 1; roundSize /= 2, roundNumber += 1) {
     for (let matchNumber = 1; matchNumber <= roundSize; matchNumber += 1) {
@@ -409,7 +453,7 @@ export function projectNormalizedSingleEliminationBracket({
     matches,
     normalizedEntries.map(entry => entry.id)
   );
-  const graph = buildGraph(normalizedEntries, matchByNodeKey);
+  const graph = buildGraph(normalizedEntries, matchByNodeKey, firstRoundSlots);
 
   return {
     // Adapter identity is deterministic and is not a persisted legacy id.
@@ -431,6 +475,7 @@ export function projectNormalizedSingleEliminationBracket({
       source: "normalized",
       version: SINGLE_BRACKET_PROJECTION_VERSION,
       topology: "single_elimination",
+      runtimeId: normalizedRuntimeId,
       seedUsedAsSlot: false,
     },
   };
