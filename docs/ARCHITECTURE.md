@@ -139,8 +139,8 @@ Local saved team은 편집 가능한 working data이며 localStorage schema v3�
 대회 엔트리 제출 기능을 추가할 때는 개인 작업본을 그대로 연결하지 않고 **제출 당시 Team Snapshot을 별도로 고정**합니다.
 P2-1에서는 이 경계를 위한 local serializer / loader foundation을 구현했고, P2-2에서는 공식 제출을
 판정하기 위한 Event context, applicant Registration lookup, eligibility, 운영자 제출 상태 read만 구현했다.
-실제 공식 Submission DB write와 revision은 P2-5에서 구현했고, `final_submission_id` freeze와 Records의
-공식 Snapshot projection은 P2-6에서 구현한다.
+실제 공식 Submission DB write와 revision은 P2-5에서 구현했고, P2-6에서 `final_submission_id` freeze와
+Records의 공식 Snapshot projection까지 완료했다.
 
 ### Team Builder identity 경계
 
@@ -174,7 +174,7 @@ P2-2 구현 완료 범위:
   선수별 상태를 확인한다. revision 숫자는 기본 UI에 노출하지 않아도 된다.
 - 미제출자는 Entry / Match에서 제거하지 않으며 참가 자체를 막지 않는다.
 
-P2-2에서 아직 구현하지 않은 항목:
+P2-2 당시 아직 구현하지 않았던 항목 (P2-5/P2-6 후속 완료):
 
 - TeamSnapshot DB insert
 - TeamSnapshotMember DB insert
@@ -183,6 +183,9 @@ P2-2에서 아직 구현하지 않은 항목:
 - `final_submission_id` freeze
 - result-apply submission freeze
 - actual Submission → Records final snapshot E2E
+
+위 항목은 P2-2 시점의 미구현 목록이다. 실제 Submission write / revision은 P2-5에서,
+`final_submission_id` freeze와 Records final Snapshot projection은 P2-6에서 완료했다.
 
 현재는 Auth/RLS가 없고 이름 exact match 기반 운영이므로, 이 단계의 귀속 표현은 Auth identity
 verification이 아닌 **EventRegistration applicant lookup/confirmation**이다.
@@ -198,16 +201,19 @@ P2-5에서 Event-linked Team Builder의 실제 제출 write를 Test 환경에 �
   `cup_rule_settings`를 authoritative source로 사용한다. 한 transaction 안에서 TeamSnapshot,
   TeamSnapshotMember, RegistrationSubmission을 생성하며 실패 시 rollback한다.
 - 재제출은 기존 Snapshot / Submission을 UPDATE하지 않고 새 Snapshot과 새 Submission을 생성해 revision을
-  증가시킨다. P2-5 동안 `EventRegistration.final_submission_id`는 NULL로 유지한다.
+  증가시킨다. 기록 반영 전에는 `EventRegistration.final_submission_id`를 NULL로 유지하고, 기록 반영
+  순간에만 latest Submission을 최종 pointer로 고정한다.
 - 모노타입 `assignedType`은 참가자가 Team Builder에서 직접 고르는 local validation state다. Event 모드에서도
   Regulation / Cup Rule은 잠그되 assignedType은 잠그지 않으며, 공식 배정 사실로 EventRegistration / Snapshot에
   저장하지 않는다. unsupported Cup Rule은 fail closed 한다.
 - Test `ypl_schema_validation`에서 team10 revision 1~3, soft deadline 이후 재제출, team1 제출현황을 검증했다.
   RPC는 Production에 적용하지 않았다.
 
-P2-6에서는 기록 반영 시 최신 RegistrationSubmission을 `EventRegistration.final_submission_id`로 고정하고,
-취소 시 해제하며 재반영 시 최신 revision을 다시 고정한다. Records는 해당 포인터가 가리키는 immutable
-TeamSnapshot만 공식 파티로 사용한다. P2-7에서는 Event-linked Bracket의 normalized cutover를 진행한다.
+P2-6에서 기록 반영 시 실제 `EntryParticipant.registration_id`에 해당하는 Registration의 latest
+RegistrationSubmission을 `EventRegistration.final_submission_id`로 고정하고, 미제출 실제 참가자는 NULL로
+둔다. 취소 시 pointer와 `team_revealed_at`을 해제하며, 재반영 시 최신 revision을 다시 고정한다. 과거
+Submission / TeamSnapshot / TeamSnapshotMember는 immutable하게 보존한다. Records는 해당 pointer가 가리키는
+immutable TeamSnapshot만 공식 파티로 사용한다. P2-7에서는 Event-linked Bracket의 normalized cutover를 진행한다.
 
 ---
 
@@ -1696,9 +1702,12 @@ EntryParticipant → Entry → manual Registration → Registration.player_id �
 일반 대회:
 
 ```text
-결과 적용
-→ Match / Result / RankingAward 확정
-→ EventRegistration.final_submission_id 고정
+Match
+→ Result
+→ RankingAward
+→ EventRegistration.final_submission_id freeze
+→ legacy ypl_data_v4 save
+→ Event completed
 → record_applied_at 기록
 → team_revealed_at 기록
 → Records 공개
@@ -1706,7 +1715,30 @@ EntryParticipant → Entry → manual Registration → Registration.player_id �
 
 결과 적용 전까지 최초 제출/재제출을 허용한다.
 
-공개 Records에는 final_submission_id가 가리키는 최종 Snapshot만 표시하고 이전 revision은 운영 이력으로 보존한다.
+공개 Records에는 `final_submission_id`가 가리키는 최종 Snapshot만 표시하고 이전 revision은 운영 이력으로
+보존한다. `team_revealed_at IS NOT NULL`인 finalized Event에서 final pointer가 없는 참가자는 파티 없음으로
+표시하며 legacy party로 보충하지 않는다. `team_revealed_at IS NULL`인 historical compatibility Event에
+한해 기존 legacy fallback을 허용한다.
+
+기록 반영 취소는 다음 순서를 사용한다.
+
+```text
+RankingAward 제거
+→ Result 제거
+→ legacy revert
+→ final pointer release
+→ Event running
+→ record_applied_at = NULL
+→ team_revealed_at = NULL
+```
+
+freeze 이후 legacy save가 실패하면 freeze 직전 pointer snapshot으로 exact restore한다. 복구 대상 Event의
+현재 pointer가 예상 freeze 결과와 같고 아직 최종 완료 상태가 아닐 때만 pointer를 수정하며, completed이거나
+`record_applied_at` 또는 `team_revealed_at`이 설정된 Event에 대한 delayed restore는 conflict/error로 차단한다.
+release 실패 시 legacy applied snapshot → Result snapshot → RankingAward snapshot 순서로 보상 복구하고,
+재시도에서도 중복 Result / RankingAward를 만들지 않는다. Event completion 상태가 불확실하면 재조회하며,
+`status = completed`, `record_applied_at IS NOT NULL`, `team_revealed_at IS NOT NULL` 세 조건이 모두
+충족될 때만 성공으로 처리한다.
 
 Bracket participant의 normalized identity는 Entry ID를 기준으로 연결한다. 전환 중에는 legacy graph의 participant ID를 함께 유지한다.
 
@@ -1729,8 +1761,7 @@ P1-4까지 normalized Match / Result / RankingAward 및 legacy 기록 반영 lif
 
 ## 18. 다음 단계
 
-1. P2-6 final_submission_id freeze + Records integration
-2. P2-7 Event-linked Bracket normalized cutover
+1. P2-7 Event-linked Bracket normalized cutover
 3. 챔피언스 운영 자동화
 4. Auth / RLS
 5. Production migration
@@ -1830,8 +1861,8 @@ Event
 개인전과 팀전의 Event-linked normalized identity / Match / Result / RankingAward runtime 및
 P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다. Team Builder P2-5에서는
 Event context, applicant lookup, eligibility, submission-status read와 실제 Submission / TeamSnapshot
-write 및 revision까지 완료했다. `final_submission_id` freeze는 P2-6, Bracket normalized cutover는
-P2-7에서 수행한다.
+write 및 revision까지 완료했고, P2-6에서 final submission freeze와 Records final Snapshot 연결을 완료했다.
+Bracket normalized cutover는 P2-7에서 수행한다.
 
 ### Bracket 생성과 기록 반영 write ordering
 
@@ -2023,7 +2054,17 @@ EventRegistration.final_submission_id → RegistrationSubmission → TeamSnapsho
 - normalized team Event와 `recordMeta.eventId`로 명시적으로 연결된 legacy round는 placement / history / archive 중복을 만들지 않는다. 연결된 legacy team bracket은 roster / Pokémon / 기존 Match compatibility source로 유지한다.
 - 누적·시즌 랭킹은 `RankingBaseline`에 placement / adjustment / reversal 등 전체 `RankingAward` ledger를 합산한다. `counts_series`와 `counts_season`을 각각 적용하고 동일 Award ID 및 동일 `(result_id, player_id)` placement를 중복 집계하지 않는다.
 - 공개 경기 수는 양쪽 Entry와 승자가 확정된 bracket Match만 계산한다. BYE, unresolved, cancelled는 제외하며 개인 승·패·승률 UI는 추가하지 않는다.
-- 포켓몬 기록은 final submission이 가리키는 immutable TeamSnapshot이 있으면 그 revision만 사용한다. Snapshot이 없을 때만 같은 Event/Player로 연결된 legacy party를 명시적으로 fallback한다.
+- 포켓몬 기록은 finalized Event에서 final submission이 가리키는 immutable TeamSnapshot의 `pokemon_id`만
+  사용한다. final pointer가 없으면 legacy party를 fallback하지 않는다. `team_revealed_at IS NULL`인
+  historical compatibility Event에서만 같은 Event/Player로 연결된 legacy party를 명시적으로 fallback한다.
+- Pokémon display name은 `pokemon_id`로 canonical Pokédex를 resolve하고 한국어 localized name을 우선 사용한다.
+  resolve 실패 때만 `pokemon_name_snapshot`을 표시하며, aggregation은 이름이 아닌 `pokemon_id` 기준이다.
+- normalized 개인전 tournament archive는 `Event → Entry(entry_type=individual) → EntryParticipant
+  → EventRegistration`의 실제 참가자 전체를 읽는다. Result가 있는 참가자는 우승 / 준우승 / 4강으로,
+  Result가 없는 실제 참가자는 참가로 표시하며 8강·5위·6위 등을 추론하지 않는다.
+- archive 회차는 기존 `bk-submission-toggle` 계열 accordion / collapsible UI를 재사용하고 collapsed 상태에서는
+  party를 숨긴다. 펼친 상태에서만 실제 참가자의 final party를 표시하며, final이 없으면 `파티 미제출`을 표시한다.
+  신청만 하고 EntryParticipant가 없는 Registration은 제외하고 팀전 party 상세는 포함하지 않는다.
 - normalized 조회 실패는 화면에 오류와 재시도 버튼을 표시하며 조용히 legacy만 보여주지 않는다.
 
 Test 프로젝트 `nmqrmvnjenjqityuhngb`의 `ypl_schema_validation.ranking_baselines`에는 Records 조회에 필요한 `anon SELECT`만 추가했다. 재조회 결과 `anon`의 INSERT / UPDATE / DELETE 권한은 없고 RLS 상태도 변경하지 않았다. Production DB는 변경하지 않았다.
@@ -2158,5 +2199,6 @@ normalized completed Event
 - team_bout / ace Match는 normalized DB와 linked legacy compatibility source에 보존하지만 P1-5에서 새 Records 상세 UI는 추가하지 않는다.
 - `source` metadata는 projection / dedupe / debug 내부에 유지하고 일반 사용자 화면에는 표시하지 않는다. `m-a`, `m-b`, `none` 등 raw 내부 code도 UI에서 제거한다.
 
-Team Builder의 공식 roster 연결은 이 단계에 포함하지 않는다. `TeamSnapshot → RegistrationSubmission → EventRegistration`
-연결은 P2-5에서 구현했으며, `final_submission_id` freeze와 Records의 공식 Snapshot projection은 P2-6에서 구현한다.
+Team Builder의 공식 roster 연결과 `final_submission_id` freeze 및 Records의 공식 Snapshot projection은 P2-5와
+P2-6에서 완료했다. TeamSnapshot이 보존하는 ability / nature / Stat Points / item / moves는 추후 archive
+상세 엔트리 보기 UX로 확장할 수 있으나 P2-6 범위에는 포함하지 않는다.

@@ -157,6 +157,12 @@ Team   → Event-linked canonical write 및 normalized Records team read는 P1-5
 
 팀전 placement는 팀 이력으로 보존하되 개인 우승 / 준우승 / 4강 count에서는 제외하는 것이 canonical 정책이다.
 legacy와 normalized projection 모두 이 정책을 적용한다.
+
+최종 파티 source of truth는 `EventRegistration.final_submission_id →
+RegistrationSubmission → TeamSnapshot → TeamSnapshotMember`다. `team_revealed_at IS NOT NULL`인
+finalized Event에서는 final pointer가 있는 참가자만 final Snapshot을 사용하고, pointer가 없는
+참가자는 파티 없음으로 처리한다. 이 경계에서는 legacy party fallback을 사용하지 않는다.
+`team_revealed_at IS NULL`인 historical compatibility Event에 한해 기존 legacy fallback을 유지한다.
 기록 반영 취소 — Test 완료
 
 반영 취소 시:
@@ -267,10 +273,35 @@ P2-5 실제 공식 파티 제출 ✅
 - Test `ypl_schema_validation`에서 team10 revision 1~3과 team1 제출현황을 검증했다. RPC는 Production에
   적용하지 않았다.
 
-P2-6 final_submission_id freeze + Records integration 예정
+P2-6 final_submission_id freeze + Records integration ✅
 
-- 기록 반영 시 최신 RegistrationSubmission을 `EventRegistration.final_submission_id`로 freeze한다.
-- 과거 revision은 유지하고, 기록 반영 취소 시 freeze를 해제하며 재반영 시 최신 revision을 다시 freeze한다.
+- 실제 `EntryParticipant.registration_id`가 가리키는 Registration만 대상으로 기록 반영 순간
+  각 Registration의 latest `RegistrationSubmission`을 `EventRegistration.final_submission_id`로 freeze한다.
+  미제출 실제 참가자는 NULL로 둔다.
+- 과거 Submission / TeamSnapshot / TeamSnapshotMember revision은 immutable하게 유지한다.
+  기록 반영 취소 시 pointer와 공개 시각을 해제하고, 재제출 후 재반영하면 최신 revision을 다시 freeze한다.
+- Apply 순서는 `Match → Result → RankingAward → final_submission_id freeze → legacy ypl_data_v4 save
+  → Event completed → record_applied_at → team_revealed_at`이다.
+- Revert 순서는 `RankingAward 제거 → Result 제거 → legacy revert → final pointer release
+  → Event running → record_applied_at NULL → team_revealed_at NULL`이다.
+- freeze 이후 legacy save가 실패하면 exact pointer snapshot으로 복구한다. delayed restore는 Event가
+  completed이거나 `record_applied_at` 또는 `team_revealed_at`이 설정된 경우 허용하지 않는다.
+  release 실패 시 legacy applied snapshot → Result snapshot → RankingAward snapshot 순으로 보상 복구하며,
+  재시도에서도 중복 Result / RankingAward를 만들지 않는다. Event completion은 재조회하고
+  `completed + record_applied_at IS NOT NULL + team_revealed_at IS NOT NULL`일 때만 성공 처리한다.
+- normalized 개인전 archive는 `Event → Entry(entry_type=individual) → EntryParticipant →
+  EventRegistration`으로 실제 참가자 전체를 읽는다. Result가 있으면 우승 / 준우승 / 4강으로,
+  Result가 없는 실제 참가자는 임의 순위를 추론하지 않고 참가로 표시한다. 펼친 상태에서만 각 참가자의
+  final party를 보여 주며, final이 없으면 `파티 미제출`을 표시한다. 팀전 party 상세는 범위 밖이다.
+- Pokémon Records는 `pokemon_id`로 집계하고 canonical Pokédex의 한국어 이름을 우선 표시하며,
+  resolve 실패 시에만 `pokemon_name_snapshot`을 fallback으로 사용한다. 중간 revision은 집계하지 않는다.
+- 실제 E2E와 local validation은 아래 완료 기록을 따른다.
+  `제7회 파이컵라이트` Test1~Test6의 정상 revert 후 Event running, Result / RankingAward 0,
+  Match 11 및 Entry 6 / EntryParticipant 6과 Submission revision 유지; 재반영 후 Event completed,
+  `record_applied_at` / `team_revealed_at` 생성, 전원 final pointer 생성(final = latest revision 1),
+  Result 4, RankingAward 4, Match 11 유지. Records의 final party, 전체 참가자 archive accordion,
+  한국어 Pokémon 이름을 확인했다. 최신 local validation은 targeted 15/15, 전체 Node 132/132,
+  production build 122 modules, `git diff --check` PASS다.
 - Records는 `final_submission_id → RegistrationSubmission → TeamSnapshot → TeamSnapshotMember`만
   공식 파티로 사용한다.
 
@@ -314,8 +345,8 @@ EntryParticipant
 Match (Event-linked 개인전·팀전 runtime mirror)
 Result (Event-linked 개인 Entry·Team Entry final placement)
 RankingAward (Event-linked Master / Light 개인·팀전 runtime placement payout)
-schema / migration 검증은 되었으나 official submission write의 운영 runtime source of truth가 아닌 엔티티
-RegistrationSubmission (P2-2에서는 존재 여부 read model만 사용)
+P2-5/P2-6에서 official submission write 및 final Records projection의 운영 runtime source of truth로 전환한 엔티티
+RegistrationSubmission
 TeamSnapshot
 TeamSnapshotMember
 RankingBaseline
@@ -460,7 +491,7 @@ Team Builder
 - P2-1 Team Builder foundation ✅
 - P2-2 Event context + submission eligibility + applicant lookup + operator submission-status read UX ✅
 - P2-5 실제 공식 파티 제출 ✅
-- P2-6 final_submission_id freeze + Records integration 예정
+- P2-6 final_submission_id freeze + Records integration ✅
 - P2-7 Event-linked Bracket normalized cutover 예정
 
 P2-1의 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이다.
@@ -669,7 +700,7 @@ feature/records-system
 ✓ P2-1 saved team switching / new / duplicate UX 및 destructive change confirmation
 
 바로 다음
-1. P2-6 final_submission_id freeze + Records integration
+1. P2-6 final_submission_id freeze + Records integration ✅
 
 그 이후
 2. P2-7 Event-linked Bracket normalized cutover

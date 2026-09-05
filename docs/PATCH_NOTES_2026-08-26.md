@@ -1955,7 +1955,7 @@ Event-linked bracket lifecycle regression을 browser E2E에서 발견해 수정�
 
 P2-3에서 TeamSnapshot / TeamSnapshotMember / RegistrationSubmission DB INSERT, revision 생성,
 실제 제출 버튼 저장을 구현한다. `final_submission_id` freeze와 result-apply submission freeze,
-실제 Submission → Records final snapshot E2E는 이후 P2-4 범위다.
+실제 Submission → Records final snapshot E2E는 당시 후속 범위로 기록했으며, 현재 P2-6에서 완료했다.
 
 ---
 
@@ -1995,8 +1995,129 @@ Test schema `ypl_schema_validation`에서 다음을 확인했다.
 RPC는 Production Supabase에 적용하지 않았다. P2-5 제출에서는 `EventRegistration.final_submission_id`를
 NULL로 유지하므로, 현재 Records에서 공식 파티로 표시되지 않는 것이 정상이다.
 
-### 다음 단계
+### 당시 다음 단계
 
 P2-6에서 기록 반영 시 최신 RegistrationSubmission을 `final_submission_id`로 freeze하고, 반영 취소 시
-해제하며, 재반영 시 최신 revision을 다시 freeze한다. 이후 Records는 final Snapshot만 공식 파티로 읽고,
-P2-7에서 Event-linked Bracket normalized cutover를 진행한다.
+해제하며, 재반영 시 최신 revision을 다시 freeze하는 것으로 계획했다. 이 계획은 아래 P2-6 완료 작업으로
+검증되었고, 이후 P2-7에서 Event-linked Bracket normalized cutover를 진행한다.
+
+---
+
+## 2026-09-05 P2-6 final submission freeze / Records integration 완료
+
+P2-6에서 기록 반영 시점의 공식 파티를 immutable TeamSnapshot으로 확정하고, 기록 반영 취소와 재반영까지
+Event-linked normalized lifecycle에 연결했다. 대상은 실제 대진표 참가자로 한정하며, 신청만 하고 대진표에
+참가하지 않은 Registration은 공식 파티 대상에서 제외한다.
+
+### Final submission lifecycle
+
+- 실제 `EntryParticipant.registration_id`가 가리키는 Registration만 freeze 대상이다.
+- 기록 반영 순간 각 Registration의 latest `RegistrationSubmission`을
+  `EventRegistration.final_submission_id`로 확정한다. 미제출 실제 참가자는 NULL을 허용한다.
+- 과거 Submission / TeamSnapshot / TeamSnapshotMember revision은 수정·삭제하지 않고 immutable하게 보존한다.
+- 기록 반영 성공 시 `team_revealed_at`을 설정한다.
+- 기록 반영 취소 시 `final_submission_id`와 `team_revealed_at`을 해제하고, 과거 revision은 유지한다.
+- 재제출 후 재반영하면 새 latest revision을 다시 final pointer로 freeze한다.
+
+### Apply / revert ordering
+
+Apply:
+
+```text
+Match
+→ Result
+→ RankingAward
+→ final_submission_id freeze
+→ legacy ypl_data_v4 save
+→ Event completed
+→ record_applied_at
+→ team_revealed_at
+```
+
+Revert:
+
+```text
+RankingAward 제거
+→ Result 제거
+→ legacy revert
+→ final submission release
+→ Event running
+→ record_applied_at = NULL
+→ team_revealed_at = NULL
+```
+
+### Compensation 및 실제 발견 이슈
+
+- freeze 후 legacy save가 실패하면 freeze 전 pointer snapshot으로 exact restore한다.
+- delayed restore는 completed Event 또는 `record_applied_at` / `team_revealed_at`이 설정된 Event에 적용하지
+  않는다. 현재 pointer가 예상 freeze 결과와 같고 Event가 아직 최종 완료 전인 경우에만 restore한다.
+- release 실패 시 legacy applied snapshot → Result snapshot → RankingAward snapshot 순서로 복구한다.
+  보상 복구는 재시도 가능하며 duplicate Result / RankingAward를 만들지 않는다.
+- Event completion이 불확실하면 재조회하고, `completed + record_applied_at IS NOT NULL +
+  team_revealed_at IS NOT NULL` 세 조건이 모두 확인될 때만 성공 처리한다.
+- 실제 Test E2E에서 release RPC의 `column reference "id" is ambiguous` 오류를 발견했다. `RETURNS TABLE`의
+  output column `id`와 충돌하던 `events.id`를 `events AS event` 및 `event.id`로 명시적으로 qualify해 수정했다.
+  첫 실패 시 compensation이 applied 상태를 정상 복구한 것도 확인했다.
+
+### Records source of truth
+
+```text
+EventRegistration.final_submission_id
+→ RegistrationSubmission
+→ TeamSnapshot
+→ TeamSnapshotMember
+```
+
+Records는 highest revision을 다시 계산하지 않고 final pointer가 가리키는 Snapshot만 공식 파티로 사용한다.
+`team_revealed_at IS NOT NULL`인 finalized Event에서는 final pointer가 있는 참가자만 final Snapshot으로
+표시하고, pointer가 없는 참가자에게 legacy party를 fallback하지 않는다. `team_revealed_at IS NULL`인
+historical compatibility Event에 한해 기존 legacy fallback을 유지한다.
+
+Trainer Records는 final TeamSnapshot 기반 공식 대회 파티를 사용한다. Pokémon Records는 `pokemon_id`를
+aggregation identity로 사용하고 canonical Pokédex의 한국어 localized name을 우선 표시하며, canonical
+resolve 실패 시에만 `pokemon_name_snapshot`을 fallback한다. Snapshot DB 데이터는 수정하지 않고 중간
+revision은 통계에서 제외한다.
+
+### Tournament archive UI
+
+normalized 개인전 대회 회차는 기존 `bk-submission-toggle` 계열의 accordion / collapsible 디자인을 재사용한다.
+collapsed 상태에서는 party를 숨기고, 펼쳤을 때 다음 실제 참가자 전원을 final party와 함께 표시한다.
+
+```text
+Event
+→ Entry(entry_type=individual)
+→ EntryParticipant
+→ EventRegistration
+```
+
+공식 Result가 있는 참가자는 우승 / 준우승 / 4강으로 그룹화하고, Result가 없는 나머지 실제 참가자는
+임의의 8강·5위·6위를 추론하지 않고 참가 그룹으로 표시한다. final submission이 없는 실제 참가자는
+`파티 미제출`로 표시한다. 신청만 하고 실제 대진표에 참가하지 않은 Registration은 제외한다. 팀전 party
+상세 UI는 P2-6 범위에 포함하지 않았다.
+
+### 실제 Test E2E
+
+대상은 `제7회 파이컵라이트`와 Test1~Test6이다.
+
+정상 revert 후 다음을 확인했다.
+
+- Event `running`, `record_applied_at = NULL`, `team_revealed_at = NULL`
+- Result 0, RankingAward 0
+- Match 11, Entry 6, EntryParticipant 6 유지
+- Test1~Test6 Submission revision 유지
+
+재반영 후 다음을 확인했다.
+
+- Event `completed`, `record_applied_at` 및 `team_revealed_at` 생성
+- Test1~Test6 모두 `final_submission_id` 생성
+- final revision = latest revision = 1
+- Result 4, RankingAward 4, Match 11 유지
+- Records final party, 전체 참가자 party archive, accordion UI, Pokémon 한국어 이름 확인
+
+최신 local validation은 targeted 15/15, 전체 Node 132/132, production build 122 modules, `git diff --check`
+PASS다.
+
+### 다음 단계
+
+P2-7 — Event-linked Bracket normalized cutover는 아직 미구현이다. TeamSnapshot에 보존된 ability / nature /
+Stat Points / item / moves를 활용한 archive 상세 엔트리 보기 UX는 향후 후보일 뿐 P2-6 완료 범위에는 포함하지 않는다.
