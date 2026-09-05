@@ -36,7 +36,7 @@ export function isOfficialNormalizedRecordsEvent(event) {
   return Boolean(
     event?.id &&
     event.status === "completed" &&
-    event.record_applied_at
+    (event.record_applied_at || event.championship_phase === "qualifier")
   );
 }
 

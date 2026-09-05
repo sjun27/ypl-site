@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { loadSiteData, saveSiteData, readInitialAppView, submitEventApplication } from "./services/index.js";
+import { bracketRouteSearch, loadSiteData, saveSiteData, readInitialAppView, submitEventApplication } from "./services/index.js";
 import { AboutPage, BoardPage, BracketsPage, ChampionsPage, HomePage, NewsPage, RecordsPage, TeamBuilderPage, TitlesPage } from "./pages/index.js";
 import { SiteHeader } from "./components/index.js";
 import { AdminModeBar, AdminModalHost } from "./admin/index.js";
@@ -1584,11 +1584,11 @@ export default function App() {
     return ()=>window.removeEventListener("popstate",onPopState);
   },[]);
   const go=useCallback((v, options={})=>{
-    if(v==="builder"&&options.eventId){
+    if((v==="builder"||v==="bracket")&&options.eventId){
       const url=new URL(window.location.href);
-      url.search=`view=builder&eventId=${encodeURIComponent(options.eventId)}`;
-      window.history.pushState({view:"builder",eventId:options.eventId},"",url);
-    }else if(v!=="builder"&&new URLSearchParams(window.location.search).get("view")==="builder"){
+      url.search= v==="builder" ? `view=builder&eventId=${encodeURIComponent(options.eventId)}` : bracketRouteSearch(options.eventId, window.location.search).slice(1);
+      window.history.pushState({view:v,eventId:options.eventId},"",url);
+    }else if(v!=="builder"&&v!=="bracket"&&["builder","bracket"].includes(new URLSearchParams(window.location.search).get("view"))){
       const url=new URL(window.location.href);
       url.searchParams.delete("view");
       url.searchParams.delete("eventId");
@@ -1682,7 +1682,7 @@ export default function App() {
         {view==="bracket"&&<BracketsPage data={data} admin={admin} save={save} flash={flash} refresh={refresh}/>}
         {view==="builder"&&<TeamBuilderPage/>}
         {view==="titles"&&<TitlesPage data={data} admin={admin} setModal={setModal}/>}
-        {view==="champions"&&<ChampionsPage data={data} admin={admin} setModal={setModal} normTeam={normTeam}/>}
+        {view==="champions"&&<ChampionsPage data={data} admin={admin} setModal={setModal} normTeam={normTeam} go={go}/>}
       </div>
       </div>
       {toast&&<div className="toast">{toast}</div>}

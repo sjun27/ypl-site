@@ -39,7 +39,7 @@ export function normalizedRecordsReadEnabled() {
 }
 
 export async function fetchNormalizedRecordsSnapshot() {
-  const [events, seasons, players, rankingBaselines] = await Promise.all([
+  const [eventRows, seasons, players, rankingBaselines] = await Promise.all([
     rows(
       db()
         .from("events")
@@ -50,8 +50,7 @@ export async function fetchNormalizedRecordsSnapshot() {
           date_precision, record_completeness, status, record_applied_at,
           team_revealed_at, championship_phase
         `)
-        .eq("status", "completed")
-        .not("record_applied_at", "is", null),
+        .eq("status", "completed"),
       "공식 normalized Event를 읽지 못했습니다."
     ),
     rows(
@@ -69,6 +68,11 @@ export async function fetchNormalizedRecordsSnapshot() {
       "normalized RankingBaseline을 읽지 못했습니다."
     ),
   ]);
+
+  // Qualifier completion is a selection milestone, not record application.
+  // Keep its Entry/Match participation visible while excluding it from
+  // placement/result logic in the projection layer.
+  const events = eventRows.filter((event) => event.record_applied_at || event.championship_phase === "qualifier");
 
   const eventIds = events.map((event) => event.id);
   const [entries, entryParticipants, matches, results, rankingAwards, eventRegistrations] = await Promise.all([

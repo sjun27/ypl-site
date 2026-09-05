@@ -12,3 +12,11 @@ export function builderRouteSearch(eventId, search = "") {
   else params.delete("eventId");
   return `?${params.toString()}`;
 }
+
+export function bracketRouteSearch(eventId, search = "") {
+  const params = new URLSearchParams(search);
+  params.set("view", "bracket");
+  if (eventId) params.set("eventId", eventId);
+  else params.delete("eventId");
+  return `?${params.toString()}`;
+}

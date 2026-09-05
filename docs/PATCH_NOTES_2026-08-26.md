@@ -2121,3 +2121,108 @@ PASS다.
 
 P2-7 — Event-linked Bracket normalized cutover는 아직 미구현이다. TeamSnapshot에 보존된 ability / nature /
 Stat Points / item / moves를 활용한 archive 상세 엔트리 보기 UX는 향후 후보일 뿐 P2-6 완료 범위에는 포함하지 않는다.
+
+---
+
+## 2026-09-06 P2-7 Event-linked Bracket normalized cutover
+
+P2-7에서 Test 환경의 신규 Event-linked 대진표를 normalized runtime으로 전환했다. 기존 BracketsPage /
+BracketBoard UI를 최대한 재사용했으며, legacy graph 전체를 DB에 저장하는 방식은 사용하지 않는다.
+
+### Single Elimination normalized runtime
+
+- `bracket_runtimes`, `bracket_entry_slots`, `bracket_identity_changes`, `Entry`, `EntryParticipant`,
+  `Match`를 normalized runtime 사실로 사용
+- actual draw의 canonical source는 `bracket_entry_slots`이며 `Entry.seed` metadata와 구분
+- BYE, future Match, topology, advancement edge는 projection에서 계산하고 BYE row는 저장하지 않음
+- stable node key(`single:r1:m1`, `single:r2:m1`, …) 기반 pure projection
+- runtime create/delete, reload restore, winner select/cancel/change, downstream Match create/delete,
+  stale winner/result invalidation, BYE auto advancement, malformed fail closed 지원
+- BracketsPage normalized routing과 normalized projection 기반 Result apply를 기존 P2-6
+  Result / RankingAward / final submission lifecycle에 연결
+- 주요 RPC: `create_normalized_single_bracket_runtime`,
+  `delete_normalized_single_bracket_runtime`, `set_normalized_single_bracket_winner`
+
+### Team normalized runtime cutover
+
+기존 P1-1~P1-5 Team 구조를 재작성하지 않고 Team Entry, EntryParticipant, captain, parent Match,
+`team_bout`, ace, lineup, Team Result, player RankingAward, record apply/revert를 재사용했다.
+
+- Event-linked Team runtime create path와 Team EntryParticipant / captain identity 보존
+- normalized Team projection에서 team roster / captain / lineup / ace 복원
+- normalized source Match sync, team winner / series change, stale Match cleanup
+- Team Result는 Team Entry당 1개이며 선수별 Result는 생성하지 않음
+- Team Master champion / runner-up는 멤버별 +30 / +20, Team Light는 +15 / +10
+- 팀 semifinal은 Result만 보존하고 RankingAward는 생성하지 않음
+- Team RankingAward는 `win_delta = 0`, `runner_up_delta = 0`, `top4_delta = 0`,
+  `counts_series = true`, `counts_season = true`인 points-only ledger
+- 팀 placement는 개인 wins / runnerUps / top4 count에 포함하지 않음
+
+### Double Elimination normalized runtime
+
+- stable node key: `double:w:r1:m1`, `double:l:r1:m1`, `double:gf:m1`, `double:reset:m1`
+- Winners Bracket, Losers Bracket, Grand Final, Reset Final topology를 projection/runtime으로 지원
+- DB에는 initial/persisted draw와 실제 formed Match만 저장
+- winner advancement, loser drop, GF, Reset activation/deactivation, future Match, BYE를 projection에서 계산
+- upstream WB winner 변경 시 downstream stale Match, WB loser path, LB pairing, GF participant,
+  Reset activation과 stale downstream winner를 함께 갱신
+
+### Generic elimination runtime RPC safety
+
+P2-7 Team / Double 지원을 위해 다음 generic RPC를 추가했다.
+
+```text
+create_normalized_bracket_runtime(uuid, uuid, text, jsonb, jsonb)
+delete_normalized_bracket_runtime(uuid, uuid)
+```
+
+두 RPC는 `SECURITY INVOKER`, 빈 `search_path`, anon `EXECUTE`만 사용하며 Event/topology/canonical
+identity/slot/BYE/ownership을 검증한다. 초기 broad anon delete 설계는 matches, entries,
+entry_participants, registrations, players, identity 등 넓은 domain을 삭제할 수 있어 폐기했고,
+최종 delete 범위는 normalized runtime artifact 정리로 제한했다. Match winner/snapshot sync는
+기존 normalizedCompetitionService의 Data API 경로를 유지한다. 기존 Single 전용 RPC 3개도 유지한다.
+
+Single 작업 중 확인한 integration bug도 함께 해결했다.
+
+- runtime loader의 Match select에 `event_id`를 포함
+- normalized apply의 Result / Award sync skip 조건 수정
+- `SECURITY INVOKER` + anon UPDATE 제한과 `FOR UPDATE` 충돌을 broad anon UPDATE privilege 추가 없이
+  Event/Match lock과 transaction advisory lock으로 해결
+
+### 검증
+
+- Single Test runtime: 3명 + BYE, winner 입력 후 final 생성, cancel 시 final 삭제, winner 변경 시
+  participant 교체와 old winner 폐기, Result apply, Event completed, Result 생성, normalized delete,
+  baseline cleanup 확인
+- Team Test DB smoke PASS: 2 Team Entry, parent Match, `team_bout` 2, ace, winner update, delete,
+  runtime/Match cleanup, domain EntryParticipant 보존
+- Double Test DB smoke PASS: WB/LB/GF/Reset 포함 formed Match 7개, upstream WB winner 변경 후
+  stale LB2/GF/Reset 3개 제거, runtime delete 확인
+- Single regression PASS
+- Node tests 174/174 PASS
+- production Vite build PASS
+- `git diff --check` PASS
+- Test fixture cleanup 완료
+
+Single의 실제 browser revert/delete confirmation flow와 Records 화면까지의 exhaustive E2E, 그리고
+P2-7 Team/Double 범위의 exhaustive browser E2E는 이번 작업에서 수행하지 않았으며 큰 기능 완료 후
+최종 QA 항목으로 남겼다. 이는 기능 미완료가 아니라 통합 browser/manual QA의 검증 경계다.
+
+Production Supabase에는 접근하거나 변경하지 않았고, Production migration도 수행하지 않았다.
+P2-7 완료는 Test architecture/runtime 완료를 의미하며 Production 운영 원본은 계속
+`public.site_data / ypl_data_v4`다. historical / legacy-only bracket은 기존 compatibility path를 유지한다.
+
+### 사용자 체감 변화
+
+대진표 생성 → 결과 입력 → 기록 반영 흐름과 기존 BracketsPage / BracketBoard UI를 최대한 유지했기
+때문에 시각적 변화는 거의 없다. 핵심 변화는 내부 source of truth를 normalized runtime으로 전환하고,
+reload·winner 변경·stale downstream 정리·malformed fail closed의 복구 안정성을 확보한 것이다.
+
+### Git
+
+```text
+45209f8 feat: integrate normalized single bracket runtime
+a5ae8d9 feat: complete normalized team and double elimination runtime
+```
+
+`a5ae8d9`는 실제 push까지 완료됐다.

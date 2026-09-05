@@ -5,7 +5,7 @@
 > - 과거 변경 이력: `docs/PATCH_NOTES_2026-08-26.md`
 > - 기술 구조·데이터 모델·운영 원칙: `docs/ARCHITECTURE.md`
 
-마지막 업데이트: 2026-09-05
+마지막 업데이트: 2026-09-06
 
 ---
 
@@ -29,34 +29,31 @@ YPL Records
 ├─ 포켓몬
 └─ 랭킹
 
-현재는 legacy 운영 데이터와 normalized DB가 함께 동작하는 전환 단계다.
+현재는 Test의 신규 Event-linked 운영 runtime과 Production/historical compatibility가 함께 동작하는
+전환 단계다.
 
-normalized
-Player
-Season
+```text
 Event
-EventRegistration
-Entry
-EntryParticipant
-Match (Event-linked 개인전·팀전 runtime mirror)
-Result (Event-linked 개인 Entry·Team Entry final placement)
-        │
-        ▼
-현재 연결 경계
-        │
-        ▼
-legacy ypl_data_v4
-Bracket
-Round / Result
-Ranking
-Season Record
-Records
+→ EventRegistration
+→ Entry
+→ EntryParticipant
+→ bracket_runtimes
+→ bracket_entry_slots (actual draw)
+→ Match
+→ Result
+→ RankingAward
+→ final submission
+→ Records
+```
 
-전체 Production 운영 데이터는 아직 Supabase public.site_data / ypl_data_v4 의존이 존재한다.
-다만 Test에서 normalized runtime으로 전환된 신규 Event-linked 사실(Player, Season, Event,
-EventRegistration, Entry, EntryParticipant, Match, Result, RankingAward)은 normalized model을
-canonical target으로 취급한다. Bracket graph / round / legacy ranking write 등 일부 영역은
-아직 ypl_data_v4와 hybrid로 동작하며, Production normalized migration은 적용하지 않는다.
+Test의 신규 Event-linked Single Elimination, Double Elimination, Team runtime에서는
+`bracket_runtimes`, `bracket_entry_slots`, `bracket_identity_changes`, `Entry`,
+`EntryParticipant`, `Match`가 normalized bracket 사실의 원본이다. Entry의 `seed`는 metadata이며
+actual draw slot과 구분한다. Bracket graph 전체는 DB에 저장하지 않고 pure projection으로 계산한다.
+
+Production 운영 원본은 여전히 Supabase `public.site_data / ypl_data_v4`이며 Production normalized
+cutover는 아직 적용하지 않았다. historical bracket, legacy-only Event와 legacy round/ranking/season
+write는 기존 compatibility path를 유지한다.
 
 2. 현재 구현 상태
 2.1 신청 / Event
@@ -80,53 +77,33 @@ Player는 신청자가 아니라 장기적으로 유지되는 트레이너 ident
 신청 단계에서는 신규 Player를 생성하지 않는다.
 
 2.2 대진표
-기존 legacy 기능
-싱글 엘리미네이션
-더블 엘리미네이션
-리그전
-legacy 팀전
-경기 결과 저장
-기록 반영 완료 대진표 잠금
-반영 취소 → 수정 → 재반영
-normalized Event 연결 — 개인전 구현 완료 + 팀전 P1-1 identity 구현 완료 / Test
+
+기존 legacy Single/Double/League/Team 대진표와 결과·기록 반영·취소 흐름은 compatibility path로
+유지한다. 신규 Event-linked 대진표는 P2-7에서 다음 normalized runtime으로 전환했다.
+
+- individual Single Elimination
+- Double Elimination
+- Event-linked Team runtime
+
+공통 흐름은 다음과 같다.
+
+```text
 Event 선택
-→ EventRegistration 조회
-→ 신청자 기본 참가
-→ 불참자 제외
-→ 필요 시 수동 참가자 추가
-→ 전체 identity preflight
-→ Player / Registration 확정
-→ Entry / EntryParticipant 생성
-→ 실제 성립 경기 normalized Match 생성
-→ Bracket 생성
-→ Event running
-→ Event / Registration / Player / Entry ID 보존
+→ EventRegistration / identity preflight
+→ Entry / EntryParticipant 확정
+→ normalized bracket runtime 생성
+→ persisted actual draw slot 저장
+→ projection 기반 Bracket UI
+→ formed Match 생성·승자 반영
+→ Result / RankingAward / Records lifecycle
+```
 
-현재 Bracket participant는 legacy graph용 participant ID를 유지하면서
-`registrationId / playerId / entryId / entryParticipantId`를 함께 보존한다.
+DB에는 실제 Entry, 참가자, persisted draw slot, 실제 formed Match와 winner facts만 저장한다.
+BYE, future Match, topology, advancement edge, Double losers movement, GF/Reset activation은
+projection에서 계산한다. normalized runtime이 malformed하면 legacy fallback하지 않고 fail closed한다.
 
-Event 연결 개인전의 실제 경기는 legacy Bracket JSON과 normalized `matches`에 이중 저장한다.
-BYE, 한쪽 참가자가 아직 결정되지 않은 경기, 비활성 reset final은 normalized Match에서 제외한다.
-승자 선택·취소·변경과 Group 본선 생성은 `source = legacy_bracket_runtime` 범위에서 동기화한다.
-
-Event 연결 개인전은 Event당 Bracket 하나만 허용한다.
-
-기록 반영 전 Bracket 삭제 시 해당 Bracket의 참가 확정 metadata를 기준으로
-Entry / EntryParticipant와 이번 확정에서 만든 identity 변경을 원복한다.
-
-팀전 P1-1 구현 완료 — Test
-EventRegistration의 실제 신청자와 팀 지망 답변 표시
-기존 수동 팀 편성 UI를 이용한 최종 팀 구성
-팀별 Team Entry 생성
-멤버별 EntryParticipant 생성
-Player / Registration identity 확정
-legacy 팀 participant에 entryId / memberIdentities 보존
-기록 반영 전 삭제 시 Entry / EntryParticipant / 이번 확정 identity 원복
-
-Event-linked canonical 팀전의 Match / Result / RankingAward / 기록 반영은 P1-4까지 구현 및 Test DB E2E를 완료했다.
-P1-5에서 normalized completed 팀전 Event의 Records read와 개인 / 팀 placement count 분리를 구현하고 전체 E2E를 완료했다.
-
-기존 legacy-only 팀전은 유지한다.
+기록 반영 전 삭제, winner cancel/change, downstream stale Match 정리와 reload restore를 지원하며,
+historical / legacy-only bracket은 기존 compatibility path를 유지한다.
 
 2.3 기록 반영
 
@@ -305,11 +282,6 @@ P2-6 final_submission_id freeze + Records integration ✅
 - Records는 `final_submission_id → RegistrationSubmission → TeamSnapshot → TeamSnapshotMember`만
   공식 파티로 사용한다.
 
-P2-7 Event-linked Bracket normalized cutover 예정
-
-- normalized `Entry / EntryParticipant / Match` 기반 Bracket UI projection과 Event-linked Bracket lifecycle을
-  canonical runtime으로 전환한다.
-
 3. normalized DB 전환 상태
 
 설계 범위:
@@ -323,6 +295,9 @@ TeamSnapshot
 TeamSnapshotMember
 Entry
 EntryParticipant
+BracketRuntime
+BracketEntrySlot
+BracketIdentityChange
 Match
 Result
 RankingAward
@@ -342,10 +317,14 @@ Event
 EventRegistration
 Entry
 EntryParticipant
-Match (Event-linked 개인전·팀전 runtime mirror)
+BracketRuntime (Event-linked normalized runtime discriminator)
+BracketEntrySlot (persisted actual draw)
+BracketIdentityChange (runtime ownership / rollback metadata)
+Match (Event-linked normalized formed Match)
 Result (Event-linked 개인 Entry·Team Entry final placement)
 RankingAward (Event-linked Master / Light 개인·팀전 runtime placement payout)
-P2-5/P2-6에서 official submission write 및 final Records projection의 운영 runtime source of truth로 전환한 엔티티
+P2-5~P2-7에서 official submission write, final Records projection, normalized bracket runtime의
+운영 source of truth로 전환한 엔티티
 RegistrationSubmission
 TeamSnapshot
 TeamSnapshotMember
@@ -356,10 +335,8 @@ HallOfFame 관련 구조
 
 Production migration 전까지 legacy ypl_data_v4를 유지한다.
 
-4. 개발 우선순위
-P0. 신청 → 기록 normalized end-to-end 완성
-
-현재 최우선 작업이다.
+4. 완료된 normalized foundation
+P0. 신청 → 기록 normalized end-to-end 완성 — Test 기준 완료
 
 목표:
 
@@ -411,12 +388,12 @@ RankingAward 기반 랭킹 전환
 
 완료 조건:
 
-P0/P1은 normalized identity/write mirror, Match/Result/RankingAward runtime, normalized Records
-read, 개인전·팀전 E2E를 포함한 **normalized competition lifecycle foundation** 완료를 의미한다.
-Event-linked Bracket graph와 일부 round / ranking / season legacy write 의존은 남아 있으며,
-이를 전환하는 단계는 P2-7에서 별도로 수행한다.
+  P0/P1은 normalized identity, Match/Result/RankingAward runtime, normalized Records read,
+  개인전·팀전 E2E를 포함한 **normalized competition lifecycle foundation** 완료를 의미한다.
+  P2-7에서 Event-linked Single / Double / Team bracket runtime까지 normalized cutover를 완료했으며,
+  Production과 historical/legacy-only 영역의 legacy 의존은 별도 compatibility 경계로 남아 있다.
 
-P1. 팀전 normalized 연결
+P1. 팀전 normalized 연결 — Test 기준 완료
 
 개인전 normalized end-to-end에 이어 팀전 Event-linked write 흐름을 연결한다.
 
@@ -472,13 +449,13 @@ Test DB 브라우저 E2E와 local acceptance audit을 완료했다.
 
 P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다.
 
-P2-1 Team Builder foundation, P2-2 Event context + submission eligibility + applicant lookup 및
-operator submission-status read UX, P2-5 실제 공식 파티 제출은 Test 기준 완료했다. P2-5 RPC는
-Production에 적용하지 않았다.
+P2-1 Team Builder foundation, P2-2 Event context + submission eligibility + applicant lookup,
+P2-5 실제 공식 파티 제출, P2-6 final submission freeze + Records integration은 Test 기준 완료했다.
+관련 RPC와 normalized runtime은 Production에 적용하지 않았다.
 
 P2. Team Builder → 공식 파티 제출
 
-신청→기록 normalized 운영 흐름을 먼저 완성한 뒤 연결한다.
+신청→기록 normalized 운영 흐름에 연결한 상태다.
 
 Team Builder
 → TeamSnapshot v1
@@ -492,77 +469,48 @@ Team Builder
 - P2-2 Event context + submission eligibility + applicant lookup + operator submission-status read UX ✅
 - P2-5 실제 공식 파티 제출 ✅
 - P2-6 final_submission_id freeze + Records integration ✅
-- P2-7 Event-linked Bracket normalized cutover 예정
+- P2-7 Event-linked Bracket normalized cutover ✅ Test 기준 완료
 
-P2-1의 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이다.
-P2-2 당시에는 Event context, applicant Registration confirmation, official eligibility와 운영자 제출 상태
-read만 구현했으며 공식 Submission 생성이나 DB write를 수행하지 않았다.
-
+P2-1의 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이며,
 개인 localStorage 저장본과 공식 제출 Snapshot은 분리한다.
 
-P2-7 — Event-linked Bracket normalized cutover
+P2-7 — Event-linked Bracket normalized cutover ✅ Test 기준 완료
 
-P2-5와 P2-6 이후, Champions 구현 전에 Event-linked 신규 대진표의 hybrid 의존을 줄이는 전환 단계다.
+- Single Elimination: pure projection, persisted draw, stable node key, winner lifecycle,
+  BYE advancement, stale invalidation, normalized Result apply
+- Team: 기존 Team Entry / EntryParticipant / captain / team_bout / ace 구조를 재사용한
+  normalized runtime create, projection, winner/series change와 stale cleanup
+- Double Elimination: Winners/Losers Bracket, Grand Final, Reset Final projection/runtime 및
+  upstream winner 변경에 따른 downstream stale cleanup
+- malformed normalized runtime은 fail closed하며 historical / legacy-only bracket은 compatibility path로 유지
+- Production migration은 별도 후속 단계이며 아직 수행하지 않음
 
-- normalized `Entry / EntryParticipant / Match` 기반 Bracket UI projection
-- 신규 Event-linked Bracket의 canonical 운영 사실을 normalized DB로 이동
-- legacy dual-write 의존 축소·제거 및 create / result change / delete lifecycle 단일화
-- legacy Bracket은 historical / legacy-only compatibility로 제한
-- 기존 Records fallback과 과거 대회 데이터는 보존
-- Production migration은 별도 후속 단계
+## 다음 우선순위
 
-P2-7은 아직 구현되지 않았다.
+1. P3 Champions 운영 자동화
+2. Team Builder 운영 UX / 안정화
+3. 전체 기능 통합 QA / 실제 운영자 수동 검증
+4. Production Cutover
+5. Auth/RLS security hardening
 
-P3. 챔피언스 운영
+Production Cutover와 Auth/RLS의 실제 순서는 최종 운영·코드 상황에 따라 조정할 수 있다.
+2026-09-20 Team Event 일정 때문에 Team 기능이 중요했지만, P2-7 Team runtime이 Test 기준
+완료된 현재 별도 Team architecture phase는 만들지 않는다.
 
-설계 방향:
+### P3 Champions 운영 자동화 방향
 
-선발전과 본선은 별도 Event
-advancement 확정 시 본선 EventRegistration 생성
-본선 Entry는 실제 대진표 생성 시 생성
-선발전 / 본선 TeamSnapshot 독립
+- qualifier와 final은 별도 Event로 운영
+- advancement 확정 시 본선 EventRegistration 생성
+- 본선 Entry는 실제 대진표 생성 시 생성
+- 선발전 / 본선 TeamSnapshot은 독립 보존
+- 본선 결과와 HallOfFameEntry / Title 후보 연결은 이 우선순위에서 다룬다
 
-구현:
+### Team Builder 운영 UX / 안정화 방향
 
-qualifier / final Event 연결
-qualification slots
-ranking / qualifier / manual advancement
-관리자 진출자 관리
-본선 Registration 자동 생성
-선발전 종료 처리
-본선 결과 → HallOfFameEntry
-기록 → Title AUTO / REVIEW 후보
-P4. Team Builder 자체 안정화 / 추가 UX
+검색·form identity·Regulation validation·모노타입·저장/복원 UX를 운영 흐름에 맞게 안정화한다.
+Replica Team ID Import는 resolver 확보 여부를 확인한 뒤 별도 판단한다.
 
-공식 운영 흐름 이후 정리한다.
-
-Pokémon 검색 / 이름 데이터 정리
-species / form / regional identity 검증
-Regulation validation
-도구 validation
-모노타입 기능
-저장 / 복원 UX 회귀
-과거 우승 팀 열기
-저장 팀 공유 / 복제
-
-Replica Team ID Import는 이 단계 이후 진행해도 무방하다.
-
-P5. Auth / RLS / Production 전환
-
-기능 구조가 안정된 뒤 진행한다.
-
-전체 회귀 테스트
-normalized / legacy 데이터 대조
-migration 재실행 검증
-Auth 정책 확정
-RLS 정책 확정
-browser 직접 write 권한 축소
-필요한 server-side transaction / RPC 설계
-Production migration 계획
-Production 백업
-Production 적용
-
-Production Supabase는 이 단계 전까지 변경하지 않는다.
+Production Cutover와 Auth/RLS hardening은 Test 검증, 백업, 권한 설계가 갖춰진 뒤 진행한다.
 
 5. 완료된 기반 작업
 운영 데이터 조사
@@ -597,9 +545,10 @@ Team Builder 공식 제출 흐름까지 안정된 이후 진행한다.
 
 Battle Data
 
-Pokémon Champions 전체 메타 통계는 현재 우선순위에서 제외한다.
-
-먼저 YPL 내부 Event / Entry / Match / Result 기록을 완성한다.
+`Battle Data`는 Pokémon Champions 전체 메타 통계 데이터를 조회·분석하는 외부/광범위 메타 기능을
+뜻한다. 현재 YPL Records/통계(trainer records, tournament history, Pokémon 사용 통계, Ranking,
+Result, Team history)와는 별개다. 데이터 확보와 실제 활용 타당성 문제로 현재 개발 계획에서는
+제외하며, 재개하더라도 최하위 우선순위로 둔다.
 
 Tera Type
 
@@ -636,75 +585,15 @@ schema 설계 완료와 runtime 구현 완료를 구분해서 기록
 
 상세 구조는 docs/ARCHITECTURE.md에서 관리한다.
 
-8. 바로 다음 작업
-현재 브랜치
-feature/records-system
+8. 개발 검증 전략
 
-이번 브랜치에서 구현
-✓ 신청 공지 → Event
-✓ 신청 → EventRegistration
-✓ 개인전 Event → Bracket
-✓ Bracket 생성 시 Player / Registration identity 확정
-✓ 개인전 Entry / EntryParticipant 생성
-✓ participant.entryId 연결
-✓ Bracket 삭제 시 참가 확정 rollback
-✓ Event당 연결 Bracket 중복 생성 차단
-✓ Master / Light / Rookie 기록 정책
-✓ Event completed / record_applied_at lifecycle
-✓ 기록 반영 취소 및 identity 원복
-✓ legacy 저장 실패 시 identity rollback
-✓ Test apply / revert / reapply E2E
-✓ P0-4 Bracket 결과 → normalized Match runtime sync
-✓ Single / Double / Group / Group→Knockout snapshot
-✓ winner toggle/change, downstream cascade, reset activation/deactivation sync
-✓ Bracket 삭제 전 runtime Match FK 선행 정리
-✓ record apply 직전 final Match sync / revert 시 Match 유지
-✓ P0-1~P0-4 실제 Test E2E
-✓ P0-5 Entry ID 기반 normalized Result snapshot / idempotent sync
-✓ Result apply / revert / reapply 보상 흐름
-✓ historical `legacy_tournament` Result 보호
-✓ Double Elimination Result apply → revert → 결과 변경 → reapply Test E2E
-✓ Single Elimination Result apply → revert Test E2E
-✓ P0-6 Master 60 / 40 / 20, Light 30 / 20 / 10 canonical point policy
-✓ Rookie / rankingEnabled=false RankingAward 0건 정책
-✓ Result.entry_id → EntryParticipant.player_id 기반 placement Award snapshot
-✓ runtime placement Award idempotent sync / stale cleanup / 다른 source·ledger 보호
-✓ Award → Result FK 순서를 지킨 apply/revert compensation
-✓ Test DB `(result_id, player_id)` placement partial unique index
-✓ P0-6 pure helper test 및 production build
-✓ Test DB `ranking_awards` anon CRUD GRANT 적용 및 재조회 확인
-✓ Master RankingAward 60 / 40 / 20 apply → revert 브라우저 E2E
-✓ Light RankingAward 30 / 20 / 10 apply → revert 브라우저 E2E
-✓ Rookie Result 4건 / RankingAward 0건 apply → revert 브라우저 E2E
-✓ Master / Light legacy 랭킹·시즌 delta와 normalized Award 점수 일치 확인
-✓ application 4명 + manual 2명 혼합 참가 확정, Entry / EntryParticipant 6명 생성 확인
-✓ Reset Final 포함 Match 11건 전체 played / duplicate node 0 확인
-✓ 우승자 변경 후 reapply → 이전 champion Result/Award 제거, 새 Result/Award 4건만 생성
-✓ 재반영 후 duplicate Result 0 / duplicate Award 0 및 legacy 랭킹·시즌 delta 일치 확인
-✓ P0-8 completed + record_applied_at 개인전 Event normalized read boundary
-✓ Player ID 기준 트레이너 / Result / 참가 이력 연결
-✓ normalized Event와 연결된 legacy 회차·대진표 중복 표시 차단
-✓ RankingBaseline + 전체 RankingAward ledger 및 count flag 기반 누적·시즌 랭킹
-✓ final TeamSnapshot 우선 / 명시적 legacy party fallback
-✓ Test DB `ranking_baselines` anon SELECT 적용 및 권한 재조회
-✓ 제7회 파이컵라이트 Records 트레이너·대회·랭킹·포켓몬 브라우저 E2E
-✓ P1-5 completed + record_applied_at 팀전 Event normalized Records read
-✓ Team Result → EntryParticipant → Player profile history projection
-✓ 팀 우승 / 준우승 / 4강 history와 개인 placement count 분리
-✓ Team Master 30 / 20, Team Light 15 / 10 RankingAward ledger read
-✓ linked legacy team bracket roster / Pokémon / Match compatibility 유지 및 placement/history/archive dedupe
-✓ Records UI source metadata 및 raw internal code 비노출
-✓ P1-5 Test DB browser E2E 및 local acceptance audit
-✓ P2-1 Team Builder canonical identity / schema v3 / lossless restore
-✓ P2-1 TeamSnapshot v1 serializer / loader foundation
-✓ P2-1 saved team switching / new / duplicate UX 및 destructive change confirmation
+소단계 개발 중에는 targeted tests, 대표 happy-path smoke, DB/RPC 변경 시 최소 Test smoke,
+build, `git diff --check`를 기본으로 한다. 모든 소단계마다 exhaustive E2E를 반복하지 않는다.
 
-바로 다음
-1. P2-6 final_submission_id freeze + Records integration ✅
+큰 기능이 완성된 뒤 통합 browser E2E, 주요 edge case, 실제 운영 흐름 QA를 묶어서 수행한다.
+최종 배포 전 운영자는 신청 → 파티 제출 → 대진표 생성 → 경기 진행 → 결과 변경/cancel → 기록
+반영 → Records → revert → 재수정 → 재반영 → 삭제의 전체 흐름을 수동 확인한다.
 
-그 이후
-2. P2-7 Event-linked Bracket normalized cutover
-3. 챔피언스 운영 자동화
-4. Team Builder 자체 안정화 / 추가 UX
-5. Auth / RLS
-6. Production migration
+Production migration, destructive DB migration, data-loss 가능 delete/rollback, 권한/RLS 변경은
+중간 단계에서도 보수적으로 검증한다. 이는 테스트를 생략하는 것이 아니라 중복 exhaustive 검증을
+기능 완료 시점으로 묶는 전략이다.

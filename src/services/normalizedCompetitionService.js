@@ -30,6 +30,12 @@ import {
 } from "./bracketProjection.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
+const CHAMPIONS_EVENT_SELECT_FIELDS = DATA_SCHEMA === "ypl_schema_validation"
+  ? `,
+      championship_phase,
+      championship_final_event_id,
+      qualification_slots`
+  : "";
 
 function db() {
   if (!client) throw new Error("Supabase 연결이 설정되지 않았습니다.");
@@ -1195,7 +1201,7 @@ export async function getEvent(eventId) {
       submission_target_at,
       team_reveal_mode,
       team_revealed_at,
-      record_applied_at
+      record_applied_at${CHAMPIONS_EVENT_SELECT_FIELDS}
     `)
     .eq("id", eventId)
     .maybeSingle();
@@ -1223,7 +1229,7 @@ export async function listSubmissionEvents() {
       season_id,
       status,
       submission_target_at,
-      record_applied_at
+      record_applied_at${CHAMPIONS_EVENT_SELECT_FIELDS}
     `)
     .in("status", ["open", "running"])
     .is("record_applied_at", null)

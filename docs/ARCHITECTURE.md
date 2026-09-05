@@ -4,7 +4,7 @@
 >
 > 현재 할 일과 우선순위는 `docs/ROADMAP.md`, 실제 변경 이력은 `docs/PATCH_NOTES_2026-08-26.md`를 봅니다.
 
-마지막 업데이트: 2026-09-05
+마지막 업데이트: 2026-09-06
 
 ---
 
@@ -50,16 +50,19 @@ table: site_data
 key: ypl_data_v4
 ```
 
-그러나 Test에서 이미 normalized runtime으로 전환된 신규 Event-linked 사실은
-normalized model을 canonical target으로 취급합니다.
+Test의 신규 Event-linked runtime에서는 normalized model을 canonical source of truth로 사용합니다.
 
 ```text
 Player / Season / Event / EventRegistration
-Entry / EntryParticipant / Match / Result / RankingAward
+Entry / EntryParticipant
+BracketRuntime / BracketEntrySlot / BracketIdentityChange
+Match / Result / RankingAward
 ```
 
-Bracket graph / round / legacy ranking write 등 일부 영역만 아직 `ypl_data_v4`와 hybrid로
-동작합니다. Production은 아직 normalized migration 전이므로 Test architecture 완료와
+신규 Event-linked bracket의 actual draw는 `bracket_entry_slots`가 원본이며, Entry의 `seed`는
+metadata로 별도 취급합니다. DB에는 persisted draw와 실제 formed Match/winner facts만 저장하고,
+BYE·future Match·topology·advancement edge·Double losers movement·GF/Reset activation은 pure
+projection으로 계산합니다. Production은 아직 normalized migration 전이므로 Test architecture 완료와
 Production 적용 완료를 혼동하지 않습니다.
 
 GitHub 코드의 SEED는 fallback 및 개발용 기본 데이터이며 자동 백업본이 아닙니다.
@@ -213,7 +216,8 @@ P2-6에서 기록 반영 시 실제 `EntryParticipant.registration_id`에 해당
 RegistrationSubmission을 `EventRegistration.final_submission_id`로 고정하고, 미제출 실제 참가자는 NULL로
 둔다. 취소 시 pointer와 `team_revealed_at`을 해제하며, 재반영 시 최신 revision을 다시 고정한다. 과거
 Submission / TeamSnapshot / TeamSnapshotMember는 immutable하게 보존한다. Records는 해당 pointer가 가리키는
-immutable TeamSnapshot만 공식 파티로 사용한다. P2-7에서는 Event-linked Bracket의 normalized cutover를 진행한다.
+immutable TeamSnapshot만 공식 파티로 사용한다. Event-linked Bracket normalized cutover는 P2-7에서
+Test 기준 완료했으며, Production migration은 별도 단계로 남아 있다.
 
 ---
 
@@ -308,14 +312,15 @@ YPL 시즌 3부터 기록에 반영된 대진표의 Match 원본을 사용합니
 
 # 6. 대진표 → Records 연결
 
-현재 legacy JSON 단계에서는 대진표 graph를 Match 원본으로 봅니다.
+historical / legacy-only bracket에서는 legacy JSON 대진표 graph를 compatibility 원본으로 봅니다.
+신규 Event-linked normalized runtime에서는 persisted draw slot과 formed Match/winner fact를
+원본으로 보고, Bracket UI는 pure projection으로 계산합니다.
 
 ```text
-대진표 결과 입력
-→ 기록에 반영
-→ 대회 회차 생성
-→ 랭킹 / 시즌 성적 반영
-→ recordMeta 연결
+persisted draw / Match winner 입력
+→ Result / RankingAward sync
+→ final submission freeze
+→ legacy compatibility 기록 반영
 → Records 계산
 ```
 
@@ -579,9 +584,10 @@ manual
 
 ---
 
-# 10. 목표 데이터 모델
+# 10. 데이터 모델 요약
 
-운영 데이터 조사 후 다음 객체로 정규화하는 것을 목표로 합니다.
+신규 Event-linked 운영 사실은 normalized 관계로 저장하고, legacy-only/historical 데이터는
+compatibility adapter로 읽습니다.
 
 ## Player
 
@@ -593,7 +599,7 @@ manual
 
 시즌 정보.
 
-## Tournament
+## Event
 
 예:
 
@@ -609,7 +615,63 @@ manual
 
 ## Entry
 
-한 Player의 한 Tournament 참가 기록.
+한 Event의 참가 단위. 개인전은 Player 1명, 팀전은 Team Entry와 여러 EntryParticipant로 표현한다.
+
+## Bracket runtime
+
+### BracketRuntime
+
+Event당 하나의 normalized bracket runtime discriminator다.
+
+```text
+BracketRuntime
+- event_id
+- topology_kind
+- projection_version
+- previous_event_status
+```
+
+`topology_kind`는 Single/Double/Team runtime의 해석 기준이며, runtime lifecycle과 이전 Event
+상태 복구에 필요한 metadata를 함께 보존한다.
+
+### BracketEntrySlot
+
+실제 대진표 draw를 저장하는 canonical persisted fact다.
+
+```text
+BracketEntrySlot
+- runtime_id
+- slot_key
+- entry_id
+- seed metadata
+```
+
+`Entry.seed`와 actual draw slot은 서로 다른 의미다. BYE는 slot row로 저장하지 않는다.
+
+### BracketIdentityChange
+
+runtime 생성·삭제 과정에서 확정된 identity ownership과 rollback metadata를 보존한다.
+안전한 소유권이 확인된 변경만 rollback하며, malformed runtime은 legacy로 우회하지 않고 fail closed한다.
+
+### Persistent facts와 projection
+
+Persistent facts:
+
+- `Entry`
+- `EntryParticipant`
+- persisted `BracketEntrySlot`
+- 실제 formed `Match`
+- `Match`의 winner fact
+
+Derived projection:
+
+- BYE
+- future Match
+- graph topology와 advancement edge
+- Double Elimination loser movement
+- Grand Final / Reset activation
+
+Bracket graph 전체를 DB에 저장하지 않는다.
 
 ## Team Snapshot / Entry Pokémon
 
@@ -621,7 +683,7 @@ manual
 
 예:
 
-- tournament_id
+- event_id
 - stage
 - entry_a / entry_b
 - winner
@@ -640,35 +702,46 @@ AUTO / REVIEW / MANUAL 구분을 검토합니다.
 
 현재 `ypl_data_v4`를 한 번에 제거하지 않습니다.
 
-현재 Event-linked 대진표는 다음 hybrid runtime이다.
+현재 runtime은 신규 Event-linked normalized 경로와 Production/historical compatibility 경계를
+분리한다.
+
+신규 Event-linked Test runtime:
 
 ```text
-legacy:     Bracket graph / UI state
-normalized: Event / EventRegistration / Entry / EntryParticipant
-            Match / Result / RankingAward
+Event
+→ EventRegistration
+→ Entry
+→ EntryParticipant
+→ BracketRuntime
+→ persisted BracketEntrySlot
+→ Match
+→ Result
+→ RankingAward
+→ final submission
+→ Records
 ```
+
+Bracket UI는 persistent facts를 pure projection한다.
 
 신규 기능은 normalized-first로 개발한다. 새로운 canonical 운영 사실을 legacy JSON에 추가로
 확대하지 않으며, `ypl_data_v4`는 장기적으로 historical data compatibility, 아직 migration되지
 않은 legacy-only Event, 과거 Records fallback 용도로 축소한다.
 
-목표 runtime은 다음과 같다.
+normalized bracket runtime의 원칙은 다음과 같다.
 
 ```text
-Event
-→ Entry
-→ EntryParticipant
-→ Match
-→ Bracket UI projection
-→ Result
-→ RankingAward
-→ Records
+Entry / EntryParticipant / persisted draw slot / formed Match / winner
+→ pure Bracket UI projection
+→ Result / RankingAward / Records
 ```
 
-따라서 신규 Event-linked Bracket도 최종적으로 normalized Match / Entry 상태에서 UI를
-projection한다. legacy Bracket object를 신규 Event-linked canonical source로 계속 유지하지
-않으며, 이 전환은 P2-7에서 수행한다. P2-7은 아직 구현되지 않았고 Production migration은
-별도 후속 단계다.
+Persistent facts는 Entry, EntryParticipant, persisted actual draw slot, formed Match, winner다.
+BYE, future Match, topology, advancement edge, Double loser movement, GF/Reset activation은
+projection에서 계산한다. Bracket graph 전체를 DB에 저장하지 않는다.
+
+P2-7에서 Test 기준 normalized Single / Double / Team runtime cutover를 완료했다. Production은
+아직 `public.site_data / ypl_data_v4` 기반이며, historical bracket·legacy-only Event·legacy
+round/ranking/season write·historical Records fallback은 compatibility path로 유지한다.
 
 권장 전환:
 
@@ -1607,6 +1680,9 @@ HallOfFameEntry
 | 신청 추가 정보 / 팀 지망 | EventRegistration.registration_data |
 | 참가 단위 | Entry |
 | 실제 참가 선수 / 최종 팀 구성 | EntryParticipant |
+| Event-linked bracket runtime | BracketRuntime |
+| 실제 persisted draw | BracketEntrySlot |
+| runtime ownership / rollback metadata | BracketIdentityChange |
 | 제출/재제출 이력 | RegistrationSubmission |
 | 제출 당시 팀 세팅 | TeamSnapshot / TeamSnapshotMember |
 | 실제 경기 | Match |
@@ -1650,19 +1726,19 @@ competition_settings
 → 전체 참가자의 Registration / Player identity read-only preflight
 → 필요한 Player / manual Registration 생성 및 NULL player_id 연결
 → 선택된 Registration에서 Entry / EntryParticipant 생성
-→ legacy 대진표 저장
+→ normalized BracketRuntime 생성
+→ persisted actual draw slot 저장
+→ pure projection 기반 Bracket UI와 formed Match 동기화
 → Event running
 ```
 
 개인전은 `1 Player = 1 Registration = 1 Entry = 1 EntryParticipant`로 확정한다.
-Event당 연결 Bracket은 하나만 허용하며, legacy-only Bracket과 팀전에는 이 제한을 확장하지 않는다.
+Event-linked normalized runtime은 Event당 하나만 허용하며, historical / legacy-only Bracket과
+팀전에는 이 제한을 확장하지 않는다.
 
-Bracket participant의 기존 `id`는 legacy graph `pid` 호환을 위해 유지하고,
-normalized 연결은 `registrationId / playerId / entryId / entryParticipantId`로 함께 저장한다.
-
-참가 확정 metadata는 `recordMeta.identityChanges`와 분리해 Bracket의
-`participantConfirmation`이 소유한다. 기록 반영 전 Bracket 삭제 시에만 이 metadata로
-EntryParticipant → Entry → manual Registration → Registration.player_id → 신규 Player 순서로 원복한다.
+Single은 `single:r1:m1`, Double은 `double:w:r1:m1`·`double:l:r1:m1`·`double:gf:m1`·
+`double:reset:m1` 같은 stable node key를 사용한다. actual draw는 `BracketEntrySlot`이 소유하고,
+runtime lifecycle ownership / rollback metadata는 `BracketIdentityChange`가 소유한다.
 
 파티 미제출은 참가를 막지 않는다.
 
@@ -1742,7 +1818,7 @@ release 실패 시 legacy applied snapshot → Result snapshot → RankingAward 
 
 Bracket participant의 normalized identity는 Entry ID를 기준으로 연결한다. 전환 중에는 legacy graph의 participant ID를 함께 유지한다.
 
-현재 legacy Bracket 기록 반영의 안전 순서는 다음과 같다.
+legacy compatibility Bracket 기록 반영의 안전 순서는 다음과 같다.
 
 ```text
 1. Entry-linked Bracket은 기존 Entry / EntryParticipant identity 검증
@@ -1759,152 +1835,84 @@ P1-4까지 normalized Match / Result / RankingAward 및 legacy 기록 반영 lif
 수동 생성 팀전 등 legacy-only 팀전은 기존 compatibility path로 유지한다.
 
 
-## 18. 다음 단계
+## 18. 현재 runtime 경계와 후속 운영 원칙
 
-1. P2-7 Event-linked Bracket normalized cutover
-3. 챔피언스 운영 자동화
-4. Auth / RLS
-5. Production migration
+P2-7 Event-linked Bracket normalized cutover는 Test 기준 완료했다. 현재 지원 범위는
+individual Single Elimination, Double Elimination, Event-linked Team runtime이며,
+historical / legacy-only bracket은 기존 compatibility path를 유지한다.
 
-운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
+Production 운영 원본은 별도 migration 전까지 `public.site_data / ypl_data_v4`다. Production
+Cutover와 Auth/RLS hardening은 Test 검증, 백업, 권한 설계가 갖춰진 뒤 최종 순서를 조정해 진행한다.
+
+개발 중에는 targeted tests, 대표 happy-path smoke, DB/RPC 변경 시 최소 Test smoke, build,
+`git diff --check`를 사용하고, 큰 기능 완료 후 통합 browser E2E와 실제 운영 흐름 QA를 묶어서 수행한다.
+Production migration, destructive DB migration, data-loss 가능 rollback/delete, 권한/RLS 변경은
+중간 단계에서도 보수적으로 검증한다.
 <!-- YPL_NORMALIZED_MODEL_V1_END -->
 
-## Runtime 전환 상태 — 2026-09-03
+## Runtime 구조와 routing
 
-현재 애플리케이션은 legacy와 normalized DB가 동시에 사용되는 과도기 구조다.
-
-### 현재 normalized runtime 사용 범위
-
-```text
-Player
-Season
-Event
-EventRegistration
-Entry
-EntryParticipant
-Match (개인전·팀전 Event-linked runtime)
-Result (개인 Entry·Team Entry final placement)
-RankingAward (Event-linked Master / Light 개인·팀전 runtime placement payout)
-```
-
-신규 신청은 EventRegistration에 저장하며 신청 단계에서는 신규 Player를 생성하지 않는다.
-
-참가자 이름은 trim 후 `Player.display_name` exact match만 수행한다.
-
-```text
-0명   → player_id NULL
-1명   → 기존 Player 연결
-2명+  → player_id NULL
-```
-
-동명이인이나 유사 이름을 fuzzy match로 자동 확정하지 않는다.
-
-실제 참가자가 확정되는 Event 연결 개인전 Bracket 생성 단계에서 NULL identity를 다시 검사한다.
-
-```text
-0명   → 신규 Player 생성
-1명   → 기존 Player 재사용
-2명+  → 참가 확정 중단
-```
-
-모든 참가자의 ambiguity, 중복 Registration/Player, 다른 Registration의 Player claim,
-기존 Entry 존재 여부를 write 전에 검사한다. preflight가 전부 성공한 뒤에만
-Player → Registration → Entry → EntryParticipant를 쓰며 중간 실패는 FK 역순으로 보상 원복한다.
-
-### 현재 legacy runtime 사용 범위
-
-다음 일부 영역의 source of truth는 아직 `public.site_data / ypl_data_v4`다.
-
-```text
-Bracket 결과
-회차 기록
-회차 내부 Result 성격 입상 필드
-누적 랭킹 write
-시즌 성적 write
-```
-
-Event-linked 신규 사실의 canonical target은 normalized model이지만, 현재 Bracket graph와
-화면 렌더링, round / legacy ranking / season write는 legacy JSON에 남아 있다. Event-linked
-개인전과 팀전에서 실제 Entry가 성립한 경기는 normalized `matches`에도 함께 저장한다.
-
-따라서 현재 기록 반영 경로는 다음 hybrid 구조다.
-
-```text
-Event / EventRegistration / Player / Entry / EntryParticipant / Match / Result
-                       normalized
-                           │
-                           ▼
-              Bracket participant.entryId
-                           │
-                           ▼
-                  Bracket / Round placement / Ranking
-                          legacy
-```
-
-이는 최종 구조가 아니라 단계적 migration을 위한 임시 연결 구조다.
-
-### 목표 runtime 흐름
-
-다음 순서로 Event-linked Bracket의 legacy dependency를 제거한다.
+현재 애플리케이션은 Test의 신규 Event-linked normalized runtime과
+Production/historical compatibility를 분리한다.
 
 ```text
 Event
+→ EventRegistration
 → Entry
 → EntryParticipant
+→ BracketRuntime
+→ persisted BracketEntrySlot
 → Match
-→ Bracket UI projection
 → Result
 → RankingAward
+→ final submission
 → Records
 ```
 
-개인전과 팀전의 Event-linked normalized identity / Match / Result / RankingAward runtime 및
-P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다. Team Builder P2-5에서는
-Event context, applicant lookup, eligibility, submission-status read와 실제 Submission / TeamSnapshot
-write 및 revision까지 완료했고, P2-6에서 final submission freeze와 Records final Snapshot 연결을 완료했다.
-Bracket normalized cutover는 P2-7에서 수행한다.
+### Persistent facts와 projection
 
-### Bracket 생성과 기록 반영 write ordering
+Persistent facts는 `Entry`, `EntryParticipant`, persisted actual draw slot, 실제 formed `Match`,
+winner다. BYE, future Match, graph topology, advancement edge, Double losers movement,
+Grand Final / Reset activation은 pure projection으로 계산한다. Bracket graph 전체를 DB에 저장하지 않는다.
 
-현재 hybrid 구조에서는 browser의 normalized write와 `public.site_data` 저장을 하나의 PostgreSQL transaction으로 묶을 수 없다.
-
-Bracket 생성은 다음 순서를 사용한다.
+### Runtime routing
 
 ```text
-1. 모든 참가자 read-only preflight
-2. Player / Registration / Entry / EntryParticipant 생성·연결
-3. 현재 Bracket에서 성립한 normalized Match 동기화
-4. participantConfirmation metadata를 포함한 ypl_data_v4 저장
-5. 저장 성공 후 Event running
+runtime exists
+→ normalized adapter
+
+normalized runtime malformed
+→ fail closed
+
+runtime 없음 + historical / legacy-only bracket
+→ legacy adapter
+
+new supported Event-linked bracket
+→ normalized runtime create
 ```
 
-3단계 이후 legacy 저장이 실패하면 runtime Match를 먼저 삭제한 뒤 해당 참가 확정 변경을 원복한다.
+Legacy fallback은 malformed normalized runtime의 recovery path가 아니다.
 
-원복 대상:
+신규 runtime 생성은 ownership·Event·topology·canonical identity·slot·BYE를 preflight한 뒤
+runtime RPC로 수행한다. Single은 기존 Single 전용 create/delete/winner RPC를 유지하고,
+Team/Double은 generic normalized runtime RPC를 사용한다. generic RPC는 `SECURITY INVOKER`,
+빈 `search_path`, anon `EXECUTE`만 허용하며 normalized runtime artifact 범위 밖의 broad domain
+삭제를 수행하지 않는다. Match winner/snapshot sync는 기존 normalizedCompetitionService의
+Data API 경로를 유지한다.
 
-- EntryParticipant
-- Entry
-- 이번 참가 확정에서 생성한 manual EventRegistration
-- 이번 참가 확정에서 새로 연결한 `EventRegistration.player_id`
-- 이번 참가 확정에서 생성한 Player
+결과 적용은 `Match → Result → RankingAward → final submission freeze → Records` 순서로 연결하고,
+기록 반영 취소는 `RankingAward → Result → final pointer release` 순서를 지킨다. runtime 삭제와
+identity rollback은 `BracketIdentityChange` ownership metadata를 기준으로 수행하며, ownership이
+불명확한 interrupted 상태는 자동 정리하지 않는다.
 
-Event running 저장이 실패하면 먼저 legacy Bracket 제거를 저장한 뒤 runtime Match를 삭제하고 normalized 참가 확정을 원복한다.
-legacy 제거 저장도 실패하면 Bracket, runtime Match, normalized identity를 유지해 사용자가 Bracket 삭제로 복구할 수 있게 한다.
+Production `public.site_data / ypl_data_v4`, historical legacy bracket, legacy-only Event,
+legacy round/ranking/season write, historical Records fallback은 기존 compatibility path로 유지한다.
 
-기록 반영은 Entry-linked Bracket에서 Player/Registration을 다시 생성하지 않고 현재 DB 연결만 검증한다.
-legacy 기록을 저장하기 직전에 final Match sync, final Result sync, RankingAward sync를 순서대로 수행하며, 실패하면 기록 반영을 중단한다.
-전환 이전 `entryId` 없는 Bracket은 기존 fallback을 사용한다.
+### P0-4 normalized Match runtime sync — legacy compatibility adapter
 
-기록 반영 취소에서는 runtime placement RankingAward를 먼저 제거하고 runtime Result를 제거한 뒤 legacy 기록을 원복하고 Event를 다시 `running`으로 열어 `record_applied_at`을 NULL로 되돌린다. legacy 원복 저장이 실패하면 FK 순서에 맞춰 직전 Result snapshot, RankingAward snapshot 순서로 복구한다. Entry / EntryParticipant / Player / Registration / Match는 실제 참가·경기 사실이므로 유지한다.
-
-기록 반영 전 Bracket 삭제는 참가 확정 자체의 취소다. Phase A에서 read-only deletion preflight로
-Event의 RankingAward / Result와 ownership을 확인하고, Phase B에서 `Match 삭제 → participant
-confirmation rollback → legacy Bracket 삭제 → previous Event status 복구`를 수행한다. 단계별
-실패에는 compensation을 적용하며, interrupted deletion은 ownership을 안전하게 확정할 수 있는
-경우만 finalize한다. `rollbackEventParticipantConfirmation()`의 DELETE 결과 검증에는
-`.select("id")`를 포함해 exact-row 확인이 실제 삭제를 오인하지 않도록 한다.
-
-### P0-4 normalized Match runtime sync
+아래 P0-4~P0-6의 `legacy_bracket_runtime` source 규칙은 P2-7 이전 Event-linked 및
+legacy compatibility 경로에 적용된다. P2-7 신규 normalized runtime의 canonical draw와 graph
+projection은 위의 `BracketEntrySlot` / formed `Match` 원칙을 따른다.
 
 `normalizedCompetitionService.js`가 Event 단위 Match 동기화를 담당한다.
 
@@ -1934,7 +1942,7 @@ Event 단위 service queue로 직렬화한다.
 best-effort로 재동기화하고 서버 데이터를 다시 읽는다. Entry identity가 없는 전환 이전 Bracket과
 Event 없는 legacy-only Bracket은 Match sync를 건너뛰며 기존 기록 흐름을 유지한다.
 
-### P0-5 normalized Result runtime sync
+### P0-5 normalized Result runtime sync — legacy compatibility adapter
 
 기존 `elimResult`가 legacy 기록 반영에 전달하는 동일한 우승 / 준우승 / 4강 participant ID를
 별도 재계산 없이 `bracket.participants[].entryId`로 변환한다.
@@ -1967,7 +1975,7 @@ Event-linked 팀전은 Team Entry 단위 Result를 지원하며 선수별 Result
 
 Test DB 브라우저 E2E에서는 Double Elimination의 apply → revert → 결과 변경 → reapply 및 reset final 경로와 Single Elimination의 apply → revert 경로를 검증했다. 두 형식 모두 기록 반영 전에는 Result가 생성되지 않고, 반영 시 우승 1 / 준우승 1 / 4강 2의 runtime Result가 생성되며, 반영 취소 시 Result만 제거되고 Match / Entry / EntryParticipant는 유지되는 것을 확인했다.
 
-### P0-6 normalized RankingAward runtime sync
+### P0-6 normalized RankingAward runtime sync — legacy compatibility adapter
 
 Result sync 뒤에 Event의 runtime Result를 다시 읽고 다음 normalized 관계만 사용한다.
 

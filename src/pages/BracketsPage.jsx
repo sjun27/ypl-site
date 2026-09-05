@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { buildNormalizedRuntimeCreateAttempt, buildNormalizedSingleCreateAttempt, completeApplicationEvent, compensateFinalSubmissionReleaseFailure, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, createNormalizedBracketRuntime, createNormalizedSingleBracketRuntime, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, deleteNormalizedBracketRuntime, deleteNormalizedSingleBracketRuntime, fetchNormalizedBracketRuntime, fetchNormalizedSingleBracketRuntime, freezeEventFinalSubmissions, getEvent, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, isFinalSubmissionRestoreAllowed, isRecordApplyCompletionConfirmed, listEventRegistrationSubmissionStatuses, listEventRegistrations, listNormalizedBracketRuntimes, listNormalizedSingleBracketRuntimes, listSubmissionEvents, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventFinalSubmissions, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, setNormalizedSingleBracketWinner, syncEventBracketMatches, syncNormalizedBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
+import { buildNormalizedRuntimeCreateAttempt, buildNormalizedSingleCreateAttempt, completeApplicationEvent, compensateFinalSubmissionReleaseFailure, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, createNormalizedBracketRuntime, createNormalizedSingleBracketRuntime, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, deleteNormalizedBracketRuntime, deleteNormalizedSingleBracketRuntime, ensureChampionshipHallOfFameEntry, fetchNormalizedBracketRuntime, fetchNormalizedSingleBracketRuntime, freezeEventFinalSubmissions, getEvent, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, isFinalSubmissionRestoreAllowed, isRecordApplyCompletionConfirmed, listEventRegistrationSubmissionStatuses, listEventRegistrations, listNormalizedBracketRuntimes, listNormalizedSingleBracketRuntimes, listSubmissionEvents, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventFinalSubmissions, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, setNormalizedSingleBracketWinner, syncEventBracketMatches, syncNormalizedBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
 import { buildDefaultTeamMatchLineups, buildTeamMatchSeries, getTeamMatchLineupOptions, getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
 import { executeBracketDeletionLifecycle, preserveBracketLifecycleMetadata, validateBracketParticipantConfirmation } from "../services/bracketLifecycle.js";
 import { buildBracketSubmissionStatusModel } from "../services/teamBuilderCore.js";
@@ -1249,6 +1249,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh, onNormalize
   const [identityPreview,setIdentityPreview]=useState([]);
   const [identityPreviewError,setIdentityPreviewError]=useState("");
   const [identityPreviewBusy,setIdentityPreviewBusy]=useState(linked);
+  const qualifierEvent=linkedContext?.event?.championship_phase==="qualifier";
   useEffect(()=>{
     if(!b.eventId) return;
     let cancelled=false;
@@ -1357,6 +1358,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh, onNormalize
     return { nd, deltas, roundNum, willRank, willSeason };
   };
   const prepare=()=>{
+    if(qualifierEvent){alert("qualifier는 Placement Result/Award를 만들지 않습니다. Champions 운영에서 필요한 진출자를 확정한 뒤 qualifier를 종료하세요.");return;}
     if(!curT){alert("회차를 추가할 대회를 선택하세요.");return;}
     if(linkedContextBusy){alert("연결 대회의 시즌 정보를 불러오는 중입니다.");return;}
     if(linkedContextError){alert(linkedContextError);return;}
@@ -1537,6 +1539,13 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh, onNormalize
       try{
         const completed=await completeApplicationEvent(b.eventId,{revealFinalTeams:false});
         await onNormalizedApplied?.(completed);
+        try{
+          await ensureChampionshipHallOfFameEntry(b.eventId);
+        }catch(error){
+          flash(`기록 반영은 완료됐지만 Hall of Fame 등록에 실패했습니다. Champions 운영에서 재시도해 주세요: ${error?.message||"알 수 없는 오류"}`);
+          onClose();
+          return;
+        }
         flash("기록에 반영됨 ✓");
         onClose();
       }catch(error){
@@ -1612,6 +1621,13 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh, onNormalize
     if(b.eventId){
       try{
         await completeApplicationEvent(b.eventId,{revealFinalTeams:finalSubmissionFreeze!==null});
+        try{
+          await ensureChampionshipHallOfFameEntry(b.eventId);
+        }catch(error){
+          flash(`기록 반영은 완료됐지만 Hall of Fame 등록에 실패했습니다. Champions 운영에서 재시도해 주세요: ${error?.message||"알 수 없는 오류"}`);
+          onClose();
+          return;
+        }
       }catch(error){
         let currentEvent=null;
         let stateReadError=null;
@@ -1997,6 +2013,7 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
     }
   };
   useEffect(()=>{ void loadNormalized(); },[]);
+  const requestedEventId=new URLSearchParams(window.location.search).get("eventId");
   const normalizedEventIds=new Set(normalizedBrackets.map(b=>b.eventId));
   const list=[...normalizedBrackets,...(data.brackets||[]).filter(b=>!normalizedEventIds.has(b.eventId))];
   const [openId,setOpenId]=useState(null);
@@ -2006,6 +2023,11 @@ export default function BracketsPage({ data, admin, save, flash, refresh }){
   const [deletingId,setDeletingId]=useState(null);
   const deletingRef=useRef(false);
   const open=list.find(b=>b.id===openId);
+  useEffect(()=>{
+    if(!requestedEventId) return;
+    const target=list.find(b=>b.eventId===requestedEventId);
+    if(target) setOpenId(target.id);
+  },[requestedEventId,normalizedBrackets.length,data.brackets]); // eslint-disable-line react-hooks/exhaustive-deps
   const create=async(b)=>{
     const normalizedCandidate=Boolean(
       b.eventId&&b.format==="elim"&&(b.mode==="single"||b.mode==="team")
