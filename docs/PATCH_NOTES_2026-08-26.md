@@ -1951,8 +1951,52 @@ Test DB 브라우저 E2E에서 `P1-1 팀전 E2E 테스트`를 생성→삭제→
 삭제 후 동일 Event의 재생성도 정상 동작했다. 이 수정은 P2-2 submission architecture 문제가 아니라
 Event-linked bracket lifecycle regression을 browser E2E에서 발견해 수정한 이력이다.
 
-### 다음 단계
+### P2-2 당시 다음 단계
 
 P2-3에서 TeamSnapshot / TeamSnapshotMember / RegistrationSubmission DB INSERT, revision 생성,
 실제 제출 버튼 저장을 구현한다. `final_submission_id` freeze와 result-apply submission freeze,
 실제 Submission → Records final snapshot E2E는 이후 P2-4 범위다.
+
+---
+
+## 2026-09-05 P2-5 실제 공식 파티 제출
+
+P2-5에서 공지에서 직접 진입하는 Event-linked Team Builder의 공식 파티 제출 lifecycle을 구현했다.
+
+### 구현 범위
+
+- 공지 `파티 제출` → `?view=builder&eventId=<event-id>` direct entry
+- EventRegistration `registration_name` exact-match 및 기존 official eligibility gate 연동
+- `open / running`이고 `record_applied_at IS NULL`인 Event만 제출 허용
+- `completed`와 기록 반영 완료 Event는 UI와 RPC 양쪽에서 차단
+- TeamSnapshot → TeamSnapshotMember → RegistrationSubmission을 하나의 atomic RPC로 생성
+- Event / Registration row lock과 DB-side revision serialization
+- Event의 `regulation_id`, `cup_rule_id`, `cup_rule_settings` authoritative 적용
+- submitted_at DB now(), soft deadline 이후 late warning, transaction 실패 시 rollback
+- 재제출 시 기존 row를 UPDATE하지 않고 새 Snapshot / Submission과 증가한 revision 생성
+- Brackets 제출현황의 전체 / 팀별 count와 latestSubmittedAt 연동
+
+모노타입 `assignedType`은 Event 모드에서도 참가자가 직접 선택할 수 있는 Team Builder local validation
+state로 유지한다. Regulation과 Cup Rule은 Event 기준으로 잠그지만 assignedType은 잠그지 않는다.
+assignedType은 EventRegistration / TeamSnapshot의 공식 배정 사실로 저장하지 않으며, 최종 확인은 동아리
+운영자가 수행한다. CUP_RULES registry에서 해석할 수 없는 Cup Rule은 fail closed 한다.
+
+### Test 검증
+
+Test schema `ypl_schema_validation`에서 다음을 확인했다.
+
+- team10: rev1 Pikachu, rev2 Pikachu + Charizard, rev3 soft deadline 이후 재제출
+- 각 revision의 Snapshot 유지 및 duplicate / orphan 0
+- team1: 실제 bracket 참가자 제출 전 전체 0/8·팀 0/2, 제출 후 전체 1/8·팀 1/2
+- UI 제출 완료 및 latestSubmittedAt 표시
+- free Team Builder, 기존 신청 UI, P2-2 status UI, normalized Entry / EntryParticipant / Match 관계 회귀
+- Node 118/118, production build 119 modules, `git diff --check` PASS
+
+RPC는 Production Supabase에 적용하지 않았다. P2-5 제출에서는 `EventRegistration.final_submission_id`를
+NULL로 유지하므로, 현재 Records에서 공식 파티로 표시되지 않는 것이 정상이다.
+
+### 다음 단계
+
+P2-6에서 기록 반영 시 최신 RegistrationSubmission을 `final_submission_id`로 freeze하고, 반영 취소 시
+해제하며, 재반영 시 최신 revision을 다시 freeze한다. 이후 Records는 final Snapshot만 공식 파티로 읽고,
+P2-7에서 Event-linked Bracket normalized cutover를 진행한다.

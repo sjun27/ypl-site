@@ -139,7 +139,8 @@ Local saved team은 편집 가능한 working data이며 localStorage schema v3�
 대회 엔트리 제출 기능을 추가할 때는 개인 작업본을 그대로 연결하지 않고 **제출 당시 Team Snapshot을 별도로 고정**합니다.
 P2-1에서는 이 경계를 위한 local serializer / loader foundation을 구현했고, P2-2에서는 공식 제출을
 판정하기 위한 Event context, applicant Registration lookup, eligibility, 운영자 제출 상태 read만 구현했다.
-실제 공식 Submission DB write는 P2-3에서 구현한다.
+실제 공식 Submission DB write와 revision은 P2-5에서 구현했고, `final_submission_id` freeze와 Records의
+공식 Snapshot projection은 P2-6에서 구현한다.
 
 ### Team Builder identity 경계
 
@@ -185,6 +186,28 @@ P2-2에서 아직 구현하지 않은 항목:
 
 현재는 Auth/RLS가 없고 이름 exact match 기반 운영이므로, 이 단계의 귀속 표현은 Auth identity
 verification이 아닌 **EventRegistration applicant lookup/confirmation**이다.
+
+### P2-5 실제 공식 파티 제출
+
+P2-5에서 Event-linked Team Builder의 실제 제출 write를 Test 환경에 연결했다.
+
+- 공지의 `?view=builder&eventId=<event-id>` direct entry 후 EventRegistration exact-match를 거친다.
+- `open / running`이고 `record_applied_at IS NULL`인 Event만 제출 가능하다. `completed` 또는 기록 반영 완료
+  Event는 UI와 RPC 양쪽에서 차단한다. `submission_target_at`은 soft deadline이므로 이후 제출은 late warning만 낸다.
+- 제출 RPC는 Event와 Registration을 row lock하고 Event의 `regulation_id`, `cup_rule_id`,
+  `cup_rule_settings`를 authoritative source로 사용한다. 한 transaction 안에서 TeamSnapshot,
+  TeamSnapshotMember, RegistrationSubmission을 생성하며 실패 시 rollback한다.
+- 재제출은 기존 Snapshot / Submission을 UPDATE하지 않고 새 Snapshot과 새 Submission을 생성해 revision을
+  증가시킨다. P2-5 동안 `EventRegistration.final_submission_id`는 NULL로 유지한다.
+- 모노타입 `assignedType`은 참가자가 Team Builder에서 직접 고르는 local validation state다. Event 모드에서도
+  Regulation / Cup Rule은 잠그되 assignedType은 잠그지 않으며, 공식 배정 사실로 EventRegistration / Snapshot에
+  저장하지 않는다. unsupported Cup Rule은 fail closed 한다.
+- Test `ypl_schema_validation`에서 team10 revision 1~3, soft deadline 이후 재제출, team1 제출현황을 검증했다.
+  RPC는 Production에 적용하지 않았다.
+
+P2-6에서는 기록 반영 시 최신 RegistrationSubmission을 `EventRegistration.final_submission_id`로 고정하고,
+취소 시 해제하며 재반영 시 최신 revision을 다시 고정한다. Records는 해당 포인터가 가리키는 immutable
+TeamSnapshot만 공식 파티로 사용한다. P2-7에서는 Event-linked Bracket의 normalized cutover를 진행한다.
 
 ---
 
@@ -638,7 +661,7 @@ Event
 
 따라서 신규 Event-linked Bracket도 최종적으로 normalized Match / Entry 상태에서 UI를
 projection한다. legacy Bracket object를 신규 Event-linked canonical source로 계속 유지하지
-않으며, 이 전환은 P2-5에서 수행한다. P2-5는 아직 구현되지 않았고 Production migration은
+않으며, 이 전환은 P2-7에서 수행한다. P2-7은 아직 구현되지 않았고 Production migration은
 별도 후속 단계다.
 
 권장 전환:
@@ -1706,12 +1729,11 @@ P1-4까지 normalized Match / Result / RankingAward 및 legacy 기록 반영 lif
 
 ## 18. 다음 단계
 
-1. P2-3 TeamSnapshot / RegistrationSubmission DB write + revision
-2. P2-4 final_submission_id freeze + Entry / Records integration E2E
-3. P2-5 Event-linked Bracket normalized cutover
-4. 챔피언스 운영 자동화
-5. Auth / RLS
-6. Production migration
+1. P2-6 final_submission_id freeze + Records integration
+2. P2-7 Event-linked Bracket normalized cutover
+3. 챔피언스 운영 자동화
+4. Auth / RLS
+5. Production migration
 
 운영 Supabase는 DDL 및 migration 검증이 끝나기 전까지 변경하지 않는다.
 <!-- YPL_NORMALIZED_MODEL_V1_END -->
@@ -1806,11 +1828,10 @@ Event
 ```
 
 개인전과 팀전의 Event-linked normalized identity / Match / Result / RankingAward runtime 및
-P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다. Team Builder P2-2에서는
-Event context, applicant lookup, eligibility와 submission-status read까지 완료했으며,
-공식 Submission DB write는 P2-3에서 구현한다. Bracket normalized cutover는 P2-5에서 수행한다.
-
-Team Builder의 공식 Submission / TeamSnapshot write와 revision은 신청→기록 흐름 위에 P2-3으로 추가한다.
+P1-5 normalized team Records read 전환은 Test 환경 기준 완료했다. Team Builder P2-5에서는
+Event context, applicant lookup, eligibility, submission-status read와 실제 Submission / TeamSnapshot
+write 및 revision까지 완료했다. `final_submission_id` freeze는 P2-6, Bracket normalized cutover는
+P2-7에서 수행한다.
 
 ### Bracket 생성과 기록 반영 write ordering
 
@@ -2137,4 +2158,5 @@ normalized completed Event
 - team_bout / ace Match는 normalized DB와 linked legacy compatibility source에 보존하지만 P1-5에서 새 Records 상세 UI는 추가하지 않는다.
 - `source` metadata는 projection / dedupe / debug 내부에 유지하고 일반 사용자 화면에는 표시하지 않는다. `m-a`, `m-b`, `none` 등 raw 내부 code도 UI에서 제거한다.
 
-Team Builder의 공식 roster 연결은 이 단계에 포함하지 않는다. `TeamSnapshot → RegistrationSubmission → EventRegistration` 연결은 다음 P2 단계에서 구현한다.
+Team Builder의 공식 roster 연결은 이 단계에 포함하지 않는다. `TeamSnapshot → RegistrationSubmission → EventRegistration`
+연결은 P2-5에서 구현했으며, `final_submission_id` freeze와 Records의 공식 Snapshot projection은 P2-6에서 구현한다.

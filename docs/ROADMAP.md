@@ -252,13 +252,32 @@ P2-2 browser/local 검증 완료:
 - 6 Pokémon + 0 moves는 Team Incomplete이지만 제출 준비 완료, Pokémon 0은 제출 불가
 - 팀전 대진표 생성 후 전체/팀별/선수별 제출 현황과 latestSubmittedAt 표시 정상
 - targeted tests PASS, 전체 Node tests 113/113 PASS, production build PASS, `git diff --check` PASS
-- 실제 Submission DB write가 없으므로 미제출 → 제출 완료 전환 E2E는 P2-3으로 이관
 
-P2-3 TeamSnapshot / RegistrationSubmission DB write + revision 예정
-P2-4 final_submission_id freeze + Entry / Records integration E2E 예정
+P2-5 실제 공식 파티 제출 ✅
 
-P2-2에서는 TeamSnapshot / TeamSnapshotMember / RegistrationSubmission INSERT, revision 생성,
-실제 제출 버튼 저장, `final_submission_id` freeze를 수행하지 않았다.
+- 공지에서 `?view=builder&eventId=<event-id>`로 직접 진입하고 EventRegistration exact-match 후 제출한다.
+- `open / running`이고 `record_applied_at IS NULL`인 Event만 허용하며 `completed`와 기록 반영 완료 Event는
+  UI와 RPC 양쪽에서 차단한다.
+- 제출은 TeamSnapshot → TeamSnapshotMember → RegistrationSubmission의 atomic RPC로 저장한다.
+  재제출은 기존 row를 수정하지 않고 새 Snapshot / Submission과 증가한 revision을 만든다.
+- Event의 `regulation_id`, `cup_rule_id`, `cup_rule_settings`를 authoritative 값으로 사용하고,
+  soft deadline 이후 제출은 late warning만 표시한다.
+- 모노타입 `assignedType`은 Event 모드에서도 직접 선택 가능한 Team Builder local validation state다.
+  EventRegistration / TeamSnapshot의 공식 배정값으로 저장하지 않으며, unsupported Cup Rule은 fail closed 한다.
+- Test `ypl_schema_validation`에서 team10 revision 1~3과 team1 제출현황을 검증했다. RPC는 Production에
+  적용하지 않았다.
+
+P2-6 final_submission_id freeze + Records integration 예정
+
+- 기록 반영 시 최신 RegistrationSubmission을 `EventRegistration.final_submission_id`로 freeze한다.
+- 과거 revision은 유지하고, 기록 반영 취소 시 freeze를 해제하며 재반영 시 최신 revision을 다시 freeze한다.
+- Records는 `final_submission_id → RegistrationSubmission → TeamSnapshot → TeamSnapshotMember`만
+  공식 파티로 사용한다.
+
+P2-7 Event-linked Bracket normalized cutover 예정
+
+- normalized `Entry / EntryParticipant / Match` 기반 Bracket UI projection과 Event-linked Bracket lifecycle을
+  canonical runtime으로 전환한다.
 
 3. normalized DB 전환 상태
 
@@ -364,7 +383,7 @@ RankingAward 기반 랭킹 전환
 P0/P1은 normalized identity/write mirror, Match/Result/RankingAward runtime, normalized Records
 read, 개인전·팀전 E2E를 포함한 **normalized competition lifecycle foundation** 완료를 의미한다.
 Event-linked Bracket graph와 일부 round / ranking / season legacy write 의존은 남아 있으며,
-이를 전환하는 단계는 P2-5에서 별도로 수행한다.
+이를 전환하는 단계는 P2-7에서 별도로 수행한다.
 
 P1. 팀전 normalized 연결
 
@@ -422,8 +441,9 @@ Test DB 브라우저 E2E와 local acceptance audit을 완료했다.
 
 P1 전체(P1-1 ~ P1-5)는 Test 환경 기준 완료했다.
 
-P2-1 Team Builder foundation과 P2-2 Event context + submission eligibility + applicant lookup 및
-operator submission-status read UX는 Test 기준 완료했다. 실제 공식 Submission DB write는 아직 구현하지 않았다.
+P2-1 Team Builder foundation, P2-2 Event context + submission eligibility + applicant lookup 및
+operator submission-status read UX, P2-5 실제 공식 파티 제출은 Test 기준 완료했다. P2-5 RPC는
+Production에 적용하지 않았다.
 
 P2. Team Builder → 공식 파티 제출
 
@@ -439,19 +459,19 @@ Team Builder
 
 - P2-1 Team Builder foundation ✅
 - P2-2 Event context + submission eligibility + applicant lookup + operator submission-status read UX ✅
-- P2-3 TeamSnapshot / RegistrationSubmission DB write + revision 예정
-- P2-4 final_submission_id freeze + Entry / Records integration E2E 예정
-- P2-5 Event-linked Bracket normalized cutover 예정
+- P2-5 실제 공식 파티 제출 ✅
+- P2-6 final_submission_id freeze + Records integration 예정
+- P2-7 Event-linked Bracket normalized cutover 예정
 
 P2-1의 serializer / loader는 local과 official Snapshot 경계를 준비하는 pure foundation이다.
-P2-2는 Event context, applicant Registration confirmation, official eligibility와 운영자 제출 상태
-read만 구현했으며 공식 Submission 생성이나 DB write를 수행하지 않는다.
+P2-2 당시에는 Event context, applicant Registration confirmation, official eligibility와 운영자 제출 상태
+read만 구현했으며 공식 Submission 생성이나 DB write를 수행하지 않았다.
 
 개인 localStorage 저장본과 공식 제출 Snapshot은 분리한다.
 
-P2-5 — Event-linked Bracket normalized cutover
+P2-7 — Event-linked Bracket normalized cutover
 
-P2-3과 P2-4 이후, Champions 구현 전에 Event-linked 신규 대진표의 hybrid 의존을 줄이는 전환 단계다.
+P2-5와 P2-6 이후, Champions 구현 전에 Event-linked 신규 대진표의 hybrid 의존을 줄이는 전환 단계다.
 
 - normalized `Entry / EntryParticipant / Match` 기반 Bracket UI projection
 - 신규 Event-linked Bracket의 canonical 운영 사실을 normalized DB로 이동
@@ -460,7 +480,7 @@ P2-3과 P2-4 이후, Champions 구현 전에 Event-linked 신규 대진표의 hy
 - 기존 Records fallback과 과거 대회 데이터는 보존
 - Production migration은 별도 후속 단계
 
-P2-5는 아직 구현되지 않았다.
+P2-7은 아직 구현되지 않았다.
 
 P3. 챔피언스 운영
 
@@ -649,12 +669,11 @@ feature/records-system
 ✓ P2-1 saved team switching / new / duplicate UX 및 destructive change confirmation
 
 바로 다음
-1. P2-3 TeamSnapshot / RegistrationSubmission DB write + revision
+1. P2-6 final_submission_id freeze + Records integration
 
 그 이후
-2. P2-4 final_submission_id freeze + Entry / Records integration E2E
-3. P2-5 Event-linked Bracket normalized cutover
-4. 챔피언스 운영 자동화
-5. Team Builder 자체 안정화 / 추가 UX
-6. Auth / RLS
-7. Production migration
+2. P2-7 Event-linked Bracket normalized cutover
+3. 챔피언스 운영 자동화
+4. Team Builder 자체 안정화 / 추가 UX
+5. Auth / RLS
+6. Production migration
