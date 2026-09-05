@@ -1,4 +1,5 @@
 import { buildPokemonStats, buildRecordsSnapshot } from "./recordsAnalytics.js";
+import { resolveRecordsPokemonName } from "./recordsPokemon.js";
 
 const cleanName = (value) => String(value || "").trim();
 const asArray = (value) => (Array.isArray(value) ? value : []);
@@ -99,6 +100,9 @@ function normalizedModels(data, raw) {
     raw?.results,
     (result) => result?.id || `${result?.event_id}:${result?.entry_id}`
   ).filter((result) => eventIds.has(result.event_id));
+  const registrationById = new Map(
+    asArray(raw?.eventRegistrations).map((registration) => [registration.id, registration])
+  );
 
   const eventById = new Map(events.map((event) => [event.id, event]));
   const seasonById = new Map(seasons.map((season) => [season.id, season]));
@@ -200,6 +204,10 @@ function normalizedModels(data, raw) {
     const meta = eventMeta(event);
     const eventResults = results.filter((result) => result.event_id === event.id);
     const team = Boolean(event.is_team_event);
+    const entryIdsFor = (code) => eventResults
+      .filter((result) => result.placement_code === code)
+      .map((result) => result.entry_id)
+      .filter(Boolean);
     const namesFor = (code) => eventResults
       .filter((result) => result.placement_code === code)
       .map((result) => participantsByEntryId.get(result.entry_id)?.[0])
@@ -221,6 +229,22 @@ function normalizedModels(data, raw) {
     const champions = team ? teamRowsFor("champion") : [];
     const runnerUps = team ? teamRowsFor("runner_up") : [];
     const semifinalists = team ? teamRowsFor("semifinalist") : [];
+    const individualParticipants = team ? [] : uniqueRows(
+      participants
+        .filter((participant) => participant.event_id === event.id)
+        .filter((participant) => entryById.get(participant.entry_id)?.entry_type === "individual")
+        .filter((participant) => registrationById.get(participant.registration_id)?.event_id === event.id),
+      (participant) => participant.entry_id
+    ).map((participant) => {
+      const result = resultByEntryId.get(participant.entry_id);
+      return {
+        entryId: participant.entry_id,
+        playerId: participant.player_id,
+        name: cleanName(playerById.get(participant.player_id)?.display_name),
+        placement: PLACEMENT[result?.placement_code] || "participant",
+        hasResult: Boolean(result),
+      };
+    }).filter((participant) => participant.name);
 
     return {
       id: event.id,
@@ -240,6 +264,10 @@ function normalizedModels(data, raw) {
       ruMembers: team ? runnerUps.flatMap((row) => row.members) : [],
       sf: team ? semifinalists.map((row) => row.name) : namesFor("semifinalist"),
       sfMembers: team ? semifinalists.map((row) => row.members) : [],
+      winEntryIds: team ? [] : entryIdsFor("champion"),
+      ruEntryIds: team ? [] : entryIdsFor("runner_up"),
+      sfEntryIds: team ? [] : entryIdsFor("semifinalist"),
+      individualParticipants,
       brackets: [],
       rosters: [],
     };
@@ -266,12 +294,15 @@ function normalizedModels(data, raw) {
   };
 }
 
-function normalizedRosters(raw, models) {
+function normalizedRosters(raw, models, pokemonDirectory) {
   const registrationById = new Map(
     asArray(raw?.eventRegistrations).map((registration) => [registration.id, registration])
   );
   const submissionById = new Map(
     asArray(raw?.registrationSubmissions).map((submission) => [submission.id, submission])
+  );
+  const snapshotById = new Map(
+    asArray(raw?.teamSnapshots).map((snapshot) => [snapshot.id, snapshot])
   );
   const membersBySnapshotId = new Map();
   for (const member of asArray(raw?.teamSnapshotMembers)) {
@@ -281,16 +312,20 @@ function normalizedRosters(raw, models) {
 
   return models.participants.flatMap((participant) => {
     const event = models.eventById.get(participant.event_id);
-    if (!event || event.is_team_event) return [];
+    if (!event || event.is_team_event || !event.team_revealed_at) return [];
     const registration = registrationById.get(participant.registration_id);
     const submission = submissionById.get(registration?.final_submission_id);
-    if (!submission) return [];
-    const pokemon = asArray(membersBySnapshotId.get(submission.snapshot_id))
+    if (!submission || submission.registration_id !== registration?.id || !snapshotById.has(submission.snapshot_id)) return [];
+    const members = asArray(membersBySnapshotId.get(submission.snapshot_id))
       .slice()
-      .sort((a, b) => number(a.slot) - number(b.slot))
-      .map((member) => cleanName(member.pokemon_name_snapshot))
-      .filter(Boolean);
-    if (!pokemon.length) return [];
+      .sort((a, b) => number(a.slot) - number(b.slot));
+    const resolvedMembers = members
+      .map((member) => ({
+        pokemonId: cleanName(member.pokemon_id),
+        name: resolveRecordsPokemonName(member.pokemon_id, member.pokemon_name_snapshot, pokemonDirectory),
+      }))
+      .filter((member) => member.name);
+    if (!resolvedMembers.length) return [];
     const player = models.playerById.get(participant.player_id);
     const result = models.resultByEntryId.get(participant.entry_id);
     if (!event || !player) return [];
@@ -300,7 +335,8 @@ function normalizedRosters(raw, models) {
       entryId: participant.entry_id,
       playerId: participant.player_id,
       owner: cleanName(player.display_name),
-      pokemon,
+      pokemon: resolvedMembers.map((member) => member.name),
+      pokemonIds: resolvedMembers.map((member) => member.pokemonId),
       placement: PLACEMENT[result?.placement_code] || "participant",
       team: false,
       snapshotId: submission.snapshot_id,
@@ -550,7 +586,7 @@ function rankingRows(raw, models, legacyData) {
   return { series, seasons, awardRows: awards, normalizedSeasonIds };
 }
 
-export function buildNormalizedRecordsProjection(legacyData = {}, raw = {}) {
+export function buildNormalizedRecordsProjection(legacyData = {}, raw = {}, pokemonDirectory = null) {
   const models = normalizedModels(legacyData, raw);
   models.rawRankingBaselines = asArray(raw.rankingBaselines);
   models.rawRankingAwards = asArray(raw.rankingAwards);
@@ -567,20 +603,24 @@ export function buildNormalizedRecordsProjection(legacyData = {}, raw = {}) {
   );
   const legacySnapshot = buildRecordsSnapshot(filteredLegacyData);
   const allLegacySnapshot = buildRecordsSnapshot(legacyData);
-  const normalizedRosterRows = normalizedRosters(raw, models);
-  const eventsWithNormalizedRosters = new Set(normalizedRosterRows.map((row) => row.eventId));
+  const normalizedRosterRows = normalizedRosters(raw, models, pokemonDirectory);
+  const finalizedEventIds = new Set(
+    models.events
+      .filter((event) => Boolean(event.team_revealed_at))
+      .map((event) => event.id)
+  );
   const linkedBracketEvent = new Map(
     asArray(legacyData.brackets).map((bracket) => [bracket.id, bracket.eventId])
   );
   const fallbackLegacyRosters = allLegacySnapshot.rosters.filter((roster) => {
     const eventId = linkedBracketEvent.get(roster.bracketId);
-    return !eventId || !eventsWithNormalizedRosters.has(eventId);
+    return !eventId || !finalizedEventIds.has(eventId);
   });
   const rosterLegacyData = {
     ...filteredLegacyData,
     brackets: asArray(legacyData.brackets).filter((bracket) => {
       if (!models.eventIds.has(bracket.eventId)) return true;
-      return !eventsWithNormalizedRosters.has(bracket.eventId);
+      return !finalizedEventIds.has(bracket.eventId);
     }),
   };
   const legacyRosterSnapshot = buildRecordsSnapshot(rosterLegacyData);
@@ -599,7 +639,29 @@ export function buildNormalizedRecordsProjection(legacyData = {}, raw = {}) {
   const ranking = rankingRows(raw, models, legacyData);
   const compatibilityTeamBrackets = asArray(filteredLegacyData.brackets)
     .filter((bracket) => bracket?.applied && normalizedTeamEventIds.has(bracket.eventId)).length;
-  const archives = [...legacySnapshot.archives.map((row) => ({ ...row, source: "legacy" })), ...models.archives]
+  const normalizedArchives = models.archives.map((archive) => {
+    if (archive.team) return archive;
+    const rosterByEntryId = new Map(
+      normalizedRosterRows
+        .filter((roster) => roster.eventId === archive.eventId)
+        .map((roster) => [roster.entryId, roster])
+    );
+    const previews = (entryIds) => asArray(entryIds).map((entryId) => rosterByEntryId.get(entryId) || null);
+    return {
+      ...archive,
+      rosters: [...rosterByEntryId.values()],
+      individualParticipants: archive.individualParticipants.map((participant) => ({
+        ...participant,
+        roster: rosterByEntryId.get(participant.entryId) || null,
+      })),
+      partyPreviews: {
+        win: previews(archive.winEntryIds),
+        ru: previews(archive.ruEntryIds),
+        sf: previews(archive.sfEntryIds),
+      },
+    };
+  });
+  const archives = [...legacySnapshot.archives.map((row) => ({ ...row, source: "legacy" })), ...normalizedArchives]
     .sort((a, b) => (a.date === b.date ? String(b.round || "").localeCompare(String(a.round || ""), "ko") : a.date < b.date ? 1 : -1));
   const seasons = [...new Set([
     ...models.seasons.slice().sort((a, b) => number(b.sort_order) - number(a.sort_order)).map((season) => season.name),

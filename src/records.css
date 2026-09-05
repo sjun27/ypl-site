@@ -151,8 +151,22 @@
 .records-tour-total{font-size:12px;font-weight:700;color:var(--muted);white-space:nowrap}
 .records-tour-body{padding:12px 14px 14px}
 .records-tour-panel .records-archive-card{box-shadow:none}
+.records-party-sprites{display:inline-flex;align-items:center;gap:0;margin-left:-3px;white-space:nowrap}
+.records-party-sprites img{width:30px;height:30px;object-fit:contain;flex:none}
+.records-round-toggle{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:10px;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit}
+.records-round-toggle>.records-round-summary{min-width:0}
+.records-round-toggle:hover .r2-res{opacity:.86}
+.records-round-chevron{font-size:14px;line-height:1;color:var(--muted2);padding:5px 3px}
+.records-round-detail{margin-top:10px;padding:11px 12px;border-top:1px solid var(--line);border-radius:0 0 11px 11px;background:var(--s-soft)}
+.records-round-party-list{display:flex;flex-direction:column;gap:8px}
+.records-round-party-row{display:grid;grid-template-columns:48px minmax(84px,max-content) minmax(0,1fr);align-items:center;gap:9px;min-width:0}
+.records-round-party-row .r2-name{justify-self:start}
+.records-round-party-row .records-party-sprites{margin-left:0;white-space:normal;flex-wrap:wrap}
+.records-party-missing{font-size:11.5px;color:var(--muted2);font-style:normal}
 @media(max-width:640px){
   .records-tour-head{align-items:flex-start;flex-direction:column}
+  .records-round-party-row{grid-template-columns:48px minmax(0,1fr)}
+  .records-round-party-row .records-party-sprites{grid-column:1/-1}
 }
 
 /* Trainer history — Champions Series */

@@ -170,3 +170,213 @@ begin
     select v_submission_id, v_snapshot_id, v_revision, v_submitted_at;
 end;
 $$;
+
+
+-- P2-6 final submission lifecycle. These functions intentionally touch only
+-- actual EntryParticipant registrations; application-only registrations are
+-- never frozen or released by record apply/revert.
+
+create or replace function ypl_schema_validation.freeze_event_final_submissions(
+    p_event_id uuid
+)
+returns table (
+    registration_id uuid,
+    previous_final_submission_id uuid,
+    final_submission_id uuid
+)
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    v_event ypl_schema_validation.events%rowtype;
+    v_registration ypl_schema_validation.event_registrations%rowtype;
+    v_final_submission_id uuid;
+    v_now timestamptz := now();
+begin
+    select *
+      into v_event
+      from ypl_schema_validation.events
+     where id = p_event_id
+     for update;
+
+    if not found then
+        raise exception using errcode = 'P0001', message = 'final submission을 고정할 Event를 찾을 수 없습니다.';
+    end if;
+    if v_event.status not in ('open', 'running') or v_event.record_applied_at is not null then
+        raise exception using errcode = 'P0001', message = '현재 final submission을 고정할 수 없는 Event입니다.';
+    end if;
+
+    -- The Event lock also serializes against submit_registration_team_snapshot,
+    -- which locks this same Event before creating a new revision.
+    for v_registration in
+        select registration.*
+          from ypl_schema_validation.event_registrations as registration
+         where registration.event_id = p_event_id
+           and exists (
+               select 1
+                 from ypl_schema_validation.entry_participants as participant
+                where participant.event_id = p_event_id
+                  and participant.registration_id = registration.id
+           )
+         order by registration.id
+         for update
+    loop
+        select submission.id
+          into v_final_submission_id
+          from ypl_schema_validation.registration_submissions as submission
+         where submission.registration_id = v_registration.id
+         order by submission.revision desc
+         limit 1;
+
+        registration_id := v_registration.id;
+        previous_final_submission_id := v_registration.final_submission_id;
+        final_submission_id := v_final_submission_id;
+
+        update ypl_schema_validation.event_registrations
+           set final_submission_id = v_final_submission_id,
+               updated_at = v_now
+         where id = v_registration.id;
+
+        return next;
+    end loop;
+end;
+$$;
+
+
+create or replace function ypl_schema_validation.restore_event_final_submissions(
+    p_event_id uuid,
+    p_snapshot jsonb
+)
+returns void
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    v_event ypl_schema_validation.events%rowtype;
+    v_target_ids uuid[];
+    v_snapshot_ids uuid[];
+begin
+    if jsonb_typeof(coalesce(p_snapshot, '[]'::jsonb)) <> 'array' then
+        raise exception using errcode = 'P0001', message = 'final submission 보상 snapshot 형식이 올바르지 않습니다.';
+    end if;
+
+    select *
+      into v_event
+      from ypl_schema_validation.events
+     where id = p_event_id
+     for update;
+
+    if not found then
+        raise exception using errcode = 'P0001', message = 'final submission을 복구할 Event를 찾을 수 없습니다.';
+    end if;
+    if v_event.status = 'completed'
+       or v_event.record_applied_at is not null
+       or v_event.team_revealed_at is not null then
+        raise exception using errcode = 'P0001', message = '최종 기록 반영이 완료된 Event의 final submission은 복구할 수 없습니다.';
+    end if;
+
+    select coalesce(array_agg(participant.registration_id order by participant.registration_id), '{}'::uuid[])
+      into v_target_ids
+      from ypl_schema_validation.entry_participants as participant
+     where participant.event_id = p_event_id;
+    select coalesce(array_agg(snapshot.registration_id order by snapshot.registration_id), '{}'::uuid[])
+      into v_snapshot_ids
+      from jsonb_to_recordset(p_snapshot) as snapshot(
+          registration_id uuid,
+          previous_final_submission_id uuid,
+          final_submission_id uuid
+      );
+
+    if v_target_ids is distinct from v_snapshot_ids then
+        raise exception using errcode = 'P0001', message = 'final submission 보상 대상이 현재 실제 참가자와 일치하지 않습니다.';
+    end if;
+
+    perform 1
+      from ypl_schema_validation.event_registrations as registration
+     where registration.event_id = p_event_id
+       and registration.id = any(v_target_ids)
+     for update;
+
+    if exists (
+        select 1
+          from jsonb_to_recordset(p_snapshot) as snapshot(
+              registration_id uuid,
+              previous_final_submission_id uuid,
+              final_submission_id uuid
+          )
+          join ypl_schema_validation.event_registrations as registration
+            on registration.id = snapshot.registration_id
+         where registration.event_id = p_event_id
+           and registration.final_submission_id is distinct from snapshot.final_submission_id
+    ) then
+        raise exception using errcode = 'P0001', message = 'final submission 보상 대상이 변경되어 자동 복구를 중단했습니다.';
+    end if;
+
+    update ypl_schema_validation.event_registrations as registration
+       set final_submission_id = snapshot.previous_final_submission_id,
+           updated_at = now()
+      from jsonb_to_recordset(p_snapshot) as snapshot(
+          registration_id uuid,
+          previous_final_submission_id uuid,
+          final_submission_id uuid
+      )
+     where registration.id = snapshot.registration_id
+       and registration.event_id = p_event_id;
+end;
+$$;
+
+
+create or replace function ypl_schema_validation.release_event_final_submissions(
+    p_event_id uuid
+)
+returns table (
+    id uuid,
+    status text,
+    record_applied_at timestamptz,
+    team_revealed_at timestamptz
+)
+language plpgsql
+security invoker
+set search_path = ''
+as $$
+declare
+    v_event ypl_schema_validation.events%rowtype;
+    v_now timestamptz := now();
+begin
+    select *
+      into v_event
+      from ypl_schema_validation.events as event
+     where event.id = p_event_id
+     for update;
+
+    if not found then
+        raise exception using errcode = 'P0001', message = 'final submission을 해제할 Event를 찾을 수 없습니다.';
+    end if;
+    if v_event.status <> 'completed' or v_event.record_applied_at is null then
+        raise exception using errcode = 'P0001', message = '기록 반영이 완료된 Event만 final submission을 해제할 수 있습니다.';
+    end if;
+
+    update ypl_schema_validation.event_registrations as registration
+       set final_submission_id = null,
+           updated_at = v_now
+     where registration.event_id = p_event_id
+       and exists (
+           select 1
+             from ypl_schema_validation.entry_participants as participant
+            where participant.event_id = p_event_id
+              and participant.registration_id = registration.id
+       );
+
+    update ypl_schema_validation.events as event
+       set status = 'running',
+           record_applied_at = null,
+           team_revealed_at = null,
+           updated_at = v_now
+     where event.id = p_event_id;
+
+    return query
+    select v_event.id, 'running'::text, null::timestamptz, null::timestamptz;
+end;
+$$;

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Dropdown, Modal, Reveal } from "../components/index.js";
 import { revertBracketRecord } from "../services/recordSync.js";
-import { completeApplicationEvent, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, listEventRegistrationSubmissionStatuses, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
+import { completeApplicationEvent, compensateFinalSubmissionReleaseFailure, confirmEventParticipantsForBracket, confirmEventTeamsForBracket, deleteEventBracketMatches, deleteEventBracketRankingAwards, deleteEventBracketResults, freezeEventFinalSubmissions, getEvent, getEventRecordContext, getIndividualPlacementPointPolicy, getTeamPlacementPointPolicy, inspectEventParticipantIdentities, isFinalSubmissionRestoreAllowed, isRecordApplyCompletionConfirmed, listEventRegistrationSubmissionStatuses, listSubmissionEvents, listEventRegistrations, markApplicationEventRunning, preflightEventBracketDeletion, resolveEventParticipantsForRecord, restoreApplicationEventStatus, restoreEventBracketMatches, restoreEventBracketRankingAwards, restoreEventBracketResults, restoreEventFinalSubmissions, restoreEventParticipantConfirmation, revertEventRecordApplication, rollbackEventParticipantConfirmation, syncEventBracketMatches, syncEventBracketRankingAwards, syncEventBracketResults, validateEventParticipantEntries, validateEventTeamEntries } from "../services/index.js";
 import { buildDefaultTeamMatchLineups, buildTeamMatchSeries, getTeamMatchLineupOptions, getTeamRegistrationAnswerEntries } from "../services/bracketTeamParticipants.js";
 import { executeBracketDeletionLifecycle, preserveBracketLifecycleMetadata, validateBracketParticipantConfirmation } from "../services/bracketLifecycle.js";
 import { buildBracketSubmissionStatusModel } from "../services/teamBuilderCore.js";
@@ -981,6 +981,7 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=
     if(!b.applied)return;
     if(!confirm("이 대진표의 기록 반영을 취소할까요? 회차·랭킹·시즌 성적과 연결된 Event 기록 상태가 함께 원복됩니다."))return;
 
+    const appliedDataSnapshot=data;
     const reverted=revertBracketRecord(data,b.id);
     if(!reverted.changed){
       alert(reverted.reason||"자동 원복할 수 없는 기록입니다.");
@@ -1053,7 +1054,24 @@ function BracketBoard({ b, data, admin, save, flash, refresh, onApply, deleting=
           b.applied?.recordMeta?.identityChanges||[]
         );
       }catch(error){
-        flash(`legacy 기록은 원복됐지만 Event/Player 원복에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+        let compensationError=null;
+        try{
+          await compensateFinalSubmissionReleaseFailure({
+            restoreLegacy: async()=>save(appliedDataSnapshot),
+            restoreResults: previousResultRows===null
+              ? null
+              : ()=>restoreEventBracketResults(b.eventId,previousResultRows),
+            restoreAwards: previousAwardRows===null
+              ? null
+              : ()=>restoreEventBracketRankingAwards(b.eventId,previousAwardRows),
+          });
+        }catch(restoreError){
+          compensationError=restoreError;
+        }
+        await refresh?.();
+        flash(compensationError
+          ? `Event/Player 원복 실패 후 applied 상태 보상에도 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${compensationError?.message||"알 수 없는 오류"}`
+          : `Event/Player 원복 실패로 legacy, Result, RankingAward applied 상태를 복구했습니다: ${error?.message||"알 수 없는 오류"}`);
         return;
       }
     }
@@ -1247,6 +1265,7 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
     let identityChanges=[];
     let previousResultRows=null;
     let previousAwardRows=null;
+    let finalSubmissionFreeze=null;
 
     if(b.eventId){
       try{
@@ -1374,6 +1393,33 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
           }))
         };
 
+        if(usesConfirmedEntries){
+          try{
+            const frozen=await freezeEventFinalSubmissions(b.eventId);
+            finalSubmissionFreeze=frozen.snapshot;
+          }catch(error){
+            let awardRestoreError=null;
+            let resultRestoreError=null;
+            if(previousAwardRows!==null){
+              try{ await restoreEventBracketRankingAwards(b.eventId,previousAwardRows); }
+              catch(restoreError){ awardRestoreError=restoreError; }
+            }
+            if(previousResultRows!==null){
+              try{ await restoreEventBracketResults(b.eventId,previousResultRows); }
+              catch(restoreError){ resultRestoreError=restoreError; }
+            }
+            await refresh?.();
+            const restores=[
+              awardRestoreError&&`RankingAward: ${awardRestoreError.message||"알 수 없는 오류"}`,
+              resultRestoreError&&`Result: ${resultRestoreError.message||"알 수 없는 오류"}`,
+            ].filter(Boolean).join(" / ");
+            flash(restores
+              ? `final submission 고정 실패와 normalized 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${restores}`
+              : `final submission 고정 실패로 기록 반영을 중단했습니다: ${error?.message||"알 수 없는 오류"}`);
+            return;
+          }
+        }
+
       }catch(error){
         flash(`기록 반영 사전 검증 실패: ${error?.message||"알 수 없는 오류"}`);
         return;
@@ -1382,6 +1428,12 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
 
     const saved=await save(nextData);
     if(!saved){
+      let finalSubmissionRestoreError=null;
+      if(b.eventId&&finalSubmissionFreeze!==null){
+        try{ await restoreEventFinalSubmissions(b.eventId,finalSubmissionFreeze); }
+        catch(error){ finalSubmissionRestoreError=error; }
+      }
+
       let awardRestoreError=null;
       if(b.eventId&&previousAwardRows!==null){
         try{ await restoreEventBracketRankingAwards(b.eventId,previousAwardRows); }
@@ -1404,8 +1456,9 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
       }
 
       await refresh?.();
-      if(awardRestoreError||resultRestoreError||identityRestoreError){
+      if(finalSubmissionRestoreError||awardRestoreError||resultRestoreError||identityRestoreError){
         const failures=[
+          finalSubmissionRestoreError&&`FinalSubmission: ${finalSubmissionRestoreError.message||"알 수 없는 오류"}`,
           awardRestoreError&&`RankingAward: ${awardRestoreError.message||"알 수 없는 오류"}`,
           resultRestoreError&&`Result: ${resultRestoreError.message||"알 수 없는 오류"}`,
           identityRestoreError&&`Player/Registration: ${identityRestoreError.message||"알 수 없는 오류"}`,
@@ -1413,17 +1466,40 @@ function BracketApply({ b, res, data, onClose, save, flash, refresh }){
         flash(`legacy 저장 실패 후 자동 원복에도 실패했습니다: ${failures}`);
         return;
       }
-      flash(previousResultRows===null&&previousAwardRows===null
+      flash(previousResultRows===null&&previousAwardRows===null&&finalSubmissionFreeze===null
         ? "legacy 기록 저장에 실패해 Player/Registration 변경도 원복했습니다."
-        : "legacy 기록 저장 실패로 RankingAward와 Result를 이전 snapshot으로 복구했습니다.");
+        : "legacy 기록 저장 실패로 final submission, RankingAward와 Result를 이전 snapshot으로 복구했습니다.");
       return;
     }
 
     if(b.eventId){
       try{
-        await completeApplicationEvent(b.eventId);
+        await completeApplicationEvent(b.eventId,{revealFinalTeams:finalSubmissionFreeze!==null});
       }catch(error){
-        flash(`legacy 기록은 저장됐지만 Event 완료 처리에 실패했습니다: ${error?.message||"알 수 없는 오류"}`);
+        let currentEvent=null;
+        let stateReadError=null;
+        try{ currentEvent=await getEvent(b.eventId); }
+        catch(readError){ stateReadError=readError; }
+
+        if(isRecordApplyCompletionConfirmed(currentEvent,{requireTeamReveal:finalSubmissionFreeze!==null})){
+          flash("Event 완료 응답은 실패했지만 재조회 결과 기록 반영이 완료되었습니다.");
+          onClose();
+          return;
+        }
+
+        if(finalSubmissionFreeze!==null&&isFinalSubmissionRestoreAllowed(currentEvent)){
+          try{
+            await restoreEventFinalSubmissions(b.eventId,finalSubmissionFreeze);
+            flash(`legacy 기록은 저장됐지만 Event 완료에 실패해 final submission을 복구했습니다: ${error?.message||"알 수 없는 오류"}`);
+          }catch(restoreError){
+            flash(`legacy 기록은 저장됐지만 Event 완료와 final submission 복구에 실패했습니다: ${error?.message||"알 수 없는 오류"} / ${restoreError?.message||"알 수 없는 오류"}`);
+          }
+          return;
+        }
+
+        flash(stateReadError
+          ? `legacy 기록은 저장됐지만 Event 완료 상태를 재조회할 수 없어 자동 복구를 중단했습니다: ${error?.message||"알 수 없는 오류"} / ${stateReadError?.message||"알 수 없는 오류"}`
+          : `legacy 기록은 저장됐지만 Event 완료 상태가 불명확해 자동 복구를 중단했습니다: ${error?.message||"알 수 없는 오류"}`);
         return;
       }
     }

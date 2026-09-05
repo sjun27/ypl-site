@@ -48,7 +48,7 @@ export async function fetchNormalizedRecordsSnapshot() {
           battle_format, competition_format, competition_settings,
           is_team_event, regulation_id, cup_rule_id, held_on,
           date_precision, record_completeness, status, record_applied_at,
-          championship_phase
+          team_revealed_at, championship_phase
         `)
         .eq("status", "completed")
         .not("record_applied_at", "is", null),

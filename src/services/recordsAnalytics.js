@@ -828,9 +828,14 @@ export function buildPokemonStats(rosters, champions) {
   const totalEntries = rosters.length;
 
   for (const roster of rosters) {
-    for (const pokemon of new Set(roster.pokemon || [])) {
-      const cur = map.get(pokemon) || {
-        name: pokemon,
+    const members = [...new Map((roster.pokemon || []).map((name, index) => {
+      const displayName = cleanName(name);
+      const pokemonId = cleanName(roster.pokemonIds?.[index]);
+      return [pokemonId || displayName, { key: pokemonId || displayName, name: displayName }];
+    }).filter(([identity, pokemon]) => identity && pokemon.name)).values()];
+    for (const pokemon of members) {
+      const cur = map.get(pokemon.key) || {
+        name: pokemon.name,
         entries: 0,
         trainers: new Map(),
         wins: 0,
@@ -847,12 +852,14 @@ export function buildPokemonStats(rosters, champions) {
       if (roster.placement === "sf") cur.top4 += 1;
       if (roster.season) cur.seasons.set(roster.season, (cur.seasons.get(roster.season) || 0) + 1);
 
-      for (const partner of new Set(roster.pokemon || [])) {
-        if (partner === pokemon) continue;
-        cur.partners.set(partner, (cur.partners.get(partner) || 0) + 1);
+      for (const partner of members) {
+        if (partner.key === pokemon.key) continue;
+        const partnerEntry = cur.partners.get(partner.key) || { name: partner.name, entries: 0 };
+        partnerEntry.entries += 1;
+        cur.partners.set(partner.key, partnerEntry);
       }
 
-      map.set(pokemon, cur);
+      map.set(pokemon.key, cur);
     }
   }
 
@@ -881,7 +888,7 @@ export function buildPokemonStats(rosters, champions) {
       runnerUps: item.runnerUps,
       top4: item.top4,
       partners: [...item.partners.entries()]
-        .map(([name, entries]) => ({ name, entries }))
+        .map(([, partner]) => partner)
         .sort((a, b) => b.entries - a.entries || a.name.localeCompare(b.name, "ko")),
       seasons: [...item.seasons.entries()]
         .map(([name, entries]) => ({ name, entries }))

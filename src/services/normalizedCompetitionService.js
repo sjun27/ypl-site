@@ -23,6 +23,7 @@ import {
 import { isInterruptedBracketCleanupState, validateBracketParticipantConfirmation } from "./bracketLifecycle.js";
 import { buildSubmissionStatusRows, selectSubmissionRegistration } from "./teamBuilderCore.js";
 import { buildTeamSnapshotSubmission } from "./teamSubmission.js";
+import { normalizeFinalSubmissionFreezeSnapshot } from "./finalSubmissionLifecycle.js";
 
 const DATA_SCHEMA = import.meta.env.VITE_YPL_DATA_SCHEMA || "public";
 
@@ -948,6 +949,8 @@ export async function getEvent(eventId) {
       season_id,
       status,
       submission_target_at,
+      team_reveal_mode,
+      team_revealed_at,
       record_applied_at
     `)
     .eq("id", eventId)
@@ -1358,24 +1361,65 @@ export async function cancelApplicationEvent(eventId) {
   return data;
 }
 
-export async function completeApplicationEvent(eventId) {
+export async function freezeEventFinalSubmissions(eventId) {
+  if (!eventId) return { snapshot: [] };
+
+  const { data, error } = await db().rpc("freeze_event_final_submissions", {
+    p_event_id: eventId,
+  });
+  if (error) fail(error, "참가자의 final submission을 고정하지 못했습니다.");
+  return { snapshot: normalizeFinalSubmissionFreezeSnapshot(data || []) };
+}
+
+export async function restoreEventFinalSubmissions(eventId, snapshot = []) {
+  if (!eventId) return null;
+  const normalizedSnapshot = normalizeFinalSubmissionFreezeSnapshot(snapshot);
+  const { error } = await db().rpc("restore_event_final_submissions", {
+    p_event_id: eventId,
+    p_snapshot: normalizedSnapshot.map((row) => ({
+      registration_id: row.registrationId,
+      previous_final_submission_id: row.previousFinalSubmissionId,
+      final_submission_id: row.finalSubmissionId,
+    })),
+  });
+  if (error) fail(error, "final submission을 이전 상태로 복구하지 못했습니다.");
+  return null;
+}
+
+export async function releaseEventFinalSubmissions(eventId) {
+  if (!eventId) return null;
+  const { data, error } = await db().rpc("release_event_final_submissions", {
+    p_event_id: eventId,
+  });
+  if (error) fail(error, "final submission과 Event 기록 상태를 원복하지 못했습니다.");
+  return Array.isArray(data) ? data[0] || null : data || null;
+}
+
+export async function completeApplicationEvent(eventId, { revealFinalTeams = false } = {}) {
   if (!eventId) return null;
 
   const now = new Date().toISOString();
-  const { data, error } = await db()
+  const completion = {
+    status: "completed",
+    record_applied_at: now,
+    updated_at: now,
+  };
+  if (revealFinalTeams) completion.team_revealed_at = now;
+
+  let query = db()
     .from("events")
-    .update({
-      status: "completed",
-      record_applied_at: now,
-      updated_at: now,
-    })
+    .update(completion)
     .eq("id", eventId)
-    .is("record_applied_at", null)
-    .select("id, status, record_applied_at")
+    .is("record_applied_at", null);
+  if (revealFinalTeams) query = query.eq("team_reveal_mode", "on_record_apply");
+  const { data, error } = await query
+    .select("id, status, record_applied_at, team_revealed_at")
     .maybeSingle();
 
   if (error) fail(error, "대회 기록 반영 상태를 저장하지 못했습니다.");
-  if (!data) throw new Error("대회가 이미 완료되었거나 기록 반영 상태를 변경할 수 없습니다.");
+  if (!data) throw new Error(revealFinalTeams
+    ? "대회가 이미 완료되었거나 on_record_apply 공개 상태를 확인할 수 없습니다."
+    : "대회가 이미 완료되었거나 기록 반영 상태를 변경할 수 없습니다.");
   return data;
 }
 
@@ -2471,20 +2515,6 @@ export async function revertEventRecordApplication(eventId, identityChanges = []
 
   // 기록 반영 취소는 참가 확정을 취소하지 않는다. 전환 이전 bracket의
   // recordMeta에만 남은 identityChanges가 있을 때에만 위 rollback이 동작한다.
-  const now = new Date().toISOString();
-  const { data, error } = await db()
-    .from("events")
-    .update({
-      status: "running",
-      record_applied_at: null,
-      updated_at: now,
-    })
-    .eq("id", eventId)
-    .select("id, status, record_applied_at")
-    .maybeSingle();
-
-  if (error) fail(error, "Event의 기록 반영 상태를 원복하지 못했습니다.");
-  if (!data) throw new Error("원복할 Event를 찾을 수 없습니다.");
-
-  return data;
+  // final submission 해제와 Event 상태 원복은 하나의 Event lock transaction으로 처리한다.
+  return releaseEventFinalSubmissions(eventId);
 }

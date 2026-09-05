@@ -6,6 +6,8 @@ import {
   isOfficialNormalizedRecordsEvent,
 } from "../src/services/normalizedRecordsProjection.js";
 import { buildRecordsSnapshot, displayRecordMeta, displayTeamName } from "../src/services/recordsAnalytics.js";
+import { resolveRecordsPokemonName } from "../src/services/recordsPokemon.js";
+import { buildIndividualPartyPreviewRows } from "../src/services/recordsPresentation.js";
 
 const EVENT_ID = "event-official";
 const SEASON_ID = "season-3";
@@ -344,19 +346,189 @@ test("same display_name Players remain separate profiles and legacy name history
   assert.equal(snapshot.profiles["legacy:Alpha"].playerId, null);
 });
 
-test("Pokémon uses linked legacy party only until a final normalized TeamSnapshot exists", () => {
+test("historical Event keeps legacy fallback until the P2-6 final party system is revealed", () => {
   const withoutSnapshot = buildNormalizedRecordsProjection(legacyData(), rawData());
   assert.ok(withoutSnapshot.rosters.some((row) => row.bracketId === "linked-bracket" && row.pokemon.includes("피카츄")));
 
   const raw = rawData();
+  raw.events[0].team_revealed_at = "2026-09-05T01:00:00Z";
   raw.eventRegistrations[0].final_submission_id = "submission-a";
   raw.registrationSubmissions = [{ id: "submission-a", registration_id: "reg-a", snapshot_id: "snapshot-a" }];
   raw.teamSnapshots = [{ id: "snapshot-a", schema_version: 1 }];
-  raw.teamSnapshotMembers = [{ id: "member-a", snapshot_id: "snapshot-a", slot: 1, pokemon_name_snapshot: "이브이" }];
+  raw.teamSnapshotMembers = [{ id: "member-a", snapshot_id: "snapshot-a", slot: 1, pokemon_id: "eevee", pokemon_name_snapshot: "이브이" }];
   const withSnapshot = buildNormalizedRecordsProjection(legacyData(), raw);
 
   assert.equal(withSnapshot.rosters.some((row) => row.bracketId === "linked-bracket"), false);
   assert.ok(withSnapshot.rosters.some((row) => row.snapshotId === "snapshot-a" && row.pokemon.includes("이브이")));
+  assert.deepEqual(withSnapshot.rosters.find((row) => row.snapshotId === "snapshot-a").pokemonIds, ["eevee"]);
+});
+
+test("revealed P2-6 Event excludes partial legacy parties and uses only the frozen revision", () => {
+  const raw = rawData();
+  raw.events[0].team_revealed_at = "2026-09-05T01:00:00Z";
+  raw.eventRegistrations[0].final_submission_id = "submission-a-2";
+  raw.registrationSubmissions = [
+    { id: "submission-a-1", registration_id: "reg-a", snapshot_id: "snapshot-a-1", revision: 1 },
+    { id: "submission-a-2", registration_id: "reg-a", snapshot_id: "snapshot-a-2", revision: 2 },
+  ];
+  raw.teamSnapshots = [
+    { id: "snapshot-a-1", schema_version: 1 },
+    { id: "snapshot-a-2", schema_version: 1 },
+  ];
+  raw.teamSnapshotMembers = [
+    { id: "member-a-1", snapshot_id: "snapshot-a-1", slot: 1, pokemon_id: "pikachu", pokemon_name_snapshot: "피카츄" },
+    { id: "member-a-2", snapshot_id: "snapshot-a-2", slot: 1, pokemon_id: "charizard", pokemon_name_snapshot: "리자몽" },
+  ];
+
+  const snapshot = buildNormalizedRecordsProjection(legacyData(), raw);
+  assert.equal(snapshot.rosters.some((row) => row.bracketId === "linked-bracket"), false);
+  assert.equal(snapshot.rosters.length, 1);
+  assert.deepEqual(snapshot.rosters[0].pokemon, ["리자몽"]);
+  assert.deepEqual(snapshot.rosters[0].pokemonIds, ["charizard"]);
+  assert.equal(snapshot.pokemon.some((row) => row.name === "피카츄"), false);
+  assert.equal(snapshot.pokemon.find((row) => row.name === "리자몽").entries, 1);
+
+  const archive = snapshot.archives.find((row) => row.id === EVENT_ID);
+  assert.equal(archive.rosters.length, 1);
+  assert.equal(archive.partyPreviews.win[0].snapshotId, "snapshot-a-2");
+  assert.equal(archive.partyPreviews.ru[0], null);
+});
+
+test("individual archive accordion includes every actual participant and labels missing final parties", () => {
+  const raw = rawData();
+  raw.events[0].team_revealed_at = "2026-09-05T01:00:00Z";
+  raw.eventRegistrations[0].final_submission_id = "submission-a-2";
+  raw.eventRegistrations[1].final_submission_id = "submission-b";
+  raw.eventRegistrations.push(
+    { id: "reg-c", event_id: EVENT_ID, player_id: "player-c", final_submission_id: "submission-c" },
+    { id: "reg-d", event_id: EVENT_ID, player_id: "player-d", final_submission_id: "submission-d" },
+    { id: "reg-e", event_id: EVENT_ID, player_id: "player-e", final_submission_id: null },
+    { id: "reg-f", event_id: EVENT_ID, player_id: "player-f", final_submission_id: null },
+    { id: "reg-application-only", event_id: EVENT_ID, player_id: "player-application-only", final_submission_id: "submission-ignored" },
+  );
+  raw.players.push(
+    { id: "player-c", display_name: "Gamma" },
+    { id: "player-d", display_name: "Delta" },
+    { id: "player-e", display_name: "Epsilon" },
+    { id: "player-f", display_name: "Zeta" },
+    { id: "player-application-only", display_name: "Application Only" },
+  );
+  for (const [entryId, registrationId, playerId] of [
+    ["entry-c", "reg-c", "player-c"],
+    ["entry-d", "reg-d", "player-d"],
+    ["entry-e", "reg-e", "player-e"],
+    ["entry-f", "reg-f", "player-f"],
+  ]) {
+    raw.entries.push({ id: entryId, event_id: EVENT_ID, entry_type: "individual", status: "active" });
+    raw.entryParticipants.push({ id: `ep-${entryId}`, event_id: EVENT_ID, entry_id: entryId, registration_id: registrationId, player_id: playerId });
+  }
+  raw.results.push(
+    { id: "result-c", event_id: EVENT_ID, entry_id: "entry-c", placement_code: "semifinalist", placement_label: "4강", rank_min: 3 },
+    { id: "result-d", event_id: EVENT_ID, entry_id: "entry-d", placement_code: "semifinalist", placement_label: "4강", rank_min: 3 },
+  );
+  raw.registrationSubmissions = [
+    { id: "submission-a-1", registration_id: "reg-a", snapshot_id: "snapshot-a-1", revision: 1 },
+    { id: "submission-a-2", registration_id: "reg-a", snapshot_id: "snapshot-a-2", revision: 2 },
+    { id: "submission-b", registration_id: "reg-b", snapshot_id: "snapshot-b", revision: 1 },
+    { id: "submission-c", registration_id: "reg-c", snapshot_id: "snapshot-c", revision: 1 },
+    { id: "submission-d", registration_id: "reg-d", snapshot_id: "snapshot-d", revision: 1 },
+  ];
+  raw.teamSnapshots = [
+    { id: "snapshot-a-1", schema_version: 1 },
+    { id: "snapshot-a-2", schema_version: 1 },
+    { id: "snapshot-b", schema_version: 1 },
+    { id: "snapshot-c", schema_version: 1 },
+    { id: "snapshot-d", schema_version: 1 },
+  ];
+  raw.teamSnapshotMembers = [
+    { id: "member-a-1", snapshot_id: "snapshot-a-1", slot: 1, pokemon_id: "pikachu", pokemon_name_snapshot: "Pikachu" },
+    { id: "member-a-2", snapshot_id: "snapshot-a-2", slot: 1, pokemon_id: "charizard", pokemon_name_snapshot: "Charizard" },
+    { id: "member-b", snapshot_id: "snapshot-b", slot: 1, pokemon_id: "eevee", pokemon_name_snapshot: "Eevee" },
+    { id: "member-c", snapshot_id: "snapshot-c", slot: 1, pokemon_id: "gengar", pokemon_name_snapshot: "Gengar" },
+    { id: "member-d", snapshot_id: "snapshot-d", slot: 1, pokemon_id: "dragonite", pokemon_name_snapshot: "Dragonite" },
+  ];
+
+  const snapshot = buildNormalizedRecordsProjection(legacyData(), raw);
+  const archive = snapshot.archives.find((row) => row.id === EVENT_ID);
+  const rows = buildIndividualPartyPreviewRows(archive);
+
+  assert.deepEqual(
+    rows.map((row) => [row.label, row.name, row.roster?.snapshotId || null]),
+    [
+      ["우승", "Alpha", "snapshot-a-2"],
+      ["준우승", "Beta", "snapshot-b"],
+      ["4강", "Gamma", "snapshot-c"],
+      ["4강", "Delta", "snapshot-d"],
+      ["참가", "Epsilon", null],
+      ["참가", "Zeta", null],
+    ]
+  );
+  assert.equal(rows.some((row) => row.name === "Application Only"), false);
+  assert.equal(snapshot.rosters.length, 4);
+  assert.equal(snapshot.rosters.some((row) => row.snapshotId === "snapshot-a-1"), false);
+  assert.equal(snapshot.rosters.some((row) => row.bracketId === "linked-bracket"), false);
+});
+
+test("final Snapshot Pokémon display resolves Korean names by pokemon_id and aggregates by identity", () => {
+  const raw = rawData();
+  raw.events[0].team_revealed_at = "2026-09-05T01:00:00Z";
+  raw.eventRegistrations[0].final_submission_id = "submission-a";
+  raw.eventRegistrations.push({ id: "reg-c", event_id: EVENT_ID, player_id: "player-c", final_submission_id: "submission-c" });
+  raw.players.push({ id: "player-c", display_name: "Gamma" });
+  raw.entries.push({ id: "entry-c", event_id: EVENT_ID, entry_type: "individual", status: "active" });
+  raw.entryParticipants.push({ id: "ep-c", event_id: EVENT_ID, entry_id: "entry-c", registration_id: "reg-c", player_id: "player-c" });
+  raw.results.push({ id: "result-c", event_id: EVENT_ID, entry_id: "entry-c", placement_code: "semifinalist", placement_label: "4강", rank_min: 3 });
+  raw.registrationSubmissions = [
+    { id: "submission-a", registration_id: "reg-a", snapshot_id: "snapshot-a", revision: 1 },
+    { id: "submission-c", registration_id: "reg-c", snapshot_id: "snapshot-c", revision: 1 },
+  ];
+  raw.teamSnapshots = [
+    { id: "snapshot-a", schema_version: 1 },
+    { id: "snapshot-c", schema_version: 1 },
+  ];
+  raw.teamSnapshotMembers = [
+    { id: "member-a", snapshot_id: "snapshot-a", slot: 1, pokemon_id: "pikachu", pokemon_name_snapshot: "Pikachu" },
+    { id: "member-c", snapshot_id: "snapshot-c", slot: 1, pokemon_id: "pikachu", pokemon_name_snapshot: "피카츄" },
+  ];
+
+  const directory = new Map([
+    ["pikachu", { canonicalName: "Pikachu", displayName: "피카츄" }],
+  ]);
+  const snapshot = buildNormalizedRecordsProjection(legacyData(), raw, directory);
+
+  assert.equal(snapshot.rosters.length, 2);
+  assert.deepEqual(snapshot.rosters.map((row) => row.pokemon), [["피카츄"], ["피카츄"]]);
+  assert.deepEqual(snapshot.rosters.map((row) => row.pokemonIds), [["pikachu"], ["pikachu"]]);
+  assert.equal(snapshot.pokemon.length, 1);
+  assert.equal(snapshot.pokemon[0].name, "피카츄");
+  assert.equal(snapshot.pokemon[0].entries, 2);
+});
+
+test("Records Pokémon canonical resolve failure falls back to snapshot name", () => {
+  const directory = new Map([
+    ["pikachu", { canonicalName: "Pikachu", displayName: "피카츄" }],
+  ]);
+  assert.equal(resolveRecordsPokemonName("missing-id", "Snapshot English", directory), "Snapshot English");
+  assert.equal(resolveRecordsPokemonName("pikachu", "Snapshot English", directory), "피카츄");
+});
+
+test("individual tournament party preview rows map final previews by placement and exclude team rows", () => {
+  const round = {
+    team: false,
+    win: "Test6",
+    ru: ["Test1"],
+    sf: ["Test3", "Test4"],
+    partyPreviews: {
+      win: [{ snapshotId: "snapshot-6", pokemon: ["피카츄"] }],
+      ru: [{ snapshotId: "snapshot-1", pokemon: ["리자몽"] }],
+      sf: [{ snapshotId: "snapshot-3", pokemon: ["팬텀"] }, { snapshotId: "snapshot-4", pokemon: ["망나뇽"] }],
+    },
+  };
+  assert.deepEqual(
+    buildIndividualPartyPreviewRows(round).map((row) => [row.label, row.name, row.roster?.snapshotId]),
+    [["우승", "Test6", "snapshot-6"], ["준우승", "Test1", "snapshot-1"], ["4강", "Test3", "snapshot-3"], ["4강", "Test4", "snapshot-4"]]
+  );
+  assert.deepEqual(buildIndividualPartyPreviewRows({ ...round, team: true }), []);
 });
 
 test("normalized team Results expand to member history and team archive without individual counts", () => {

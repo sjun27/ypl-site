@@ -2,6 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Reveal, StandTable } from "../components/index.js";
 import { buildRecordsSnapshot, displayRecordMeta, displayTeamName } from "../services/recordsAnalytics.js";
 import { buildNormalizedRecordsProjection } from "../services/normalizedRecordsProjection.js";
+import { spriteUrl } from "../services/teamBuilderCore.js";
+import { loadRecordsPokemonDirectory } from "../services/recordsPokemon.js";
+import { buildIndividualPartyPreviewRows } from "../services/recordsPresentation.js";
 import {
   fetchNormalizedRecordsSnapshot,
   normalizedRecordsReadEnabled,
@@ -23,6 +26,7 @@ export default function RecordsPage({ data, admin, setModal, save }) {
   const [tab, setTab] = useState("trainer");
   const normalizedEnabled = normalizedRecordsReadEnabled();
   const [normalizedRead, setNormalizedRead] = useState({ loading: normalizedEnabled, data: null, error: null });
+  const [pokemonDirectory, setPokemonDirectory] = useState(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -44,11 +48,22 @@ export default function RecordsPage({ data, admin, setModal, save }) {
     return () => { cancelled = true; };
   }, [normalizedEnabled, reloadKey]);
 
+  useEffect(() => {
+    if (!normalizedEnabled) return undefined;
+    let cancelled = false;
+    loadRecordsPokemonDirectory()
+      .then((directory) => {
+        if (!cancelled) setPokemonDirectory(directory);
+      })
+      .catch((error) => console.warn("Records Pokémon localization unavailable", error));
+    return () => { cancelled = true; };
+  }, [normalizedEnabled]);
+
   const snapshot = useMemo(
     () => normalizedRead.data
-      ? buildNormalizedRecordsProjection(data, normalizedRead.data)
+      ? buildNormalizedRecordsProjection(data, normalizedRead.data, pokemonDirectory)
       : buildRecordsSnapshot(data),
-    [data, normalizedRead.data]
+    [data, normalizedRead.data, pokemonDirectory]
   );
 
   return (
@@ -303,6 +318,23 @@ function NameChips({ list, kind }) {
   return <>{(list || []).map((n, i) => <span key={i} className={"r2-name " + (kind || "")}>{n}</span>)}</>;
 }
 
+function PartySprites({ roster }) {
+  if (!roster?.pokemon?.length) return null;
+  return (
+    <span className="records-party-sprites" aria-label={`${roster.owner}의 공식 파티`}>
+      {roster.pokemon.map((pokemon, index) => (
+        <img
+          key={`${roster.snapshotId || roster.id}:${index}`}
+          src={spriteUrl(roster.pokemonIds?.[index] || pokemon)}
+          alt=""
+          title={pokemon}
+          onError={(event) => { event.currentTarget.style.visibility = "hidden"; }}
+        />
+      ))}
+    </span>
+  );
+}
+
 function TournamentArchiveView({ snapshot, data, admin, setModal }) {
   const legacyTours = data.tournaments || [];
   const archiveKeys = [...new Set((snapshot.archives || []).map((row) => row.tournamentKey).filter(Boolean))];
@@ -328,6 +360,7 @@ function TournamentArchiveView({ snapshot, data, admin, setModal }) {
   const otours = [...tours].sort((a, b) => rank(a) - rank(b));
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
+  const [openRoundKey, setOpenRoundKey] = useState(null);
   const selectedTour = category === "all" ? null : tours.find((x) => x.key === category) || otours[0];
   const split = (value) => String(value || "").split("/").map((x) => x.trim()).filter(Boolean);
 
@@ -373,10 +406,45 @@ function TournamentArchiveView({ snapshot, data, admin, setModal }) {
     const rl = r.round ? (/^\d+$/.test(String(r.round)) ? String(r.round) + "회" : r.round) : "";
     const runnerUps = Array.isArray(r.ru) ? r.ru : split(r.ru);
     const rule = displayRecordMeta(r.rule);
+    const partyRows = buildIndividualPartyPreviewRows(r);
+    const toggleable = r.source === "normalized" && !r.team && partyRows.length > 0;
+    const expanded = openRoundKey === key;
+    const toggle = () => setOpenRoundKey((current) => current === key ? null : key);
+    const individualResults = () => (
+      <div className="r2-res">
+        {[
+          ["win", "우승", partyRows.filter((row) => row.placement === "win")],
+          ["ru", "준우승", partyRows.filter((row) => row.placement === "ru")],
+          ["sf", "4강", partyRows.filter((row) => row.placement === "sf")],
+        ].map(([placement, label, rows]) => rows.length > 0 && (
+          <React.Fragment key={placement}>
+            <span className={"r2-rk" + (placement === "win" ? " gold" : "")}>{label}</span>
+            {rows.map((row) => <span key={`${row.placement}:${row.name}`} className={"r2-name" + (placement === "win" ? " win" : "")}>{row.name}</span>)}
+          </React.Fragment>
+        ))}
+      </div>
+    );
     return (
       <div className={"round2" + (r.championSeries || r.champ ? " champ" : "")} key={key}>
         <div className="r2-date tnum">{r.date}</div>
         <div className="r2-main">
+          {toggleable ? (
+            <button type="button" className="records-round-toggle" aria-expanded={expanded} onClick={toggle}>
+              <div className="records-round-summary">
+                {(showCompetition || r.eventName || rl || rule || r.team || r.championSeries || r.champ || r.season) && <span className="r2-head">
+                  {showCompetition && <span className="r2-rule">{tour.label}</span>}
+                  {r.eventName && <span className="r2-event-name">{r.eventName}</span>}
+                  {rl && <span className="r2-round">{rl}</span>}
+                  {r.season && <span className="r2-season">{r.season}</span>}
+                  {(r.championSeries || r.champ) && <span className="r2-champ">챔피언스 시리즈</span>}
+                  {r.team && <span className="r2-mode">팀전</span>}
+                  {rule && <span className="r2-rule">{rule}</span>}
+                </span>}
+                {individualResults()}
+              </div>
+              <span className="records-round-chevron" aria-hidden="true">{expanded ? "⌃" : "⌄"}</span>
+            </button>
+          ) : <>
           {(showCompetition || r.eventName || rl || rule || r.team || r.championSeries || r.champ || r.season) && <div className="r2-head">
             {showCompetition && <span className="r2-rule">{tour.label}</span>}
             {r.eventName && <span className="r2-event-name">{r.eventName}</span>}
@@ -386,13 +454,20 @@ function TournamentArchiveView({ snapshot, data, admin, setModal }) {
             {r.team && <span className="r2-mode">팀전</span>}
             {rule && <span className="r2-rule">{rule}</span>}
           </div>}
-          <div className="r2-res">
+          {!r.team && individualResults()}
+          {r.team && <div className="r2-res">
             <span className="r2-rk gold">우승</span>
             {r.win && <span className="r2-name win">{r.team ? displayTeamName(r.win) : r.win}</span>}
             {r.winMembers && r.winMembers.length > 0 && <NameChips list={r.winMembers} kind="mem" />}
             {(runnerUps.length > 0 || (r.ruMembers && r.ruMembers.length > 0)) && <>
               <span className="r2-rk">준우승</span>
-              {r.team ? (runnerUps[0] && <span className="r2-name">{displayTeamName(runnerUps[0])}</span>) : <NameChips list={runnerUps} />}
+              {r.team
+                ? (runnerUps[0] && <span className="r2-name">{displayTeamName(runnerUps[0])}</span>)
+                : runnerUps.map((name, index) => (
+                    <React.Fragment key={`${name}:${index}`}>
+                      <span className="r2-name">{name}</span>
+                    </React.Fragment>
+                  ))}
               {r.ruMembers && r.ruMembers.length > 0 && <NameChips list={r.ruMembers} kind="mem" />}
             </>}
             {(r.sf || []).length > 0 && <>
@@ -404,9 +479,28 @@ function TournamentArchiveView({ snapshot, data, admin, setModal }) {
                       {(r.sfMembers || [])[k] && r.sfMembers[k].length > 0 && <NameChips list={r.sfMembers[k]} kind="mem" />}
                     </React.Fragment>
                   ))
-                : <NameChips list={r.sf} />}
+                : r.sf.map((name, index) => (
+                    <React.Fragment key={`${name}:${index}`}>
+                      <span className="r2-name">{name}</span>
+                    </React.Fragment>
+                  ))}
             </>}
-          </div>
+          </div>}</>}
+          {toggleable && expanded && (
+            <div className="records-round-detail">
+              <div className="records-round-party-list">
+                {partyRows.map((row, index) => (
+                  <div className="records-round-party-row" key={`${row.placement}:${row.name}:${index}`}>
+                    <span className={"r2-rk" + (row.placement === "win" ? " gold" : "")}>{row.label}</span>
+                    <span className={"r2-name" + (row.placement === "win" ? " win" : "")}>{row.name}</span>
+                    {row.roster?.pokemon?.length
+                      ? <PartySprites roster={row.roster} />
+                      : <span className="records-party-missing">파티 미제출</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </div>
     );
