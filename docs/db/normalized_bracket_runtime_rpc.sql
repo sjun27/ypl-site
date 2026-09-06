@@ -51,6 +51,9 @@ declare
     v_participant_count integer;
     v_slot_count integer;
     v_bracket_size integer := 1;
+    v_max_round integer := 0;
+    v_round integer;
+    v_round_match_count integer;
     v_match_count integer;
     v_double_bye_count integer;
     v_player_was_created boolean;
@@ -197,6 +200,63 @@ begin
         raise exception using errcode = 'P0001', message = '첫 라운드에 double-BYE match가 있어 draw를 생성할 수 없습니다.';
     end if;
 
+    -- Project the BYE closure before any durable write. A BYE is not a Match,
+    -- but two entries that auto-advance from sibling BYEs form a real Match
+    -- immediately and therefore must be materialized at create time.
+    create temporary table if not exists normalized_single_create_nodes (
+        round_no integer not null,
+        match_no integer not null,
+        entry_a_id uuid,
+        entry_b_id uuid,
+        winner_entry_id uuid,
+        formed boolean not null,
+        primary key (round_no, match_no)
+    ) on commit drop;
+    truncate table normalized_single_create_nodes;
+
+    with slots as (
+        select slot_no, entry_id
+          from jsonb_to_recordset(p_slots) as s(slot_no integer, entry_id uuid)
+    )
+    insert into normalized_single_create_nodes (
+        round_no, match_no, entry_a_id, entry_b_id, winner_entry_id, formed
+    )
+    select 1, m.match_no, a.entry_id, b.entry_id,
+           case
+             when a.entry_id is not null and b.entry_id is null then a.entry_id
+             when a.entry_id is null and b.entry_id is not null then b.entry_id
+             else null
+           end,
+           a.entry_id is not null and b.entry_id is not null
+      from generate_series(1, v_bracket_size / 2) as m(match_no)
+      left join slots a on a.slot_no = (m.match_no * 2) - 1
+      left join slots b on b.slot_no = m.match_no * 2;
+
+    v_round_match_count := v_bracket_size;
+    while v_round_match_count > 1 loop
+        v_max_round := v_max_round + 1;
+        v_round_match_count := v_round_match_count / 2;
+    end loop;
+    for v_round in 2..v_max_round loop
+        v_round_match_count := v_bracket_size / power(2, v_round)::integer;
+        insert into normalized_single_create_nodes (
+            round_no, match_no, entry_a_id, entry_b_id, winner_entry_id, formed
+        )
+        select v_round, m.match_no,
+               left_child.winner_entry_id,
+               right_child.winner_entry_id,
+               null,
+               left_child.winner_entry_id is not null
+                 and right_child.winner_entry_id is not null
+          from generate_series(1, v_round_match_count) as m(match_no)
+          join normalized_single_create_nodes left_child
+            on left_child.round_no = v_round - 1
+           and left_child.match_no = (m.match_no * 2) - 1
+          join normalized_single_create_nodes right_child
+            on right_child.round_no = v_round - 1
+           and right_child.match_no = m.match_no * 2;
+    end loop;
+
     -- Runtime identity is checked by both supplied id and Event. A different
     -- runtime for the same Event, or an id reused for another Event, fails.
     -- Event locking serializes all runtime mutations. Use an advisory
@@ -311,16 +371,12 @@ begin
 
         if exists (
             with expected_matches as (
-                with slots as (
-                    select slot_no, entry_id from jsonb_to_recordset(p_slots) as s(slot_no integer, entry_id uuid)
-                )
-                select 'single:r1:m' || m.match_no::text AS source_node_key,
-                       'bracket'::text AS match_kind, 1::smallint AS round_number,
-                       m.match_no AS sequence_no, a.entry_id AS entry_a_id,
-                       b.entry_id AS entry_b_id, 'unknown'::text AS resolution
-                  from generate_series(1, v_bracket_size / 2) as m(match_no)
-                  join slots a on a.slot_no = (m.match_no * 2) - 1
-                  join slots b on b.slot_no = m.match_no * 2
+                select 'single:r' || round_no::text || ':m' || match_no::text AS source_node_key,
+                       'bracket'::text AS match_kind, round_no::smallint AS round_number,
+                       (power(2, round_no - 1)::integer - 1 + match_no) AS sequence_no,
+                       entry_a_id, entry_b_id, 'unknown'::text AS resolution
+                  from normalized_single_create_nodes
+                 where formed
             )
             select source_node_key, match_kind, round_number, sequence_no, entry_a_id, entry_b_id, resolution
               from ypl_schema_validation.matches as m0
@@ -330,16 +386,12 @@ begin
               from expected_matches
         ) or exists (
             with expected_matches as (
-                with slots as (
-                    select slot_no, entry_id from jsonb_to_recordset(p_slots) as s(slot_no integer, entry_id uuid)
-                )
-                select 'single:r1:m' || m.match_no::text AS source_node_key,
-                       'bracket'::text AS match_kind, 1::smallint AS round_number,
-                       m.match_no AS sequence_no, a.entry_id AS entry_a_id,
-                       b.entry_id AS entry_b_id, 'unknown'::text AS resolution
-                  from generate_series(1, v_bracket_size / 2) as m(match_no)
-                  join slots a on a.slot_no = (m.match_no * 2) - 1
-                  join slots b on b.slot_no = m.match_no * 2
+                select 'single:r' || round_no::text || ':m' || match_no::text AS source_node_key,
+                       'bracket'::text AS match_kind, round_no::smallint AS round_number,
+                       (power(2, round_no - 1)::integer - 1 + match_no) AS sequence_no,
+                       entry_a_id, entry_b_id, 'unknown'::text AS resolution
+                  from normalized_single_create_nodes
+                 where formed
             )
             select source_node_key, match_kind, round_number, sequence_no, entry_a_id, entry_b_id, resolution
               from expected_matches
@@ -508,19 +560,17 @@ begin
     select p_runtime_id, p_event_id, 'elimination', 1, 0, s.slot_no, s.entry_id
       from jsonb_to_recordset(p_slots) as s(slot_no integer, entry_id uuid);
 
-    with slots as (
-        select slot_no, entry_id from jsonb_to_recordset(p_slots) as s(slot_no integer, entry_id uuid)
-    )
     insert into ypl_schema_validation.matches (
         event_id, match_kind, round_number, stage_label, sequence_no,
         entry_a_id, entry_b_id, resolution, source, source_node_key
     )
-    select p_event_id, 'bracket', 1, '본선 1R', m.match_no,
-           a.entry_id, b.entry_id, 'unknown', 'normalized_bracket_runtime',
-           'single:r1:m' || m.match_no::text
-      from generate_series(1, v_bracket_size / 2) as m(match_no)
-      join slots a on a.slot_no = (m.match_no * 2) - 1
-      join slots b on b.slot_no = m.match_no * 2;
+    select p_event_id, 'bracket', round_no, '본선 ' || round_no::text || 'R',
+           power(2, round_no - 1)::integer - 1 + match_no,
+           entry_a_id, entry_b_id, 'unknown', 'normalized_bracket_runtime',
+           'single:r' || round_no::text || ':m' || match_no::text
+      from normalized_single_create_nodes
+     where formed
+     order by round_no, match_no;
     get diagnostics v_match_count = row_count;
 
     update ypl_schema_validation.events
@@ -720,10 +770,13 @@ begin
           from ypl_schema_validation.event_registrations r
           join ypl_schema_validation.bracket_identity_changes c
             on c.bracket_runtime_id = p_runtime_id and c.registration_id = r.id
-         where r.final_submission_id is not null
-            or exists (select 1 from ypl_schema_validation.registration_submissions s where s.registration_id = r.id)
+         where c.registration_was_created
+           and (
+             r.final_submission_id is not null
+             or exists (select 1 from ypl_schema_validation.registration_submissions s where s.registration_id = r.id)
+           )
     ) then
-        raise exception using errcode = 'P0001', message = 'Submission/history가 연결된 Registration은 자동 삭제할 수 없습니다.';
+        raise exception using errcode = 'P0001', message = '대진 생성 과정에서 만든 Registration에 Submission/history가 있어 자동 삭제할 수 없습니다.';
     end if;
     if exists (
         select 1

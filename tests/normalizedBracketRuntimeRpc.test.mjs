@@ -48,9 +48,10 @@ test("create contract validates Event, identities, deterministic slots, BYE, and
     /double-BYE/i,
     /bracket_runtimes as br[\s\S]*br\.event_id = p_event_id/i,
     /source_node_key/i,
-    /single:r1:m/i,
+    /'single:r' \|\| round_no::text/i,
     /match_kind, round_number, stage_label, sequence_no/i,
-    /join slots a[\s\S]*join slots b/i,
+    /normalized_single_create_nodes/i,
+    /left_child\.winner_entry_id is not null[\s\S]*right_child\.winner_entry_id is not null/i,
     /set status = 'running'/i,
     /display_name Player가 이미 존재/i,
     /동일 이름의 Event Registration이 이미 존재/i,
@@ -75,7 +76,7 @@ test("create retry is canonical-payload idempotent and fails closed on mismatch"
   assert.match(create, /normalized_bracket_runtime[\s\S]*except/i);
 });
 
-test("create persists ownership and only immediately formed first-round Matches", () => {
+test("create persists ownership and the complete already-formed BYE closure", () => {
   const create = rpcSql.slice(rpcSql.indexOf(createSignature), rpcSql.indexOf("-- DELETE"));
   for (const table of [
     "ypl_schema_validation.players",
@@ -87,9 +88,10 @@ test("create persists ownership and only immediately formed first-round Matches"
     "ypl_schema_validation.bracket_entry_slots",
     "ypl_schema_validation.matches",
   ]) assert.match(create, new RegExp(`insert into ${table.split(".").join("\\.")}`, "i"));
-  assert.match(create, /insert into ypl_schema_validation\.matches[\s\S]*join slots a[\s\S]*join slots b/i);
+  assert.match(create, /insert into ypl_schema_validation\.matches[\s\S]*from normalized_single_create_nodes[\s\S]*where formed/i);
   assert.match(create, /'unknown', 'normalized_bracket_runtime'/i);
-  assert.match(create, /'single:r1:m' \|\| m\.match_no::text/i);
+  assert.match(create, /'single:r' \|\| round_no::text \|\| ':m' \|\| match_no::text/i);
+  assert.match(create, /A BYE is not a Match/i);
   assert.doesNotMatch(create, /insert into ypl_schema_validation\.matches[\s\S]*future/i);
 });
 

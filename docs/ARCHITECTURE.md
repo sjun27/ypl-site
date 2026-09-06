@@ -2304,3 +2304,43 @@ normalized completed Event
 Team Builder의 공식 roster 연결과 `final_submission_id` freeze 및 Records의 공식 Snapshot projection은 P2-5와
 P2-6에서 완료했다. TeamSnapshot이 보존하는 ability / nature / Stat Points / item / moves는 추후 archive
 상세 엔트리 보기 UX로 확장할 수 있으나 P2-6 범위에는 포함하지 않는다.
+
+## 2026-09-06 Champions Brackets 운영 및 Final official party E2E
+
+Champions는 하나의 공지에서 Qualifier / Final Event를 분리 생성한다. Player identity만 공유하며,
+EventRegistration, Entry, EntryParticipant, RegistrationSubmission, TeamSnapshot은 stage별 독립 사실이다.
+Qualifier는 `championship_phase='qualifier'`, Double Elimination, `division=NULL`; Final은
+`championship_phase='final'`, Single Elimination, `division=NULL`이다.
+
+BracketsPage의 Event picker는 phase label(`[선발전]` / `[본선]`)로 두 Event를 일반 Event처럼 표시한다.
+Qualifier 화면은 실제 참가자를 확정해 Double runtime을 진행하고 `qualification_slots` 선수만 선택해
+qualifier advancement를 만든다. Final 화면은 ranking/manual direct advancement를 필요한 경우에만 추가하고,
+Final EventRegistration 후보를 기존 수동 참가 확정에 제공한다. 사용자에게 raw advancement source/table
+관리 UI를 노출하지 않는다.
+
+Final official party contract:
+
+```text
+Final EventRegistration (application / advancement / manual)
+→ Team Builder exact-name lookup
+→ RegistrationSubmission (revisioned)
+→ immutable TeamSnapshot
+→ TeamSnapshotMember
+→ record apply freeze: EventRegistration.final_submission_id
+→ champion Result
+→ HallOfFameEntry
+```
+
+`submit_registration_team_snapshot`은 Event와 Registration을 잠그고 open/running 및
+`record_applied_at IS NULL`을 확인하며, `application`, `advancement`, `manual` source만 exact match로
+수락한다. freeze는 실제 `EntryParticipant` Registration만 대상으로 최신 revision을 선택한다. 따라서
+완료·기록반영된 Event에 새 historical submission을 attach하지 않는다.
+
+Test browser E2E에서는 새 2인 Final에서 advancement Registration 두 건이 Team Builder로 각각 제출되어
+RegistrationSubmission 2건, TeamSnapshot 2건, TeamSnapshotMember가 생성됐다. 대진·승자·기록 반영 뒤
+두 `final_submission_id`가 각 최신 submission을 가리켰고, champion HOF dialog가 winner snapshot의
+`pokemon_id` 기반 Gardevoir를 표시했다. legacy `image_ref`는 이 경로에 사용하지 않았다.
+
+Championship advancement/HOF domain RPC의 현재 Test 배포는 `SECURITY DEFINER`와 빈 `search_path`를
+사용한다. strict Event/phase/ownership/state 검증 및 narrow anon `EXECUTE`를 유지하며 broad table grant는
+추가하지 않았다. Production Auth/RLS cutover 전에 이 privilege model을 재검토한다.

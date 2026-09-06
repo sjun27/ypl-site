@@ -1,14 +1,22 @@
 import { supa as client } from "../storage.js";
 import { NORMALIZED_DATA_SCHEMA } from "./normalizedCompetitionService.js";
-import { spriteUrl } from "./teamBuilderCore.js";
 import {
+  isNormalizedChampionsHallOfFame,
+  loadHallOfFameArtworkLookup,
+  normalizedChampionLabel,
+  normalizedSeasonLabel,
+  resolveHallOfFameArtwork,
+} from "./hallOfFamePresentation.js";
+import {
+  CHAMPIONSHIP_FINAL_FORMAT,
+  CHAMPIONSHIP_QUALIFIER_FORMAT,
   advancementCancellationError,
   buildChampionshipSettings,
-  buildFinalRegistrationPayload,
   championshipFinalCapacity,
   championshipGeneration,
   isChampionshipFinal,
   isChampionshipQualifier,
+  normalizeChampionshipApplicationDraft,
   qualifierCompletionState,
   validateAdvancementInput,
 } from "./championsCore.js";
@@ -43,6 +51,78 @@ async function rowsFor(table, select, column, values, fallback) {
 
 export function championsOperationsEnabled() {
   return Boolean(client && NORMALIZED_DATA_SCHEMA === "ypl_schema_validation");
+}
+
+function databaseUuid() {
+  if (!globalThis.crypto?.randomUUID) throw new Error("안전한 UUID 생성을 지원하지 않는 브라우저입니다.");
+  return globalThis.crypto.randomUUID();
+}
+
+async function currentSeasonId() {
+  const seasons = await rows(
+    db().from("seasons").select("id").eq("series", "ypl").eq("status", "current").order("sort_order", { ascending: true }),
+    "현재 시즌을 확인하지 못했습니다."
+  );
+  if (seasons.length !== 1) throw new Error(`현재 시즌은 정확히 1개여야 하지만 ${seasons.length}개입니다.`);
+  return seasons[0].id;
+}
+
+export async function saveChampionshipApplicationEventPair({
+  qualifierEventId = null,
+  announcementId = null,
+  eventDraft = {},
+} = {}) {
+  const draft = normalizeChampionshipApplicationDraft(eventDraft);
+  const existingQualifier = qualifierEventId ? await readEvent(qualifierEventId) : null;
+  if (qualifierEventId && !existingQualifier) throw new Error("수정할 Champions 선발전 Event를 찾을 수 없습니다.");
+  if (existingQualifier && !isChampionshipQualifier(existingQualifier)) {
+    throw new Error("기존 공지가 Qualifier/Final pair에 연결되어 있지 않아 자동으로 다시 만들지 않습니다.");
+  }
+  const finalEventId = existingQualifier?.championship_final_event_id || databaseUuid();
+  const qualifierId = existingQualifier?.id || databaseUuid();
+  const seasonId = existingQualifier?.season_id || await currentSeasonId();
+  const registrationSettings = {
+    ...(existingQualifier?.registration_settings || {}),
+    ...(draft.registrationSettings || {}),
+    ...(announcementId ? { announcementId } : {}),
+  };
+  const competitionSettings = {
+    ...(draft.competitionSettings || existingQualifier?.competition_settings || {}),
+    rankingEnabled: typeof draft.competitionSettings?.rankingEnabled === "boolean"
+      ? draft.competitionSettings.rankingEnabled
+      : true,
+  };
+  const { data, error } = await db().rpc("save_championship_application_event_pair", {
+    p_qualifier_event_id: qualifierId,
+    p_final_event_id: finalEventId,
+    p_season_id: seasonId,
+    p_announcement_id: announcementId,
+    p_base_name: draft.name,
+    p_round_number: draft.roundNumber ? Number(draft.roundNumber) : null,
+    p_battle_format: draft.battleFormat,
+    p_generation: draft.generation,
+    p_final_capacity: draft.finalCapacity,
+    p_qualification_slots: draft.qualificationSlots,
+    p_regulation_id: draft.regulationId || null,
+    p_cup_rule_id: draft.cupRuleId || null,
+    p_cup_rule_settings: draft.cupRuleSettings || {},
+    p_registration_settings: registrationSettings,
+    p_competition_settings: competitionSettings,
+    p_held_on: draft.heldOn || null,
+    p_submission_target_at: draft.submissionTargetAt ? new Date(draft.submissionTargetAt).toISOString() : null,
+  });
+  if (error) fail(error, "Champions Qualifier/Final Event pair를 저장하지 못했습니다.");
+  const result = Array.isArray(data) ? data[0] : data;
+  const [qualifierEvent, finalEvent] = await Promise.all([
+    readEvent(result?.qualifier_event_id || qualifierId),
+    readEvent(result?.final_event_id || finalEventId),
+  ]);
+  if (!qualifierEvent || !finalEvent
+      || qualifierEvent.competition_format !== CHAMPIONSHIP_QUALIFIER_FORMAT
+      || finalEvent.competition_format !== CHAMPIONSHIP_FINAL_FORMAT) {
+    throw new Error("저장된 Champions Event pair를 다시 확인하지 못했습니다.");
+  }
+  return { qualifierEvent, finalEvent, created: Boolean(result?.created) };
 }
 
 export async function getChampionshipManagementSnapshot() {
@@ -170,7 +250,7 @@ export async function createChampionshipAdvancement({ finalEventId, playerId, ad
   const finalEvent = await readEvent(finalEventId);
   if (!finalEvent) throw new Error("본선 Event를 찾을 수 없습니다.");
   const snapshot = await getChampionshipManagementSnapshot();
-  const qualifierEvent = snapshot.events.find((event) => event.id === finalEvent.championship_final_event_id) || null;
+  const qualifierEvent = snapshot.events.find((event) => event.championship_final_event_id === finalEvent.id) || null;
   const existing = snapshot.advancements
     .map((advancement) => ({ ...advancement, registration: snapshot.registrations.find((registration) => registration.id === advancement.final_registration_id) }))
     .filter((row) => row.registration?.event_id === finalEvent.id);
@@ -191,21 +271,23 @@ export async function createChampionshipAdvancement({ finalEventId, playerId, ad
     if (sourceParticipants.length !== 1 || sourceParticipants[0].player_id !== playerId) throw new Error("qualifier Entry의 실제 Player identity를 확인할 수 없습니다.");
   }
 
-  const registrationPayload = buildFinalRegistrationPayload({ finalEvent, player, reason });
-  const registration = await rows(db().from("event_registrations").insert(registrationPayload).select().single(), "본선 EventRegistration을 생성하지 못했습니다.");
-  const registrationRow = registration[0] || registration;
-  try {
-    const advancement = await rows(db().from("championship_advancements").insert({
-      final_registration_id: registrationRow.id,
-      source_entry_id: advancementType === "qualifier" ? sourceEntry.id : null,
-      advancement_type: advancementType,
-      reason: String(reason || "").trim() || null,
-    }).select().single(), "ChampionshipAdvancement를 생성하지 못했습니다.");
-    return { advancement: advancement[0] || advancement, registration: registrationRow };
-  } catch (error) {
-    try { await db().from("event_registrations").delete().eq("id", registrationRow.id).select("id"); } catch (cleanupError) { error.message = `${error.message} / 신규 Registration 정리 실패: ${cleanupError.message}`; }
-    throw error;
+  const registrationId = databaseUuid();
+  const advancementId = databaseUuid();
+  const { data, error } = await db().rpc("create_championship_advancement", {
+    p_advancement_id: advancementId,
+    p_registration_id: registrationId,
+    p_final_event_id: finalEvent.id,
+    p_player_id: player.id,
+    p_advancement_type: advancementType,
+    p_source_entry_id: advancementType === "qualifier" ? sourceEntry.id : null,
+    p_reason: String(reason || "").trim() || null,
+  });
+  if (error) fail(error, "ChampionshipAdvancement와 Final Registration을 생성하지 못했습니다.");
+  const result = Array.isArray(data) ? data[0] : data;
+  if (result?.advancement_id !== advancementId || result?.registration_id !== registrationId) {
+    throw new Error("Champions advancement 생성 결과를 확인하지 못했습니다.");
   }
+  return { advancementId, registrationId };
 }
 
 export async function cancelChampionshipAdvancement(advancementId) {
@@ -238,20 +320,13 @@ export async function cancelChampionshipAdvancement(advancementId) {
   });
   if (blocked) throw new Error(blocked);
 
-  const { data: deletedAdvancement, error: advancementError } = await db().from("championship_advancements").delete().eq("id", advancement.id).select("id, final_registration_id");
-  if (advancementError) fail(advancementError, "advancement를 취소하지 못했습니다.");
-  if (!deletedAdvancement?.length) throw new Error("advancement 취소 결과를 확인하지 못했습니다.");
-  try {
-    const { data: deletedRegistration, error: registrationError } = await db().from("event_registrations").delete().eq("id", registration.id).select("id");
-    if (registrationError) fail(registrationError, "runtime-owned Final Registration을 취소하지 못했습니다.");
-    if (!deletedRegistration?.length) throw new Error("Final Registration 취소 결과를 확인하지 못했습니다.");
-  } catch (error) {
-    try {
-      await db().from("championship_advancements").insert({ ...advancement, id: advancement.id }).select("id");
-    } catch (restoreError) {
-      error.message = `${error.message} / advancement 복구 실패: ${restoreError.message}`;
-    }
-    throw error;
+  const { data, error } = await db().rpc("cancel_championship_advancement", {
+    p_advancement_id: advancement.id,
+  });
+  if (error) fail(error, "advancement와 runtime-owned Final Registration을 취소하지 못했습니다.");
+  const result = Array.isArray(data) ? data[0] : data;
+  if (result?.advancement_id !== advancement.id || result?.registration_id !== registration.id) {
+    throw new Error("Champions advancement 취소 결과를 확인하지 못했습니다.");
   }
   return { advancementId: advancement.id, registrationId: registration.id };
 }
@@ -269,7 +344,7 @@ export async function completeChampionshipQualifier(eventId) {
   return updateEvent(event.id, { status: "completed" });
 }
 
-export async function ensureChampionshipHallOfFameEntry(eventId) {
+export async function ensureChampionshipHallOfFameEntry(eventId, { hallOfFameId = null } = {}) {
   const event = await readEvent(eventId);
   if (!event || !isChampionshipFinal(event)) return null;
   if (event.status !== "completed" || !event.record_applied_at) throw new Error("본선 Event가 공식 완료되지 않아 Hall of Fame에 등록할 수 없습니다.");
@@ -284,17 +359,35 @@ export async function ensureChampionshipHallOfFameEntry(eventId) {
   const result = results[0];
   const participants = await rows(db().from("entry_participants").select("player_id").eq("event_id", event.id).eq("entry_id", result.entry_id), "champion EntryParticipant를 읽지 못했습니다.");
   if (participants.length !== 1 || !participants[0].player_id) throw new Error("champion Entry의 Player identity를 확인할 수 없습니다.");
-  const { data, error } = await db().from("hall_of_fame_entries").insert({
-    event_id: event.id,
-    result_id: result.id,
-    player_id: participants[0].player_id,
-    generation_number: generation,
-    generation_label: `${generation}대 챔피언`,
-  }).select().single();
+  const requestedHallOfFameId = hallOfFameId || databaseUuid();
+  const { data, error } = await db().rpc("ensure_championship_final_hall_of_fame", {
+    p_event_id: event.id,
+    p_hall_of_fame_id: requestedHallOfFameId,
+  });
   if (error) fail(error, "Hall of Fame 등록을 저장하지 못했습니다.");
-  return data;
+  const row = Array.isArray(data) ? data[0] : data;
+  if (!row?.hall_of_fame_id || row.result_id !== result.id || row.player_id !== participants[0].player_id || Number(row.generation_number) !== generation) {
+    throw new Error("Hall of Fame 등록 결과를 확인하지 못했습니다.");
+  }
+  return row;
 }
 
+export async function removeChampionshipHallOfFameEntry(eventId) {
+  const event = await readEvent(eventId);
+  if (!event || !isChampionshipFinal(event)) return { removed: false };
+  const { data, error } = await db().rpc("remove_championship_final_hall_of_fame", {
+    p_event_id: event.id,
+  });
+  if (error) fail(error, "Hall of Fame 등록을 취소하지 못했습니다.");
+  const row = Array.isArray(data) ? data[0] : data;
+  return {
+    hallOfFameId: row?.hall_of_fame_id || null,
+    resultId: row?.result_id || null,
+    playerId: row?.player_id || null,
+    generationNumber: Number(row?.generation_number) || null,
+    removed: Boolean(row?.removed),
+  };
+}
 export async function fetchNormalizedChampionsHallOfFame() {
   if (!championsOperationsEnabled()) return [];
   const hof = await rows(db().from("hall_of_fame_entries").select("id, event_id, result_id, player_id, generation_number, generation_label, image_ref, note").order("generation_number", { ascending: false }), "Hall of Fame를 불러오지 못했습니다.");
@@ -302,11 +395,14 @@ export async function fetchNormalizedChampionsHallOfFame() {
   const eventIds = [...new Set(hof.map((row) => row.event_id).filter(Boolean))];
   const playerIds = hof.map((row) => row.player_id).filter(Boolean);
   const resultIds = hof.map((row) => row.result_id).filter(Boolean);
-  const [events, players, results] = await Promise.all([
-    rowsFor("events", "id, name, round_number, battle_format, competition_format, event_type, championship_phase", "id", eventIds, "HOF Event를 불러오지 못했습니다."),
+  const [events, players, results, artworkLookup] = await Promise.all([
+    rowsFor("events", "id, season_id, name, round_number, battle_format, competition_format, event_type, championship_phase", "id", eventIds, "HOF Event를 불러오지 못했습니다."),
     rowsFor("players", "id, display_name", "id", playerIds, "HOF Player를 불러오지 못했습니다."),
     rowsFor("results", "id, event_id, entry_id, placement_code", "id", resultIds, "HOF Result를 불러오지 못했습니다."),
+    loadHallOfFameArtworkLookup().catch(() => new Map()),
   ]);
+  const seasonIds = [...new Set(events.map((row) => row.season_id).filter(Boolean))];
+  const seasons = await rowsFor("seasons", "id, series, number, name", "id", seasonIds, "HOF Season을 불러오지 못했습니다.");
   const entryIds = results.map((row) => row.entry_id).filter(Boolean);
   const entries = await rowsFor("entries", "id, event_id, entry_type, display_name", "id", entryIds, "HOF Entry를 불러오지 못했습니다.");
   const participants = await rowsFor("entry_participants", "id, event_id, entry_id, registration_id, player_id, member_order", "entry_id", entryIds, "HOF EntryParticipant를 불러오지 못했습니다.");
@@ -317,6 +413,7 @@ export async function fetchNormalizedChampionsHallOfFame() {
   const snapshotIds = submissions.map((row) => row.snapshot_id).filter(Boolean);
   const members = await rowsFor("team_snapshot_members", "id, snapshot_id, slot, pokemon_id, pokemon_name_snapshot", "snapshot_id", snapshotIds, "HOF TeamSnapshot을 불러오지 못했습니다.");
   const eventById = new Map(events.map((row) => [row.id, row]));
+  const seasonById = new Map(seasons.map((row) => [row.id, row]));
   const playerById = new Map(players.map((row) => [row.id, row]));
   const resultById = new Map(results.map((row) => [row.id, row]));
   const entryById = new Map(entries.map((row) => [row.id, row]));
@@ -324,19 +421,27 @@ export async function fetchNormalizedChampionsHallOfFame() {
   const submissionById = new Map(submissions.map((row) => [row.id, row]));
   return hof.map((row) => {
     const event = eventById.get(row.event_id) || {};
+    const season = seasonById.get(event.season_id) || {};
+    const normalized = isNormalizedChampionsHallOfFame(event);
     const result = resultById.get(row.result_id) || {};
     const entry = entryById.get(result.entry_id) || {};
     const participantRows = participants.filter((item) => item.entry_id === result.entry_id).sort((a, b) => Number(a.member_order || 0) - Number(b.member_order || 0));
     const party = participantRows.flatMap((participant) => {
       const registration = registrationById.get(participant.registration_id);
       const submission = submissionById.get(registration?.final_submission_id);
-      return members.filter((member) => member.snapshot_id === submission?.snapshot_id).map((member) => ({ name: member.pokemon_name_snapshot || member.pokemon_id || "", img: member.pokemon_id ? spriteUrl(member.pokemon_id) : "" }));
+      return members.filter((member) => member.snapshot_id === submission?.snapshot_id).map((member) => ({
+        name: member.pokemon_name_snapshot || member.pokemon_id || "",
+        pokemonId: member.pokemon_id || "",
+        img: resolveHallOfFameArtwork({ pokemonId: member.pokemon_id, name: member.pokemon_name_snapshot }, artworkLookup),
+      }));
     });
     return {
       id: row.id,
-      gen: row.generation_label || `${row.generation_number}대`,
-      season: event.round_number || row.generation_number,
-      slabel: event.name || `SEASON ${event.round_number || row.generation_number}`,
+      kind: normalized ? "normalized" : "legacy",
+      generationNumber: row.generation_number,
+      gen: normalized ? normalizedChampionLabel(row.generation_number, event.battle_format) : (row.generation_label || `${row.generation_number}대`),
+      season: season.number || event.round_number || row.generation_number,
+      slabel: normalized ? normalizedSeasonLabel(season) : (season.name || ""),
       name: playerById.get(row.player_id)?.display_name || "알 수 없는 선수",
       team: party,
       format: event.battle_format || null,

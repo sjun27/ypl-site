@@ -5,6 +5,48 @@ export function championshipSettings(event = {}) {
   return settings && typeof settings === "object" ? settings : {};
 }
 
+export const CHAMPIONSHIP_QUALIFIER_FORMAT = "double_elimination";
+export const CHAMPIONSHIP_FINAL_FORMAT = "single_elimination";
+
+export function championshipPhaseLabel(event = {}) {
+  if (event?.event_type !== "champions") return "";
+  if (event?.championship_phase === "qualifier") return "선발전";
+  if (event?.championship_phase === "final") return "본선";
+  return "";
+}
+
+export function championshipEventPickerLabel(event = {}) {
+  const phase = championshipPhaseLabel(event);
+  return phase ? `[${phase}] ${event.name || "Champions"}` : event.name || "Champions";
+}
+
+export function normalizeChampionshipApplicationDraft(eventDraft = {}) {
+  const name = String(eventDraft.name || "").trim();
+  const battleFormat = String(eventDraft.battleFormat || "").trim();
+  const generation = Number(eventDraft.generation);
+  const finalCapacity = Number(eventDraft.finalCapacity);
+  const qualificationSlots = Number(eventDraft.qualificationSlots);
+  if (!name) throw new Error("Champions 대회 이름을 입력해 주세요.");
+  if (!["singles", "doubles"].includes(battleFormat)) throw new Error("Champions 배틀 형식은 싱글 또는 더블이어야 합니다.");
+  if (!Number.isInteger(generation) || generation < 1) throw new Error("Champions generation을 입력해 주세요.");
+  if (!Number.isInteger(finalCapacity) || finalCapacity < 2) throw new Error("본선 정원은 2명 이상이어야 합니다.");
+  if (!Number.isInteger(qualificationSlots) || qualificationSlots < 1 || qualificationSlots > finalCapacity) {
+    throw new Error("선발 인원은 1명 이상, 본선 정원 이하여야 합니다.");
+  }
+  return {
+    ...eventDraft,
+    name,
+    eventType: "champions",
+    division: null,
+    isTeamEvent: false,
+    battleFormat,
+    competitionFormat: null,
+    generation,
+    finalCapacity,
+    qualificationSlots,
+  };
+}
+
 export function championshipGeneration(event = {}, fallback = null) {
   const settings = championshipSettings(event);
   const value = Number(settings.generation ?? settings.generationNumber);

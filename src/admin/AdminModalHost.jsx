@@ -1,5 +1,5 @@
 import React from "react";
-import { cancelApplicationEvent, saveApplicationEvent } from "../services/index.js";
+import { cancelApplicationEvent, saveApplicationEvent, saveChampionshipApplicationEventPair } from "../services/index.js";
 import {
   AnnEditor,
   ChampionEditor,
@@ -88,13 +88,19 @@ export default function AdminModalHost({ modal, data, setModal, save, setAdmin, 
 
           if (announcement.form?.enabled && announcement.form?.eventDraft?.name?.trim()) {
             try {
-              const event = await saveApplicationEvent({
-                eventId: announcement.form.eventId || null,
-                announcementId: announcement.id,
-                eventDraft: {
-                  ...announcement.form.eventDraft,
-                },
-              });
+              const champions = announcement.form.eventDraft.eventType === "champions";
+              const savedEvent = champions
+                ? await saveChampionshipApplicationEventPair({
+                    qualifierEventId: announcement.form.eventId || null,
+                    announcementId: announcement.id,
+                    eventDraft: { ...announcement.form.eventDraft },
+                  })
+                : await saveApplicationEvent({
+                    eventId: announcement.form.eventId || null,
+                    announcementId: announcement.id,
+                    eventDraft: { ...announcement.form.eventDraft },
+                  });
+              const event = champions ? savedEvent.qualifierEvent : savedEvent;
 
               nextAnnouncement = {
                 ...announcement,

@@ -338,6 +338,8 @@ declare
     v_runtime ypl_schema_validation.bracket_runtimes%rowtype;
     v_identity_count integer;
     v_match_count integer;
+    v_created_player_ids uuid[] := array[]::uuid[];
+    v_identity_snapshot jsonb := '[]'::jsonb;
 begin
     if p_runtime_id is null or p_event_id is null then
         raise exception using errcode = 'P0001', message = 'runtime_id와 event_id가 필요합니다.';
@@ -359,10 +361,24 @@ begin
     end if;
     if v_runtime.topology_kind <> v_event.competition_format
        or (v_runtime.topology_kind = 'single_elimination' and not v_event.is_team_event)
-       or v_event.status not in ('open', 'running')
-       or v_event.record_applied_at is not null then
+       or v_event.record_applied_at is not null
+       or (
+         v_event.status not in ('open', 'running')
+         and not (
+           v_event.status = 'completed'
+           and v_event.event_type = 'champions'
+           and v_event.championship_phase = 'qualifier'
+         )
+       ) then
         raise exception using errcode = 'P0001', message = '기록 반영 전 허용된 Team/Double runtime만 삭제할 수 있습니다.';
     end if;
+
+    perform ypl_schema_validation.cancel_championship_advancement(ca.id)
+      from ypl_schema_validation.championship_advancements ca
+      join ypl_schema_validation.entries source_entry
+        on source_entry.id = ca.source_entry_id
+     where source_entry.event_id = p_event_id
+     order by ca.created_at;
     if exists (select 1 from ypl_schema_validation.results r0 where r0.event_id = p_event_id)
        or exists (select 1 from ypl_schema_validation.ranking_awards a0 where a0.event_id = p_event_id) then
         raise exception using errcode = 'P0001', message = 'Result 또는 RankingAward가 있어 runtime 삭제를 중단했습니다.';
@@ -442,18 +458,157 @@ begin
       from ypl_schema_validation.matches m0
      where m0.event_id = p_event_id and m0.source = 'normalized_bracket_runtime';
 
-    -- Only runtime artifacts are removed. Domain identity rows remain owned by
-    -- the existing Event participant confirmation lifecycle.
+    select coalesce(
+        array_agg(distinct bic0.player_id) filter (where bic0.player_was_created),
+        array[]::uuid[]
+    )
+      into v_created_player_ids
+      from ypl_schema_validation.bracket_identity_changes bic0
+     where bic0.bracket_runtime_id = p_runtime_id
+       and bic0.event_id = p_event_id;
+
+    if exists (
+        select 1
+          from ypl_schema_validation.bracket_identity_changes bic0
+          join ypl_schema_validation.event_registrations er0
+            on er0.id = bic0.registration_id
+           and er0.event_id = p_event_id
+         where bic0.bracket_runtime_id = p_runtime_id
+           and bic0.event_id = p_event_id
+           and bic0.registration_was_created
+           and (
+             er0.final_submission_id is not null
+             or exists (
+                 select 1
+                   from ypl_schema_validation.registration_submissions rs0
+                  where rs0.registration_id = er0.id
+             )
+           )
+    ) then
+        raise exception using errcode = 'P0001',
+          message = '대진 생성 과정에서 만든 Registration에 Submission/history가 있어 자동 삭제할 수 없습니다.';
+    end if;
+
+    select coalesce(jsonb_agg(jsonb_build_object(
+        'entry_participant_id', bic0.entry_participant_id,
+        'entry_id', bic0.entry_id,
+        'registration_id', bic0.registration_id,
+        'player_id', bic0.player_id,
+        'registration_was_created', bic0.registration_was_created,
+        'registration_player_was_changed', bic0.registration_player_was_changed,
+        'previous_registration_player_id', bic0.previous_registration_player_id,
+        'entry_was_created', bic0.entry_was_created,
+        'entry_participant_was_created', bic0.entry_participant_was_created
+    ) order by bic0.entry_participant_id), '[]'::jsonb)
+      into v_identity_snapshot
+      from ypl_schema_validation.bracket_identity_changes bic0
+     where bic0.bracket_runtime_id = p_runtime_id
+       and bic0.event_id = p_event_id;
+
     delete from ypl_schema_validation.matches m0
-     where m0.event_id = p_event_id and m0.source = 'normalized_bracket_runtime';
+     where m0.event_id = p_event_id
+       and m0.source = 'normalized_bracket_runtime';
+
     delete from ypl_schema_validation.bracket_entry_slots bes0
-     where bes0.bracket_runtime_id = p_runtime_id and bes0.event_id = p_event_id;
+     where bes0.bracket_runtime_id = p_runtime_id
+       and bes0.event_id = p_event_id;
+
     delete from ypl_schema_validation.bracket_identity_changes bic0
-     where bic0.bracket_runtime_id = p_runtime_id and bic0.event_id = p_event_id;
+     where bic0.bracket_runtime_id = p_runtime_id
+       and bic0.event_id = p_event_id;
+
+    delete from ypl_schema_validation.entry_participants ep0
+     where ep0.event_id = p_event_id
+       and ep0.id in (
+           select distinct c.entry_participant_id
+             from jsonb_to_recordset(v_identity_snapshot) as c(
+               entry_participant_id uuid, entry_id uuid, registration_id uuid, player_id uuid,
+               registration_was_created boolean, registration_player_was_changed boolean,
+               previous_registration_player_id uuid, entry_was_created boolean,
+               entry_participant_was_created boolean
+             )
+            where c.entry_participant_was_created
+       );
+
+    delete from ypl_schema_validation.entries e0
+     where e0.event_id = p_event_id
+       and e0.id in (
+           select distinct c.entry_id
+             from jsonb_to_recordset(v_identity_snapshot) as c(
+               entry_participant_id uuid, entry_id uuid, registration_id uuid, player_id uuid,
+               registration_was_created boolean, registration_player_was_changed boolean,
+               previous_registration_player_id uuid, entry_was_created boolean,
+               entry_participant_was_created boolean
+             )
+            where c.entry_was_created
+       );
+
+    update ypl_schema_validation.event_registrations er0
+       set player_id = restore.previous_registration_player_id,
+           updated_at = now()
+      from (
+          select distinct on (c.registration_id)
+                 c.registration_id,
+                 c.player_id,
+                 c.previous_registration_player_id
+            from jsonb_to_recordset(v_identity_snapshot) as c(
+               entry_participant_id uuid, entry_id uuid, registration_id uuid, player_id uuid,
+               registration_was_created boolean, registration_player_was_changed boolean,
+               previous_registration_player_id uuid, entry_was_created boolean,
+               entry_participant_was_created boolean
+            )
+           where c.registration_player_was_changed
+             and not c.registration_was_created
+           order by c.registration_id, c.entry_participant_id
+      ) restore
+     where er0.id = restore.registration_id
+       and er0.event_id = p_event_id
+       and er0.player_id = restore.player_id;
+
+    delete from ypl_schema_validation.event_registrations er0
+     where er0.event_id = p_event_id
+       and er0.id in (
+           select distinct c.registration_id
+             from jsonb_to_recordset(v_identity_snapshot) as c(
+               entry_participant_id uuid, entry_id uuid, registration_id uuid, player_id uuid,
+               registration_was_created boolean, registration_player_was_changed boolean,
+               previous_registration_player_id uuid, entry_was_created boolean,
+               entry_participant_was_created boolean
+             )
+            where c.registration_was_created
+       );
+    delete from ypl_schema_validation.players pl0
+     where pl0.id = any(v_created_player_ids)
+       and not exists (
+           select 1 from ypl_schema_validation.event_registrations er0
+            where er0.player_id = pl0.id
+       )
+       and not exists (
+           select 1 from ypl_schema_validation.entry_participants ep0
+            where ep0.player_id = pl0.id
+       )
+       and not exists (
+           select 1 from ypl_schema_validation.matches m0
+            where m0.player_a_id = pl0.id
+               or m0.player_b_id = pl0.id
+               or m0.winner_player_id = pl0.id
+       )
+       and not exists (
+           select 1 from ypl_schema_validation.ranking_awards ra0
+            where ra0.player_id = pl0.id
+       )
+       and not exists (
+           select 1 from ypl_schema_validation.hall_of_fame_entries hof0
+            where hof0.player_id = pl0.id
+       );
+
     delete from ypl_schema_validation.bracket_runtimes br0
-     where br0.id = p_runtime_id and br0.event_id = p_event_id;
+     where br0.id = p_runtime_id
+       and br0.event_id = p_event_id;
+
     update ypl_schema_validation.events
-       set status = v_runtime.previous_event_status, updated_at = now()
+       set status = v_runtime.previous_event_status,
+           updated_at = now()
      where id = p_event_id;
 
     return query select p_runtime_id, p_event_id, v_match_count, true;

@@ -51,6 +51,8 @@ export function buildRecordsPokemonDirectory(detailData, speciesNames) {
     const canonicalName = clean(record?.name);
     const korean = koreanById.get(String(record?.num)) || koreanByEnglish.get(key(canonicalName));
     directory.set(id, {
+      pokemonId: id,
+      dexNumber: record?.num ?? null,
       canonicalName,
       displayName: formDisplayName({ ...record, id }, korean),
     });
@@ -73,4 +75,3 @@ export async function loadRecordsPokemonDirectory() {
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return buildRecordsPokemonDirectory(detailData, parseSpeciesNames(await response.text()));
 }
-

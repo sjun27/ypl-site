@@ -2351,3 +2351,34 @@ fixture cleanup 후 신규 fixture 데이터 잔존은 0건이었고 기존 Cham
 
 다음 예정: YPL Season을 매년 3월 1일 / 9월 1일 KST 기준으로 DB에서 자동 전환하는 설계를 구현한다.
 Season rollover는 아직 구현하지 않았고, Production migration도 수행하지 않았다.
+
+## 2026-09-06 Champions 실제 운영 E2E / Final official party
+
+Champions 공지는 선택한 battle format에 대해 Qualifier / Final Event pair를 만든다. Qualifier는
+Double Elimination, Final은 Single Elimination으로 고정되고 Champions division은 `NULL`이다. 대진표
+picker에는 `[선발전]`과 `[본선]`이 모두 나타나며, 참가자 확정·advancement·대진 진행은 BracketsPage
+workflow에 통합했다. Hall of Fame 페이지는 역대 champion 조회와 legacy 추가/수정만 담당한다.
+
+Qualifier는 우승자를 만들지 않아도 `qualification_slots`만큼 진출자를 확정해 종료할 수 있다. Match와
+winner facts, Entry graph, 참가 이력은 남기고 Result / RankingAward / HOF는 만들지 않는다. ranking,
+qualifier, manual advancement는 domain RPC로 생성하며 downstream Final fact가 있으면 취소를 fail closed한다.
+
+Final은 advancement Registration도 Team Builder 제출 대상이다. Test의 기존 8인 completed Final에
+submission이 없던 원인은 해당 E2E에서 Final party 제출을 생략한 것이며, 기능 누락이나 freeze 연결
+bug가 아니었다. completed / record-applied Event에는 historical submission attach를 허용하지 않으므로
+기존 fixture는 보존했다.
+
+별도 Test 2인 Champions Final에서 두 advancement Registration의 Final party를 browser UI로 각각 제출했다.
+RegistrationSubmission 2건과 독립 TeamSnapshot / TeamSnapshotMember가 생성된 뒤, Final Single 진행과
+record apply가 두 최신 submission을 `final_submission_id`로 freeze했다. champion Result와 generation 8
+HallOfFameEntry가 생성됐고, HOF dialog는 `HallOfFameEntry → Result → Entry → EntryParticipant →
+final_submission_id → RegistrationSubmission → TeamSnapshot → TeamSnapshotMember.pokemon_id`의
+Gardevoir party를 표시했다. legacy `image_ref` fallback은 사용하지 않았다.
+
+11-player Single/Double multi-BYE regression도 유지된다. unresolved future/BYE node에는 Match가 없고,
+두 participant가 resolve된 downstream node는 runtime create 또는 winner repair에서 materialize한다.
+
+Test advancement/HOF RPC는 현재 `SECURITY DEFINER`, 빈 `search_path`, strict Event/ownership/state
+validation 및 narrow anon `EXECUTE` 상태다. broad table mutation grant는 추가하지 않았다. 이 권한 모델은
+Production Auth/RLS cutover 전에 재검토한다. Season automatic rollover는 여전히 다음 작업이며 Production
+Supabase에는 접근·조회·write·migration을 수행하지 않았다.

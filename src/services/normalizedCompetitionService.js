@@ -1595,6 +1595,16 @@ export async function listEventRegistrationSubmissionStatuses(eventId) {
 export async function cancelApplicationEvent(eventId) {
   if (!eventId) return null;
 
+  const event = await getEvent(eventId);
+  if (event?.event_type === "champions" && event?.championship_phase === "qualifier" && event?.championship_final_event_id) {
+    const { data, error } = await db().rpc("cancel_championship_application_event_pair", {
+      p_qualifier_event_id: event.id,
+      p_final_event_id: event.championship_final_event_id,
+    });
+    if (error) fail(error, "연결된 Champions Event pair를 정리하지 못했습니다.");
+    return Array.isArray(data) ? data[0] || null : data || null;
+  }
+
   const now = new Date().toISOString();
   const { data, error } = await db()
     .from("events")

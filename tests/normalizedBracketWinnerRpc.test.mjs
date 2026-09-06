@@ -102,6 +102,13 @@ test("formed downstream Matches are recreated with canonical fields and NULL win
   assert.doesNotMatch(sql, /parent_match_id = v_target_match\.id/i);
 });
 
+test("winner mutation repairs a missing already-formed sibling from older create revisions", () => {
+  assert.match(sql, /Older create revisions persisted only first-round real/i);
+  assert.match(sql, /elsif v_formed[\s\S]*insert into ypl_schema_validation\.matches/i);
+  assert.match(sql, /v_match_found := true/i);
+  assert.doesNotMatch(sql, /message = 'formed downstream Match가 누락되었습니다.'/i);
+});
+
 test("return contract reports previous/new winner and cascade counts", () => {
   for (const field of [
     "runtime_id uuid",

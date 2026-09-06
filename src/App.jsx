@@ -1554,7 +1554,7 @@ function CountUp({ to, dur=1100, suffix="" }) {
 }
 
 /* ============================== 공통 ============================== */
-function normTeam(team){ return (team||[]).map(m=> typeof m==="string"?{name:m,img:pokeImg(m)}:{name:(m&&m.name)||"",img:(m&&m.img)||pokeImg(m&&m.name)}); }
+function normTeam(team){ return (team||[]).map(m=> typeof m==="string"?{name:m,img:pokeImg(m),pokemonId:""}:{name:(m&&m.name)||"",img:(m&&m.img)||pokeImg(m&&m.name),pokemonId:(m&& (m.pokemonId||m.pokemon_id))||""}); }
 
 /* ============================== 앱 ============================== */
 export default function App() {
@@ -1597,7 +1597,7 @@ export default function App() {
     setView(v);setMenuOpen(false);window.scrollTo({top:0,behavior:"smooth"});
   },[]);
   const flash=useCallback((m)=>{setToast(m);setTimeout(()=>setToast(""),1800);},[]);
-  const save=useCallback(async(next)=>{setData(next);const ok=await saveSiteData(next);flash(ok?"저장됨 ✓":"메모리에만 반영됨");return ok;},[flash]);
+  const save=useCallback(async(next)=>{const sanitized={...next,brackets:Array.isArray(next?.brackets)?next.brackets.filter(b=>b?.projection?.source!=="normalized"):next?.brackets};setData(sanitized);const ok=await saveSiteData(sanitized);flash(ok?"저장됨 ✓":"메모리에만 반영됨");return ok;},[flash]);
   const submitForm=useCallback(async(annId,payload)=>{
     const announcement=(data.announcements||[]).find(a=>a.id===annId);
     const form=announcement?.form||{};

@@ -371,7 +371,23 @@ begin
             elsif v_formed
                and not (v_round > v_target_round
                         and ((v_target_match_no - 1) / power(2, v_round - v_target_round)::integer) + 1 = v_match_no) then
-                raise exception using errcode = 'P0001', message = 'formed downstream Match가 누락되었습니다.';
+                -- Older create revisions persisted only first-round real
+                -- matches. Repair an already-formed sibling node in-place;
+                -- the affected descendant chain is rebuilt below as usual.
+                insert into ypl_schema_validation.matches (
+                    event_id, match_kind, parent_match_id, round_number, stage_label,
+                    sequence_no, entry_a_id, entry_b_id, player_a_id, player_b_id,
+                    winner_entry_id, winner_player_id, resolution, source,
+                    source_node_key, played_at
+                ) values (
+                    p_event_id, 'bracket', null, v_round, '본선 ' || v_round::text || 'R',
+                    ((power(2, v_round - 1)::integer) - 1 + v_match_no),
+                    v_entry_a, v_entry_b, null, null, null, null, 'unknown',
+                    'normalized_bracket_runtime', v_node_key, null
+                ) returning id into v_match_id;
+                v_match_found := true;
+                v_existing_winner := null;
+                v_created_downstream := v_created_downstream + 1;
             end if;
             insert into pg_temp.normalized_single_winner_nodes
                 values (v_node_key, v_round, v_match_no, v_entry_a, v_entry_b,

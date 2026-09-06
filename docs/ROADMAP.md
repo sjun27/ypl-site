@@ -656,3 +656,29 @@ build, `git diff --check`를 기본으로 한다. 모든 소단계마다 exhaust
 Production migration, destructive DB migration, data-loss 가능 delete/rollback, 권한/RLS 변경은
 중간 단계에서도 보수적으로 검증한다. 이는 테스트를 생략하는 것이 아니라 중복 exhaustive 검증을
 기능 완료 시점으로 묶는 전략이다.
+
+## 2026-09-06 Champions 실제 운영 검증 완료
+
+Champions 공지는 battle format(싱글/더블)을 선택해 Qualifier/Final Event pair를 만든다. Qualifier는
+Double Elimination, Final은 Single Elimination이며 Champions division은 항상 `NULL`이다. BracketsPage
+picker는 `[선발전]`과 `[본선]`을 모두 표시하고, 참가 확정·advancement·대진 생성과 진행은 기존
+대진표 workflow 안에서 수행한다. Hall of Fame은 조회 및 legacy 관리만 담당한다.
+
+Qualifier는 `qualification_slots`만큼 진출자를 확정하면 우승자 없이 종료할 수 있다. 이때
+Registration / Entry / EntryParticipant / Match / winner facts와 qualifier 참가 이력은 보존하고,
+Result / RankingAward / HallOfFameEntry는 생성하지 않는다. ranking / qualifier / manual advancement의
+생성·취소는 narrow domain RPC를 사용하며, 취소는 downstream Final fact가 있으면 fail closed한다.
+
+Final advancement Registration은 다른 신청 source와 동일하게 Team Builder에서 본인 이름 exact match로
+독립적인 Final RegistrationSubmission / TeamSnapshot을 제출한다. Qualifier party를 복사하지 않는다.
+기록 반영 시 실제 EntryParticipant Registration의 최신 revision을 `final_submission_id`로 freeze하고,
+HOF는 `HallOfFameEntry → Result → Entry → EntryParticipant → final_submission_id → RegistrationSubmission
+→ TeamSnapshot → TeamSnapshotMember.pokemon_id`를 사용한다. 신규 normalized champion에 legacy
+`image_ref` fallback은 사용하지 않는다.
+
+11-player Single/Double의 multi-BYE propagation도 실제 runtime에서 회귀 검증했다. BYE node 및 미해결
+future node에는 Match를 만들지 않되, 두 participant가 resolve된 downstream node는 즉시 materialize한다.
+
+Test 현재 advancement/HOF domain RPC는 `SECURITY DEFINER`, 빈 `search_path`, Event/ownership/state 검증과
+anon의 narrow `EXECUTE`를 사용한다. Production cutover/Auth-RLS 단계에서 권한 모델을 다시 검토하며,
+Production Supabase migration은 아직 수행하지 않았다. Season automatic rollover 역시 다음 작업이다.

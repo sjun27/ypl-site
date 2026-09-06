@@ -6,10 +6,12 @@ import {
   buildChampionshipSettings,
   buildFinalRegistrationPayload,
   championshipFinalCapacity,
+  championshipEventPickerLabel,
   championshipGeneration,
   isChampionshipFinal,
   isChampionshipQualifier,
   qualifierCompletionState,
+  normalizeChampionshipApplicationDraft,
   validateAdvancementInput,
 } from "../src/services/championsCore.js";
 
@@ -40,6 +42,32 @@ test("Champions phase and settings are read from existing Event fields", () => {
   assert.deepEqual(buildChampionshipSettings(final, { generationNumber: 8, finalCapacity: 8 }), {
     championship: { generation: 8, finalCapacity: 8 },
   });
+});
+
+test("Champions notice draft keeps battle format selectable and fixes canonical pair settings", () => {
+  const draft = normalizeChampionshipApplicationDraft({
+    name: "7대 챔피언스",
+    eventType: "champions",
+    division: "master",
+    isTeamEvent: true,
+    battleFormat: "doubles",
+    competitionFormat: "single_elimination",
+    generation: "7",
+    finalCapacity: "8",
+    qualificationSlots: "4",
+  });
+  assert.equal(draft.division, null);
+  assert.equal(draft.isTeamEvent, false);
+  assert.equal(draft.battleFormat, "doubles");
+  assert.equal(draft.competitionFormat, null);
+  assert.equal(draft.generation, 7);
+  assert.equal(draft.finalCapacity, 8);
+  assert.equal(draft.qualificationSlots, 4);
+});
+
+test("Champions picker labels both phases without hiding an empty Final", () => {
+  assert.equal(championshipEventPickerLabel({ ...qualifier, name: "7대 챔피언스 · 선발전" }), "[선발전] 7대 챔피언스 · 선발전");
+  assert.equal(championshipEventPickerLabel({ ...final, name: "7대 챔피언스 · 본선" }), "[본선] 7대 챔피언스 · 본선");
 });
 
 test("advancement validation keeps source manual and never auto-selects players", () => {
