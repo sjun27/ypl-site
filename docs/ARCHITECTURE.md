@@ -443,9 +443,10 @@ champ = true
 분리 이유:
 
 - 선발전과 본선은 서로 다른 파티를 사용할 수 있습니다.
-- 따라서 `EventRegistration`, `Entry`, `EntryParticipant`, `RegistrationSubmission`, `TeamSnapshot`을 서로 공유하지 않습니다.
+- 따라서 `EventRegistration`, `Entry`, `EntryParticipant`, `RegistrationSubmission`, `TeamSnapshot`, `Match`,
+  `Result`를 서로 공유하지 않습니다.
 - 선발전 통과 시 본선에는 `registration_source = advancement`인 새 Registration을 만들고, 본선 파티를 새로 제출합니다.
-- 본선 Entry는 실제 본선 대진표를 생성할 때 그 Registration에서 생성합니다.
+- 본선 Entry / EntryParticipant는 실제 본선 bracket을 생성할 때 그 Registration에서 생성합니다.
 - 선발전의 TeamSnapshot을 본선으로 복사하거나 재사용하지 않습니다.
 
 같은 Player가 두 Event에 참가하는 것은 정상이며, Player 식별자만 동일하게 유지합니다.
@@ -462,10 +463,11 @@ champ = true
 └─ 선발전에서 추가 진출자 4명 선발
 ```
 
-자동 랭킹 선발 로직은 필수 기능으로 두지 않습니다.
+참가 확정은 자동 선발 로직이 아니라 운영자 수동 확정이다.
 
 - 당시 시즌 순위와 운영 규정을 참고하여 운영자가 본선 직행자를 직접 결정합니다.
-- 선발전 참가자와 본선 진출자도 운영자가 직접 확정할 수 있습니다.
+- 선발전 참가자와 본선 진출자 모두 운영자가 마지막에 실제 참가자로 직접 확정합니다.
+- 시즌 랭킹 Top N 또는 qualifier Top N의 자동 진출을 사용하지 않으며, 불참 시 자동 차순위 승계나 substitute도 사용하지 않습니다.
 - 선발전은 `qualification_slots`에 해당하는 인원이 확정되면 종료할 수 있습니다.
 - 선발 인원은 회차별 수요와 운영 규정에 따라 달라질 수 있습니다.
 - 선발전은 반드시 1명의 최종 우승자를 만들 필요가 없습니다.
@@ -476,12 +478,16 @@ champ = true
 
 포함:
 
+- Qualifier Event / EventRegistration
 - 참가 Entry
+- EntryParticipant
 - 참가 Player
 - 제출 TeamSnapshot
+- RegistrationSubmission
 - 실제 Match
 - 승자 / 패자
-- 본선 진출 여부
+- `ChampionshipAdvancement`
+- Records의 qualifier 참가 이력
 
 선발전 Match는 **트레이너의 공식 승 / 패 경기 기록에는 포함**합니다.
 
@@ -511,9 +517,10 @@ HallOfFameEntry
 
 ## 8.4 본선 진출 관계
 
-본선 Entry가 어떤 경로로 생성되었는지는 별도 진출 관계로 기록할 수 있습니다.
+본선 진출은 `ChampionshipAdvancement`로 기록한다. 이 row는 자동 판정 결과가 아니라 운영자가 선택·확정한
+실제 진출 경로와 대상을 기록한다.
 
-권장 진출 경로:
+진출 경로:
 
 ```text
 ranking
@@ -526,23 +533,50 @@ manual
 = 기권 대체 등 운영상 예외
 ```
 
-선발전 통과자의 경우:
+advancement 확정 시:
 
 ```text
-선발전 Entry
-→ 본선 진출 관계
-→ 본선의 새 Entry
+ChampionshipAdvancement
+→ Final EventRegistration(registration_source = advancement)
+→ 실제 Final bracket 생성 시 Final Entry / EntryParticipant
 ```
 
-로 연결합니다.
+Final Entry는 advancement 확정 시 미리 만들지 않는다. `ranking`은 시즌 순위 등을 참고해 운영자가 직접
+직행 처리한 경로, `qualifier`는 Qualifier 통과를 운영자가 직접 확정한 경로, `manual`은 기권 대체 등
+운영 예외 경로다.
 
-이 관계는 **Player의 진출 경로를 설명하기 위한 기록**이며 TeamSnapshot을 연결하거나 복사하기 위한 관계가 아닙니다.
+이 관계는 **Player의 진출 경로를 설명하기 위한 기록**이며 TeamSnapshot을 연결하거나 복사하기 위한 관계가 아니다.
+
+불참으로 advancement를 취소할 때는 운영자가 기존 대상을 취소한 뒤 새 대상을 직접 등록한다. downstream
+Submission, Entry, EntryParticipant, Match, Result, RankingAward 또는 runtime state가 있으면 cascade
+delete하지 않고 취소를 거부한다(fail closed). downstream이 없는 runtime-owned Final Registration만
+안전하게 정리할 수 있으며, 기존 Player와 Qualifier source facts는 보존한다.
 
 ## 8.5 명예의 전당
 
-명예의 전당은 **챔피언스 본선 Event의 우승자만** 대상으로 합니다.
+명예의 전당은 **챔피언스 본선 Event의 champion Result가 공식 확정된 우승자만** 대상으로 합니다.
 
 선발전에서 마지막까지 남거나 본선 진출을 확정한 사실은 명예의 전당 또는 챔피언 획득으로 처리하지 않습니다.
+
+`HallOfFameEntry`의 generation source는 `competition_settings.championship.generation`이다. 기존
+`generationNumber`는 compatibility 용도로만 읽으며, YPL 시즌 3 Champions Event에는 `generation = 7`을
+명시한다. 서비스 전역 hardcoded generation default는 제거했다. 한 generation에 Singles / Doubles champion이
+각각 존재할 수 있고 battle format은 `HallOfFameEntry → Event.battle_format`으로 판별한다.
+
+신규 Champion party는 이미지 업로드가 아니라 다음 관계에서 official TeamSnapshot을 읽어 sprite로 렌더링한다.
+
+```text
+HallOfFameEntry
+→ Result
+→ Entry
+→ EntryParticipant
+→ EventRegistration.final_submission_id
+→ RegistrationSubmission
+→ TeamSnapshot
+→ TeamSnapshotMember.pokemon_id
+```
+
+기존 `image_ref`는 legacy compatibility로 유지한다. Title 자동 지급은 이 core 범위에 포함하지 않는다.
 
 ## 8.6 과거 챔피언스 데이터
 
@@ -556,7 +590,36 @@ manual
 → 원본 자료가 없으면 생성하지 않음
 ```
 
-향후 선발전 기록을 실제로 수집하기 시작한 회차부터 선발전 Event, Match, 진출 관계를 저장합니다.
+현재 구현도 이 원칙을 따른다. Qualifier의 실제 Match/winner facts와 참가 이력은 보존하되, Qualifier를
+우승·준우승·4강으로 역분류하거나 과거 자료가 없는 선발전을 추정해 만들지 않는다.
+
+## 8.7 Champions core runtime — Test 기준 완료
+
+Champions는 별도 tournament engine이 아니다. 기존 normalized competition lifecycle을 재사용하고
+Champions-specific orchestration만 추가한다. Qualifier는 `qualification_slots`만큼 advancement가
+확정되면 “본선 선발 과정 종료”로 완료하며 일반 placement apply를 수행하지 않는다.
+
+Final은 기존 normalized Event lifecycle을 사용한다.
+
+```text
+Final EventRegistration
+→ 운영자 실제 참가자 수동 확정
+→ Entry / EntryParticipant
+→ normalized bracket
+→ Match
+→ Result
+→ RankingAward
+→ final_submission_id freeze
+→ Records
+→ Event completed
+```
+
+`battle_format`과 `competition_format`은 별개다. 예를 들어 `battle_format = doubles`와
+`competition_format = single_elimination`을 함께 사용할 수 있다.
+
+Champions core의 Qualifier CRUD, 수동 advancement와 불참 취소, Final lifecycle, HOF 연결 및 official
+party relation은 Test DB smoke까지 완료했다. exhaustive browser E2E는 기능 blocker가 아니라 최종 통합
+QA로 이월한다. Production migration은 아직 수행하지 않았다.
 
 ---
 
@@ -959,6 +1022,36 @@ number = 3
 정확한 날짜를 모르는 과거 시즌은 추측하지 않고 nullable로 둔다.
 
 공식 신규 Event는 정확히 하나인 `status = current` 시즌에 자동 연결한다. current 시즌이 0개이거나 2개 이상이면 임의 선택하지 않고 생성 오류로 처리한다. 이미 `season_id`가 있는 Event를 공지에서 수정할 때는 기존 연결을 보존한다.
+
+### YPL Season 자동 전환 — 향후 확정 설계
+
+현재 자동 rollover는 구현·Production 적용 전이다. 향후 자동화 대상은 `series = ypl`이며, Browser local
+clock이나 사용자 접속 시점이 아니라 Asia/Seoul 기준 DB/server-side scheduler가 다음 boundary를 처리한다.
+
+```text
+03/01 00:00 KST → YPL Season +1
+09/01 00:00 KST → YPL Season +1
+```
+
+운영 기준 예시는 다음과 같다.
+
+```text
+YPL Season 3 → 2026-09-01 시작
+YPL Season 4 → 2027-03-01 시작
+YPL Season 5 → 2027-09-01 시작
+```
+
+- YPL series에는 항상 정확히 하나의 `status = current` Season만 존재해야 한다.
+- 기존 current 해제와 다음 Season current 활성화는 하나의 idempotent operation으로 처리한다.
+- 같은 boundary의 중복 실행에서도 Season number가 두 번 증가하지 않아야 하며, concurrent 실행에서도
+  duplicate Season을 만들지 않아야 한다.
+- 과거 Season row/number와 이미 저장된 Event의 `season_id`는 수정하지 않는다. rollover 이후 생성되는 신규
+  Event만 새 current YPL Season을 참조한다.
+- next Season row를 미리 생성해 상태만 변경하거나 boundary transaction에서 deterministic하게 생성하는 방식 중
+  기존 schema와 운영 구조에 맞는 최소 방식을 선택한다. `number`, `starts_on`, code/name convention,
+  current uniqueness, retry idempotency는 반드시 보장한다.
+- Classic historical series 등 다른 series에는 이 자동 rollover를 강제하지 않으며, 과거 날짜를 기준으로
+  Season을 재구성하거나 번호를 역산하지 않는다.
 
 ---
 
@@ -1690,6 +1783,7 @@ HallOfFameEntry
 | 공식 통산 우승·준우승·4강 | Result → EntryParticipant에서 계산 |
 | 실제 랭킹 지급값 | RankingAward |
 | 복원 불가능한 과거 랭킹 시작값 | RankingBaseline |
+| Champions 실제 진출 경로 | ChampionshipAdvancement |
 | 칭호 획득 | TitleAward |
 | 파트너 포켓몬 | PlayerPartner |
 | 챔피언 명예의 전당 | HallOfFameEntry |

@@ -2226,3 +2226,128 @@ a5ae8d9 feat: complete normalized team and double elimination runtime
 ```
 
 `a5ae8d9`는 실제 push까지 완료됐다.
+
+---
+
+## 2026-09-06 Champions core runtime
+
+`940d9b9 feat: implement champions core runtime`에서 Champions Qualifier / Final 운영을 기존
+normalized competition lifecycle 위에 연결했다. Champions는 별도 tournament engine이 아니며,
+Qualifier와 Final은 Player identity만 공유하고 다음 데이터는 독립적으로 보존한다.
+
+```text
+Champions Series N
+├─ Qualifier Event
+└─ Final Event
+```
+
+- Qualifier와 Final의 `EventRegistration`, `Entry`, `EntryParticipant`, `RegistrationSubmission`,
+  `TeamSnapshot`, `Match`, `Result`는 서로 공유하지 않는다.
+- Qualifier와 Final의 실제 참가 확정은 모두 운영자가 수동으로 처리한다. 시즌 랭킹 Top N 자동 진출,
+  qualifier Top N 자동 진출, 불참자 자동 substitute는 사용하지 않는다.
+- `ChampionshipAdvancement` source는 `ranking`, `qualifier`, `manual`이며 자동 판정 결과가 아니라
+  운영자가 선택한 실제 진출 경로다.
+- advancement 확정 시 `ChampionshipAdvancement`와
+  `Final EventRegistration(registration_source = advancement)`를 만들고, Final Entry / EntryParticipant는
+  실제 Final bracket 생성 시 만든다.
+- 불참 시 운영자가 advancement를 취소하고 대체 대상을 직접 등록한다. downstream 데이터가 있으면
+  cascade delete하지 않고 fail closed하며, 기존 Player와 Qualifier source facts를 보존한다.
+
+### Qualifier 기록 정책
+
+Qualifier는 Final 진출자를 선발하는 Event이며 최종 입상 대회가 아니다. 실제 참가와 경기는 공식 원본으로
+보존한다.
+
+보존:
+
+- Event / EventRegistration / Entry / EntryParticipant
+- RegistrationSubmission / TeamSnapshot
+- 실제 Match와 winner / loser facts
+- `ChampionshipAdvancement`
+- Records의 qualifier 참가 이력
+
+Qualifier 종료는 `qualification_slots`만큼 advancement가 확정된 뒤 “본선 선발 과정 종료”를 기록하는
+것이다. Qualifier에는 `Result`, `RankingAward`, `HallOfFameEntry`를 생성하지 않으며, 참가자를 우승·
+준우승·4강으로 강제 분류하지 않는다.
+
+### Final / Hall of Fame
+
+Final은 기존 normalized Event lifecycle을 재사용한다.
+
+```text
+Final EventRegistration
+→ 운영자 실제 참가자 수동 확정
+→ Entry / EntryParticipant
+→ normalized bracket
+→ Match
+→ Result
+→ RankingAward
+→ final_submission_id freeze
+→ Records
+→ Event completed
+```
+
+Final champion Result가 공식 확정되면 Final Event에 `HallOfFameEntry`를 연결한다. generation은
+`competition_settings.championship.generation`을 authoritative source로 사용하고, 기존
+`generationNumber`는 compatibility 용도로만 읽는다. YPL 시즌 3 Champions Event의 generation은 7이며,
+서비스 전역 hardcoded generation default는 제거됐다. 같은 generation에 Singles / Doubles champion이 각각
+존재할 수 있으며 battle format은 Event에서 판별한다.
+
+신규 Champion party는 다음 final official TeamSnapshot 관계에서 `pokemon_id`를 읽어 sprite로 렌더링한다.
+
+```text
+HallOfFameEntry
+→ Result
+→ Entry
+→ EntryParticipant
+→ EventRegistration.final_submission_id
+→ RegistrationSubmission
+→ TeamSnapshot
+→ TeamSnapshotMember.pokemon_id
+```
+
+기존 `image_ref`는 legacy compatibility로 유지한다. Title 자동 지급은 Champions core 범위에 포함하지
+않으며 후순위로 둔다.
+
+### Test 검증
+
+Production Supabase에는 접근·조회·write·migration을 수행하지 않았다. 아래는 Test schema
+`ypl_schema_validation`에서 확인한 결과다.
+
+Qualifier fixture:
+
+```text
+EventRegistration  4
+Entry              4
+EntryParticipant   4
+Match              3
+winner fact        3
+advancement        2
+```
+
+Qualifier 종료 후 `Entry 4`, `EntryParticipant 4`, `Match 3`, winner 3은 유지되고 `Result 0`,
+`RankingAward 0`, `HallOfFameEntry 0`이었다.
+
+Final 초기 advancement는 `ranking 2`, `qualifier 2`, Final Registration 4였다. ranking advancement
+1건은 불참으로 취소하고 runtime-owned Final Registration을 제거했으며 Player와 Qualifier facts는
+유지했다. manual replacement는 운영자가 직접 등록했다. 최종 advancement는 `ranking 1`, `qualifier 2`,
+`manual 1`이었다.
+
+downstream Final Entry / Submission이 존재한 advancement 취소는 P0001로 fail closed되었고 기존
+advancement와 Registration은 유지됐다.
+
+Final에서는 `Entry 4`, `EntryParticipant 4`, `Match 3`, winner fact 3, champion Result 1을 확인했다.
+Final HOF는 1건, `generation_number = 7`, duplicate 0이었고 Qualifier HOF는 0건이었다. HOF → Result →
+Entry → EntryParticipant → `final_submission_id` → RegistrationSubmission → TeamSnapshot →
+TeamSnapshotMember 관계를 Test DB에서 확인했으며 Pikachu가 resolve됐다.
+
+fixture cleanup 후 신규 fixture 데이터 잔존은 0건이었고 기존 Champions Event 6건 / HOF 6건은 유지됐다.
+
+- Champions targeted tests 5/5 PASS
+- 전체 Node tests 179/179 PASS
+- production build PASS
+- `git diff --check` PASS
+- exhaustive browser E2E는 수행하지 않았으며 최종 통합 QA로 이월
+
+다음 예정: YPL Season을 매년 3월 1일 / 9월 1일 KST 기준으로 DB에서 자동 전환하는 설계를 구현한다.
+Season rollover는 아직 구현하지 않았고, Production migration도 수행하지 않았다.

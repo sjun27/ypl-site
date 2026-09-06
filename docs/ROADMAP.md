@@ -485,9 +485,50 @@ P2-7 — Event-linked Bracket normalized cutover ✅ Test 기준 완료
 - malformed normalized runtime은 fail closed하며 historical / legacy-only bracket은 compatibility path로 유지
 - Production migration은 별도 후속 단계이며 아직 수행하지 않음
 
+P3. Champions core runtime — Test 기준 완료
+
+Champions는 별도 tournament engine이 아니라 기존 normalized competition lifecycle을 재사용하고,
+Champions-specific orchestration만 추가한다.
+
+```text
+Champions Series N
+├─ Qualifier Event
+└─ Final Event
+```
+
+- Qualifier와 Final은 Player identity만 공유하며 EventRegistration, Entry, EntryParticipant,
+  RegistrationSubmission, TeamSnapshot, Match, Result는 각각 독립적으로 보존한다.
+- Qualifier와 Final의 실제 참가자는 모두 운영자가 수동 확정한다. 시즌 랭킹 Top N, qualifier Top N,
+  불참자에 대한 자동 차순위 승계·substitute는 사용하지 않는다.
+- `ChampionshipAdvancement`의 source는 `ranking`, `qualifier`, `manual`이며 자동 판정 결과가 아니라
+  운영자가 선택·확정한 실제 진출 경로를 기록한다.
+- advancement 확정 시 `ChampionshipAdvancement`와 `Final EventRegistration(registration_source=advancement)`만
+  만들고 Final Entry는 만들지 않는다. Final Entry / EntryParticipant는 실제 Final bracket 생성 시 만든다.
+- 불참 시 기존 advancement를 운영자가 취소하고 새 대상자를 직접 등록한다. downstream Submission, Entry,
+  EntryParticipant, Match, Result, RankingAward 또는 runtime state가 있으면 cascade delete하지 않고 fail closed한다.
+  Player와 Qualifier source facts는 보존한다.
+- Qualifier는 `qualification_slots`만큼 advancement가 확정되면 종료할 수 있으며, 종료는 선발 과정 종료를
+  의미한다. Qualifier의 Event, 등록·Entry·참가자·Submission·TeamSnapshot, 실제 Match와 winner facts,
+  advancement, Records 참가 이력은 보존하지만 Result, RankingAward, HallOfFameEntry는 만들지 않는다.
+- Final은 기존 normalized Event 흐름인 `EventRegistration → Entry / EntryParticipant → Match → Result →
+  RankingAward → final_submission_id freeze → Records → Event completed`를 사용한다. `battle_format`과
+  `competition_format`은 별도 필드다.
+- Final champion Result가 공식 확정되면 `HallOfFameEntry`를 연결한다. `generation`은
+  `competition_settings.championship.generation`을 authoritative source로 사용하고, 기존
+  `generationNumber`는 compatibility 용도로만 읽는다. 서비스 전역 hardcoded generation default는 제거했으며,
+  현재 YPL 시즌 3 Champions Event 설정은 generation 7이다.
+- 신규 Champion party는 Final의 official TeamSnapshot에서 `pokemon_id`를 읽어 sprite로 렌더링하며,
+  기존 `image_ref`는 legacy compatibility로 유지한다.
+
+### Champions 검증 경계
+
+Qualifier / advancement / Final / HOF의 핵심 CRUD와 관계는 Test DB smoke까지 완료했다. Champions의
+exhaustive browser E2E는 기능 blocker가 아니라 최종 통합 QA 항목으로 이월한다. Production migration은
+수행하지 않았다.
+
 ## 다음 우선순위
 
-1. P3 Champions 운영 자동화
+1. YPL Season 자동 전환
 2. Team Builder 운영 UX / 안정화
 3. 전체 기능 통합 QA / 실제 운영자 수동 검증
 4. Production Cutover
@@ -497,13 +538,25 @@ Production Cutover와 Auth/RLS의 실제 순서는 최종 운영·코드 상황�
 2026-09-20 Team Event 일정 때문에 Team 기능이 중요했지만, P2-7 Team runtime이 Test 기준
 완료된 현재 별도 Team architecture phase는 만들지 않는다.
 
-### P3 Champions 운영 자동화 방향
+### YPL Season 자동 전환 설계 — 다음 작업
 
-- qualifier와 final은 별도 Event로 운영
-- advancement 확정 시 본선 EventRegistration 생성
-- 본선 Entry는 실제 대진표 생성 시 생성
-- 선발전 / 본선 TeamSnapshot은 독립 보존
-- 본선 결과와 HallOfFameEntry / Title 후보 연결은 이 우선순위에서 다룬다
+아직 구현하지 않은 다음 구조 변경이다. YPL series에 한해 DB/server-side scheduler가 Asia/Seoul 기준
+매년 `03/01 00:00 KST`, `09/01 00:00 KST` boundary에서 Season number를 1 증가시킨다.
+
+- 목표 예: YPL Season 3은 2026-09-01, Season 4는 2027-03-01, Season 5는 2027-09-01 시작
+- Browser local time이나 사용자 접속 시점에 의존하지 않는다.
+- YPL series에는 정확히 하나의 `current` Season만 존재해야 하며, 기존 current 해제와 다음 Season current
+  활성화를 하나의 idempotent operation으로 처리한다.
+- 같은 boundary의 중복 실행과 concurrent 실행에서도 중복 Season 생성·이중 증가가 없어야 하며, 과거 Season의
+  row·number는 수정하지 않는다.
+- 기존 Event의 `season_id`는 immutable historical fact로 보존한다. rollover 이후 신규 Event만 새 current
+  YPL Season을 참조한다.
+- 다음 Season을 미리 생성해 상태만 바꾸는 방식과 boundary transaction에서 deterministic하게 생성하는 방식 중
+  기존 schema/운영 구조에 맞는 최소 구현을 선택한다. `number`, `starts_on`, code/name convention,
+  current uniqueness, retry idempotency는 반드시 보장한다.
+- Classic 등 다른 series에는 YPL 자동 rollover를 강제하지 않으며, 과거 날짜 기준 Season 재구성도 하지 않는다.
+
+Production 적용은 아직 하지 않았다.
 
 ### Team Builder 운영 UX / 안정화 방향
 
@@ -542,6 +595,12 @@ migration 검증 완료와 실제 사이트 runtime 연결 완료는 구분한�
 Replica Team ID Import
 
 Team Builder 공식 제출 흐름까지 안정된 이후 진행한다.
+
+Title automation
+
+Champions Final champion의 HallOfFameEntry 연결까지는 완료했지만, `N대 챔피언` 칭호와 기타
+TitleDefinition / TitleAward의 AUTO / REVIEW 자동 지급은 구현하지 않았다. YPL 시즌 3의 후속 대상은
+`7대 챔피언`이며, 현재 next priority가 아닌 후순위로 유지한다.
 
 Battle Data
 
