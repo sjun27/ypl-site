@@ -2382,3 +2382,269 @@ Test advancement/HOF RPC는 현재 `SECURITY DEFINER`, 빈 `search_path`, strict
 validation 및 narrow anon `EXECUTE` 상태다. broad table mutation grant는 추가하지 않았다. 이 권한 모델은
 Production Auth/RLS cutover 전에 재검토한다. Season automatic rollover는 여전히 다음 작업이며 Production
 Supabase에는 접근·조회·write·migration을 수행하지 않았다.
+2026-09-07 Champions / HOF / bracket deletion 안정화
+
+Champions 실제 운영 흐름, Hall of Fame, bracket deletion / rollback을 정리하고 Test 환경에서 회귀 검증을 완료했다.
+
+Champions Event pair
+
+Champions 공지 1개 생성 시 다음 Event pair를 함께 만든다.
+
+Qualifier Event
+Final Event
+
+Qualifier / Final은 Player identity만 공유하고 다음 사실은 phase별로 독립 관리한다.
+
+EventRegistration
+Entry
+EntryParticipant
+RegistrationSubmission
+TeamSnapshot
+Match
+Result
+
+Qualifier는 Double Elimination, Final은 Single Elimination으로 고정한다.
+
+Pokémon battle format인 Singles / Doubles는 bracket topology와 별개이며 두 phase에 동일하게 적용된다.
+
+Qualifier 동작
+
+Qualifier는 일반 bracket처럼 진행하지만 최종 placement tournament로 취급하지 않는다.
+
+보존:
+
+실제 참가자
+Entry / EntryParticipant
+Match
+winner / loser facts
+qualifier 참가 이력
+본선 진출자
+
+생성하지 않음:
+
+champion / runner_up / semifinalist Result
+RankingAward
+HallOfFameEntry
+
+qualification_slots만큼 본선 진출자를 확정하면 Qualifier를 종료할 수 있다.
+
+본선 진출 provenance는 ChampionshipAdvancement로 기록한다.
+
+ranking: 기존 본선 직행자
+qualifier: Qualifier 통과자
+manual: 불참 대체 등 운영 예외
+Final 동작
+
+Final은 기존 normalized tournament lifecycle을 재사용한다.
+
+Final EventRegistration
+→ 참가자 확정
+→ Entry / EntryParticipant
+→ Final Team Builder 제출
+→ BracketRuntime
+→ Match
+→ Result / RankingAward
+→ final_submission_id freeze
+→ Records
+→ Champion Hall of Fame
+
+Qualifier party를 Final로 복사하지 않는다.
+
+Final party는 Final EventRegistration에 별도로 제출하고 official party는 frozen final_submission_id가 가리키는 TeamSnapshot으로 결정한다.
+
+Hall of Fame
+
+Champions Final champion에만 HallOfFameEntry를 생성한다.
+
+신규 normalized HOF의 canonical party relation:
+
+HallOfFameEntry
+→ Result
+→ Entry
+→ EntryParticipant
+→ EventRegistration.final_submission_id
+→ RegistrationSubmission
+→ TeamSnapshot
+→ TeamSnapshotMember.pokemon_id
+
+generation은 competition_settings.championship.generation을 authoritative source로 사용한다.
+
+같은 generation에 Singles / Doubles champion이 각각 존재할 수 있다.
+
+legacy image_ref는 historical compatibility용으로만 유지하고 신규 normalized champion party source로 사용하지 않는다.
+
+HOF 기록 반영 취소 수정
+
+Final 기록 반영 취소 시 기존에는 Result를 먼저 삭제해 HallOfFameEntry FK 제약으로 실패할 수 있었다.
+
+삭제 순서를 다음과 같이 수정했다.
+
+HallOfFameEntry
+→ RankingAward
+→ Result
+→ final submission freeze release
+→ Event record application revert
+
+중간 실패 시 Result / Award / HOF를 compensation restore한다.
+
+HOF는 기존 HallOfFameEntry ID까지 복원할 수 있도록 exact restore를 지원한다.
+
+11인 multi-BYE bracket 수정
+
+11명처럼 참가자 수가 power-of-two가 아닌 경우 여러 BYE가 동시에 발생하면서 downstream formed Match가 누락되는 문제가 있었다.
+
+기존 문제:
+
+BYE로 이미 양 참가자가 결정된 downstream node가 존재
+해당 Match row가 materialize되지 않음
+winner mutation 시 formed downstream Match가 누락되었습니다 오류 발생
+
+수정:
+
+BYE / unresolved future node 자체는 Match로 저장하지 않음
+BYE closure로 양 참가자가 이미 결정된 downstream node는 runtime create 시 즉시 materialize
+기존 malformed runtime은 winner mutation 과정에서 누락된 formed Match를 repair
+winner 변경 / 취소 시 영향받는 chain만 재계산
+
+Single / Double 모두 11인 regression 검증 완료.
+
+normalized bracket deletion routing 수정
+
+대진표 삭제 routing을 Pokémon battle format이 아니라 bracket topology 기준으로 변경했다.
+
+individual + single_elimination
+delete_normalized_single_bracket_runtime
+Double Elimination / Team
+delete_normalized_bracket_runtime
+
+battle format Singles / Doubles와 competition format Single / Double Elimination을 혼동하지 않도록 분리했다.
+
+Qualifier bracket 삭제 semantics 수정
+
+기존에는 Qualifier에서 본선 진출자가 확정된 상태면 bracket 삭제를 막았다.
+
+이를 실제 운영 의미에 맞게 변경했다.
+
+Qualifier bracket 삭제는 대진 생성 전 상태로 rollback하며 해당 Qualifier에서 발생한 qualifier advancement만 자동 취소한다.
+
+삭제:
+
+qualifier advancement
+해당 advancement가 생성한 Final Registration
+Qualifier Match
+BracketEntrySlot
+runtime-owned EntryParticipant
+runtime-owned Entry
+runtime-created Registration / Player
+BracketRuntime
+
+유지:
+
+ranking advancement
+manual advancement
+unrelated Final Registration
+기존 Player identity
+
+예:
+
+삭제 전:
+
+ranking 3
+manual 1
+qualifier 4
+
+삭제 후:
+
+ranking 3
+manual 1
+qualifier 0
+generic runtime FK rollback 수정
+
+generic runtime deletion에서 EntryParticipant보다 BracketIdentityChange가 먼저 FK parent를 참조하고 있어 삭제 순서 오류가 발생했다.
+
+수정 후:
+
+BracketIdentityChange snapshot
+→ Match 삭제
+→ BracketEntrySlot 삭제
+→ BracketIdentityChange 삭제
+→ EntryParticipant 삭제
+→ Entry 삭제
+→ Registration restore / delete
+→ 참조 없는 runtime-created Player 삭제
+→ BracketRuntime 삭제
+→ Event previous status 복구
+
+ownership metadata가 증명하는 runtime-owned identity만 원복한다.
+
+generic runtime create failure double rollback 방지
+
+generic runtime 생성 성공 후 후속 단계에서 실패할 경우 delete RPC가 이미 participant identity까지 rollback한다.
+
+기존 client cleanup이 이후 rollbackEventParticipantConfirmation()을 다시 호출할 수 있어 double rollback 가능성이 있었다.
+
+수정:
+
+runtime 생성 전 실패 → client participant rollback
+runtime 생성 후 실패 → runtime delete RPC만 사용
+동일 identity에 대한 중복 rollback 금지
+existing Registration submission 보존
+
+individual Single Elimination bracket 삭제에서 기존 Registration에 Submission history가 있다는 이유만으로 삭제가 차단되던 조건을 완화했다.
+
+runtime이 새로 생성한 Registration에 Submission/history가 있는 경우만 fail closed한다.
+
+기존 Registration의 Submission / TeamSnapshot은 bracket deletion과 무관한 사실이므로 보존한다.
+
+normalized bracket ghost fallback 수정
+
+normalized runtime을 삭제했는데 public.site_data / ypl_data_v4.brackets에 과거 normalized projection 사본이 남아 bracket이 다시 나타나는 문제가 있었다.
+
+원인:
+
+normalized runtime 삭제
+→ normalized list에서는 제거
+→ stale site_data.brackets 사본이 legacy fallback으로 다시 노출
+
+수정:
+
+BracketsPage legacy merge에서 projection.source = "normalized" 제외
+global save() boundary에서도 normalized bracket을 site_data.brackets에 저장하지 않음
+Test DB의 stale normalized bracket 사본 정리
+historical / legacy-only bracket만 site_data compatibility path에 유지
+Test DB cleanup
+
+Test fixture에서 stale normalized HOF / bracket 데이터를 정리했다.
+
+Production Supabase는 접근 / 조회 / write / migration하지 않았다.
+
+검증
+
+2026-09-07 기준:
+
+normalized deletion regression: 6/6 PASS
+Champions / HOF / bracket 관련 targeted regression: 25/25 PASS
+11-entry Single / Double BYE regression PASS
+Champions HOF revert compensation PASS
+Qualifier deletion Test DB smoke PASS
+production build PASS
+git diff --check PASS
+LF → CRLF 메시지는 Windows line-ending warning이며 whitespace error 없음
+
+커밋:
+
+d13e726 feat: complete champions runtime and deletion lifecycle
+
+다음 작업
+
+다음 핵심 우선순위는 YPL Season 자동 rollover다.
+
+요구사항:
+
+Asia/Seoul 기준 03/01, 09/01 자동 전환
+YPL series에 정확히 하나의 current Season 유지
+idempotent / concurrent-safe
+기존 Event.season_id는 변경하지 않음
+rollover 이후 신규 Event만 새 current Season에 연결
+Classic 등 다른 series에는 적용하지 않음
+Production 적용은 별도 cutover 단계에서 수행

@@ -682,3 +682,236 @@ future node에는 Match를 만들지 않되, 두 participant가 resolve된 downs
 Test 현재 advancement/HOF domain RPC는 `SECURITY DEFINER`, 빈 `search_path`, Event/ownership/state 검증과
 anon의 narrow `EXECUTE`를 사용한다. Production cutover/Auth-RLS 단계에서 권한 모델을 다시 검토하며,
 Production Supabase migration은 아직 수행하지 않았다. Season automatic rollover 역시 다음 작업이다.
+ROADMAP.md 추가 내용
+2026-09-07 Champions / HOF / bracket deletion 완료
+
+Champions core runtime의 실제 운영 흐름과 rollback semantics를 최종 확정했다.
+
+완료된 Champions 운영 흐름
+
+Champions 공지 1개를 만들면 내부적으로 다음 Event pair가 생성된다.
+
+Qualifier Event
+Final Event
+
+Qualifier와 Final은 Player identity만 공유하고 다음 데이터는 각각 독립적으로 관리한다.
+
+EventRegistration
+Entry
+EntryParticipant
+RegistrationSubmission
+TeamSnapshot
+Match
+Result
+
+Qualifier는 항상 Double Elimination이며, Final은 항상 Single Elimination이다.
+
+Pokémon battle format인 Singles / Doubles는 두 phase에 동일하게 적용되며 bracket topology인 competition format과 분리한다.
+
+Qualifier
+
+Qualifier는 일반적인 bracket 대회처럼 진행하지만 최종 placement tournament로 취급하지 않는다.
+
+Qualifier에서 보존하는 사실:
+
+실제 참가자
+Entry / EntryParticipant
+Match
+winner / loser facts
+Qualifier 참가 이력
+Final 진출자
+
+생성하지 않는 데이터:
+
+champion Result
+runner_up Result
+semifinalist Result
+RankingAward
+HallOfFameEntry
+
+qualification_slots만큼 운영자가 본선 진출자를 확정하면 Qualifier를 종료할 수 있다.
+
+일반적인 8인 Final 구성은 다음과 같다.
+
+기존 본선 직행자 4명
+Qualifier 통과자 4명
+
+ChampionshipAdvancement.source는 Final 진출 provenance를 표현한다.
+
+ranking: 기존 본선 직행권
+qualifier: Qualifier 통과
+manual: 불참 대체 등 운영 예외
+Final
+
+Final은 일반 normalized tournament lifecycle을 그대로 사용한다.
+
+흐름:
+
+Final EventRegistration
+→ 실제 참가자 확정
+→ Final Entry / EntryParticipant
+→ Final Team Builder 제출
+→ BracketRuntime 생성
+→ Match 진행
+→ Result / RankingAward
+→ final_submission_id freeze
+→ Records
+→ Champion Hall of Fame
+
+Qualifier party를 Final로 복사하지 않는다.
+
+Final 참가자는 Final Event에서 독립적으로 Team Builder 제출을 하고, official party는 해당 Final Registration의 최신 Submission을 final_submission_id로 freeze한다.
+
+Hall of Fame
+
+Hall of Fame은 Champions Final의 champion Result에만 연결한다.
+
+신규 normalized HOF는 다음 관계를 canonical source로 사용한다.
+
+HallOfFameEntry
+→ Result
+→ Entry
+→ EntryParticipant
+→ EventRegistration.final_submission_id
+→ RegistrationSubmission
+→ TeamSnapshot
+→ TeamSnapshotMember.pokemon_id
+
+신규 HOF에서는 legacy image_ref를 Pokémon party source of truth로 사용하지 않는다.
+
+generation은 competition_settings.championship.generation을 authoritative source로 사용한다.
+
+같은 generation에 Singles champion과 Doubles champion이 각각 존재할 수 있다.
+
+Qualifier bracket 삭제
+
+Qualifier bracket 삭제는 대진 생성 전 상태로의 rollback이다.
+
+삭제 시 해당 Qualifier에서 발생한 qualifier advancement만 자동 취소한다.
+
+따라서:
+
+qualifier advancement → 삭제
+연결된 Final advancement Registration → 삭제
+ranking advancement → 유지
+manual advancement → 유지
+
+그 후 다음 runtime-owned identity를 FK-safe 순서로 원복한다.
+
+Match
+BracketEntrySlot
+BracketIdentityChange
+EntryParticipant
+Entry
+Registration link
+runtime-created Registration
+참조되지 않는 runtime-created Player
+BracketRuntime
+
+Event status는 runtime 생성 이전 상태로 복구한다.
+
+Final bracket 삭제
+
+Final bracket 삭제는 본선 진출권 취소와 분리한다.
+
+삭제:
+
+Final Match
+Final Entry
+Final EntryParticipant
+Final BracketRuntime
+
+유지:
+
+Final EventRegistration
+ChampionshipAdvancement
+
+즉 본선 진출자 확정 후 bracket만 삭제했다가 동일 참가자로 다시 bracket을 생성할 수 있다.
+
+Final 기록 반영 취소
+
+Champions Final 기록 반영 취소는 다음 순서를 따른다.
+
+HallOfFameEntry
+→ RankingAward
+→ Result
+→ final submission freeze release
+→ Event record application revert
+
+실패 시 기존 Result / Award / HallOfFameEntry를 compensation restore한다.
+
+HallOfFameEntry는 기존 ID까지 복원 가능하게 유지한다.
+
+normalized bracket persistence 정리
+
+normalized bracket graph는 더 이상 public.site_data / ypl_data_v4.brackets에 저장하지 않는다.
+
+canonical source:
+
+BracketRuntime
+BracketEntrySlot
+Match
+pure projection
+
+global save() 경계와 BracketsPage legacy fallback 모두 projection.source = normalized bracket을 제외한다.
+
+이로써 runtime 삭제 후 stale site_data.brackets 사본이 다시 나타나는 ghost 현상을 차단했다.
+
+11인 multi-BYE 수정
+
+11명처럼 참가자 수가 power-of-two가 아닌 경우에도 BYE propagation을 정상 처리한다.
+
+BYE node는 Match로 저장하지 않음
+unresolved future node도 Match로 저장하지 않음
+BYE closure로 양 참가자가 이미 정해진 downstream node는 실제 formed Match로 즉시 생성
+기존 잘못 생성된 runtime은 winner mutation 시 누락 formed Match를 repair
+
+Single / Double 모두 회귀 검증 완료.
+
+검증 결과
+
+2026-09-07 기준:
+
+Champions / HOF / bracket 관련 targeted tests: 25/25 PASS
+production build PASS
+git diff --check PASS
+Test DB Qualifier deletion 실제 smoke PASS
+normalized bracket ghost cleanup 완료
+Production Supabase 미접근
+다음 우선순위
+
+현재 다음 작업 순서는 다음과 같다.
+
+YPL Season 자동 rollover
+Team Builder 운영 UX / 안정화
+전체 기능 통합 QA 및 운영자 수동 검증
+Production cutover
+Auth / RLS security hardening
+YPL Season 자동 rollover
+
+다음 핵심 구현 대상이다.
+
+YPL series에 한해 Asia/Seoul 기준으로:
+
+매년 03/01 00:00 KST
+매년 09/01 00:00 KST
+
+에 Season을 자동 전환한다.
+
+예상 흐름:
+
+YPL Season 3: 2026-09-01 시작
+YPL Season 4: 2027-03-01 시작
+YPL Season 5: 2027-09-01 시작
+
+요구사항:
+
+browser local time에 의존하지 않음
+exactly one current YPL Season 보장
+idempotent
+concurrent-safe
+같은 boundary 중복 실행에서도 Season 중복 생성 금지
+기존 Event.season_id 변경 금지
+rollover 이후 신규 Event만 새 current Season 연결
+Classic 등 다른 series에는 적용하지 않음
+Production 적용은 별도 cutover 단계에서 수행

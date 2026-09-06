@@ -2344,3 +2344,207 @@ RegistrationSubmission 2건, TeamSnapshot 2건, TeamSnapshotMember가 생성됐�
 Championship advancement/HOF domain RPC의 현재 Test 배포는 `SECURITY DEFINER`와 빈 `search_path`를
 사용한다. strict Event/phase/ownership/state 검증 및 narrow anon `EXECUTE`를 유지하며 broad table grant는
 추가하지 않았다. Production Auth/RLS cutover 전에 이 privilege model을 재검토한다.
+
+2026-09-07 Champions 삭제 lifecycle 및 normalized storage invariant
+
+Champions의 사용자 관점 lifecycle은 다음과 같이 고정한다.
+
+Champions 공지
+→ Qualifier Event
+→ 선발전 진행
+→ qualification_slots명 본선 진출 확정
+
+동시에:
+
+Champions 공지
+→ Final Event
+→ 기존 직행자 + Qualifier 통과자
+→ 본선 진행
+→ Result / RankingAward
+→ Champion Hall of Fame
+
+ChampionshipAdvancement의 ranking / qualifier / manual은 서로 다른 tournament mode가 아니라 Final 진출 provenance다.
+
+일반적인 8인 Final은 다음과 같이 구성한다.
+
+기존 본선 진출권 4명
+ranking
+필요 시 manual replacement
+선발전 통과자 4명
+qualifier
+
+manual은 일반적인 제3의 진출 루트가 아니라 불참자 대체 등 운영 예외를 기록하는 용도로 본다.
+
+Qualifier bracket 삭제
+
+Qualifier bracket 삭제는 단순히 화면의 bracket graph만 제거하는 작업이 아니라 대진 생성 전 상태로의 operational rollback이다.
+
+삭제 시 다음 순서를 따른다.
+
+해당 Qualifier Entry를 source_entry_id로 가진 qualifier advancement를 취소한다.
+해당 advancement가 만든 Final EventRegistration(registration_source = advancement)을 함께 취소한다.
+Qualifier의 normalized Match를 삭제한다.
+BracketEntrySlot을 삭제한다.
+BracketIdentityChange ownership metadata를 snapshot한 뒤 metadata row를 삭제한다.
+runtime이 생성한 EntryParticipant를 삭제한다.
+runtime이 생성한 Entry를 삭제한다.
+기존 Registration의 player_id를 이전 값으로 복구하거나 runtime-created Registration을 삭제한다.
+다른 사실에서 참조되지 않는 runtime-created Player만 삭제한다.
+BracketRuntime을 삭제한다.
+Event status를 runtime 생성 전 previous_event_status로 복구한다.
+
+ranking 또는 manual advancement는 Qualifier bracket에서 파생된 사실이 아니므로 Qualifier 삭제와 무관하게 보존한다.
+
+예를 들어 Final 후보가 다음과 같았다면:
+
+ranking 3
+manual 1
+qualifier 4
+
+Qualifier bracket 삭제 후에는:
+
+ranking 3
+manual 1
+qualifier 0
+
+이 canonical 상태다.
+
+Qualifier가 이미 completed 상태여도 다음 조건을 만족하면 bracket 삭제를 허용한다.
+
+event_type = champions
+championship_phase = qualifier
+record_applied_at IS NULL
+
+Qualifier는 최종 placement tournament가 아니므로 Result, RankingAward, HallOfFameEntry를 생성하지 않는다.
+
+Final bracket 삭제
+
+Final bracket 삭제는 본선 진출 자격 자체를 취소하는 작업이 아니다.
+
+따라서 Final bracket 삭제 시:
+
+삭제:
+
+Final Match
+Final Entry
+Final EntryParticipant
+BracketEntrySlot
+BracketIdentityChange
+BracketRuntime
+
+유지:
+
+Final EventRegistration
+ChampionshipAdvancement
+본선 진출 provenance
+
+즉 본선 진출자 확정과 본선 대진 생성은 서로 다른 lifecycle 단계다.
+
+Final bracket을 삭제한 뒤에도 같은 Final Registration들을 이용해 다시 참가자를 확정하고 bracket을 재생성할 수 있어야 한다.
+
+Final 기록 반영 취소
+
+Champions Final의 기록 반영 취소는 FK dependency를 고려해 다음 순서를 따른다.
+
+HallOfFameEntry 제거
+RankingAward 제거
+Result 제거
+final submission freeze 해제
+Event record application revert
+
+중간 단계에서 실패하면 이미 제거한 Result / RankingAward / HallOfFameEntry를 compensation restore한다.
+
+Hall of Fame compensation은 기존 HOF row의 identity를 보존하기 위해 원래 HallOfFameEntry.id로 복구할 수 있어야 한다.
+
+Qualifier에는 Hall of Fame을 생성하지 않는다.
+
+normalized bracket storage invariant
+
+신규 Event-linked normalized bracket의 canonical source는 다음 persistent fact다.
+
+Event
+→ BracketRuntime
+→ BracketEntrySlot
+→ Match
+→ pure bracket projection
+
+Bracket graph 자체는 canonical persistent data가 아니다.
+
+따라서 public.site_data / ypl_data_v4.brackets에는 projection.source = "normalized"인 bracket을 저장하지 않는다.
+
+애플리케이션의 global save() boundary에서 normalized bracket을 제거하며, BracketsPage의 legacy compatibility merge에서도 projection.source = "normalized"인 bracket을 제외한다.
+
+이 원칙으로 normalized runtime이 삭제된 뒤 예전에 site_data.brackets에 남은 사본이 legacy bracket처럼 다시 나타나는 ghost fallback을 방지한다.
+
+site_data.brackets에는 historical / legacy-only bracket compatibility data만 남긴다.
+
+runtime identity rollback
+
+generic Team / Double runtime 삭제도 BracketIdentityChange를 rollback ownership ledger로 사용한다.
+
+runtime deletion은 runtime artifact만 제거하는 것이 아니라, ownership metadata가 명확하게 증명하는 경우에 한해 다음 domain identity를 원복한다.
+
+runtime-created EntryParticipant
+runtime-created Entry
+runtime-created Registration
+runtime이 변경한 기존 Registration.player_id
+runtime-created Player
+
+기존 Player 또는 다른 Event / Result / RankingAward / HallOfFameEntry 등에서 사용 중인 Player는 삭제하지 않는다.
+
+ownership이 불명확하거나 exact-match가 깨진 상태에서는 자동 정리하지 않고 fail closed한다.
+
+generic runtime create failure compensation
+
+Team / Double runtime 생성 과정은 다음 두 구간으로 구분한다.
+
+participant confirmation 성공, runtime 생성 전 실패
+client의 rollbackEventParticipantConfirmation()으로 원복
+runtime 생성 성공 후 후속 단계 실패
+delete_normalized_bracket_runtime()이 participant identity까지 atomic rollback
+
+runtime delete RPC가 성공한 뒤 client에서 participant confirmation rollback을 다시 수행하지 않는다.
+
+이를 통해 double rollback을 방지한다.
+
+11인 multi-BYE materialization
+
+Single / Double bracket에서 BYE 또는 unresolved future node 자체를 Match row로 저장하지 않는다.
+
+하지만 BYE closure에 의해 downstream node의 양쪽 participant가 이미 확정된 경우 해당 node는 실제 formed Match이므로 runtime create 시 즉시 materialize한다.
+
+기존 runtime에서 이 Match가 누락된 경우 winner mutation 경로에서 안전하게 repair할 수 있다.
+
+이 정책으로 11인 bracket처럼 여러 BYE가 동시에 발생하는 non-power-of-two 참가자 수에서도 winner 변경 / 취소 / advancement가 정상 동작한다.
+
+2026-09-07 검증 상태
+
+Champions / HOF / bracket deletion 관련 targeted regression:
+
+25 tests
+25 PASS
+
+검증 범위:
+
+11인 Single multi-BYE
+11인 Double multi-BYE
+Champions Qualifier / Final Event pair
+advancement lifecycle
+Final HOF 생성
+HOF revert compensation
+individual Single Elimination runtime deletion
+completed Champions Qualifier deletion
+qualifier-derived advancement 자동 취소
+ranking / manual advancement 보존
+FK-safe identity rollback
+generic runtime create failure double-rollback 방지
+normalized bracket의 site_data ghost 재발 방지
+
+추가 검증:
+
+production build PASS
+git diff --check PASS
+LF → CRLF 메시지는 Windows working-copy line-ending warning이며 whitespace error는 없음
+Test Supabase에서 Qualifier deletion 실제 smoke PASS
+
+Production Supabase migration / read / write는 수행하지 않았다.
